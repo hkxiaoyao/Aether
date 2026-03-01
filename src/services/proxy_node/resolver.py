@@ -16,8 +16,8 @@ from urllib.parse import quote, urlparse
 
 import httpx
 
-from src.config import config
 from src.core.exceptions import ProxyNodeUnavailableError
+from src.core.http_compression import is_gzip_content_encoding
 from src.core.logger import logger
 
 # ---------------------------------------------------------------------------
@@ -620,9 +620,10 @@ def resolve_delegate_config(proxy_config: dict[str, Any] | None) -> dict[str, An
 def _maybe_compress_payload(
     payload: Any,
     headers: dict[str, str],
+    client_content_encoding: str | None = None,
 ) -> tuple[bytes, dict[str, str]]:
     """
-    将 payload 序列化为 JSON bytes，按配置决定是否 gzip 压缩。
+    将 payload 序列化为 JSON bytes，并按客户端请求行为决定是否 gzip 压缩。
 
     NOTE: 使用紧凑分隔符 ``(",", ":")`` 序列化（无空格），相比 httpx ``json=``
     参数的默认 ``json.dumps``（带空格分隔符）体积更小，所有上游 API 均兼容。
@@ -631,14 +632,14 @@ def _maybe_compress_payload(
         (body_bytes, updated_headers)
     """
     json_bytes = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    normalized_headers = {k: v for k, v in headers.items() if k.lower() != "content-encoding"}
 
-    if config.enable_request_compression and len(json_bytes) >= config.request_compression_min_size:
+    if is_gzip_content_encoding(client_content_encoding):
         compressed = gzip.compress(json_bytes, compresslevel=6)
-        if len(compressed) < len(json_bytes):
-            headers = {**headers, "Content-Encoding": "gzip"}
-            return compressed, headers
+        normalized_headers = {**normalized_headers, "Content-Encoding": "gzip"}
+        return compressed, normalized_headers
 
-    return json_bytes, headers
+    return json_bytes, normalized_headers
 
 
 def build_post_kwargs(
@@ -648,6 +649,7 @@ def build_post_kwargs(
     headers: dict[str, str],
     payload: Any,
     timeout: float,
+    client_content_encoding: str | None = None,
     refresh_auth: bool = False,
 ) -> dict[str, Any]:
     """
@@ -658,7 +660,11 @@ def build_post_kwargs(
     ``_delegate_cfg`` 和 ``refresh_auth`` 已废弃（tunnel 模式下认证由 transport 层处理），
     保留仅为兼容现有调用方签名。
     """
-    content, final_headers = _maybe_compress_payload(payload, headers)
+    content, final_headers = _maybe_compress_payload(
+        payload,
+        headers,
+        client_content_encoding=client_content_encoding,
+    )
     return {
         "url": url,
         "content": content,
@@ -674,6 +680,7 @@ def build_stream_kwargs(
     headers: dict[str, str],
     payload: Any,
     timeout: float | None = None,
+    client_content_encoding: str | None = None,
 ) -> dict[str, Any]:
     """
     构建上游 stream 请求的 httpx kwargs
@@ -683,7 +690,11 @@ def build_stream_kwargs(
 
     ``_delegate_cfg`` 已废弃，保留仅为兼容现有调用方签名。
     """
-    content, final_headers = _maybe_compress_payload(payload, headers)
+    content, final_headers = _maybe_compress_payload(
+        payload,
+        headers,
+        client_content_encoding=client_content_encoding,
+    )
     kwargs: dict[str, Any] = {
         "method": "POST",
         "url": url,
