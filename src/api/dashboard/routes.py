@@ -374,8 +374,8 @@ class AdminDashboardStatsAdapter(AdminApiAdapter):
         if monthly_stats and monthly_stats.total_requests:
             total_requests = int(monthly_stats.total_requests or 0) + requests_today
             error_requests = int(monthly_stats.error_requests or 0) + today_stats["error_requests"]
-            total_cost = float(monthly_stats.total_cost or 0) + cost_today
-            total_actual_cost = float(monthly_stats.actual_total_cost or 0) + actual_cost_today
+            total_cost = float(monthly_stats.total_cost or 0) + float(cost_today)
+            total_actual_cost = float(monthly_stats.actual_total_cost or 0) + float(actual_cost_today)
             total_tokens = int(monthly_stats.total_tokens or 0) + tokens_today
             cache_creation_tokens = (
                 int(monthly_stats.cache_creation_tokens or 0) + cache_creation_today
@@ -1197,7 +1197,7 @@ class DashboardDailyStatsAdapter(DashboardAdapter):
                     + stat.output_tokens
                     + stat.cache_creation_tokens
                     + stat.cache_read_tokens,
-                    "cost": stat.total_cost,
+                    "cost": float(stat.total_cost or 0),
                     "avg_response_time": (
                         stat.avg_response_time_ms / 1000.0 if stat.avg_response_time_ms else 0
                     ),
@@ -1239,7 +1239,7 @@ class DashboardDailyStatsAdapter(DashboardAdapter):
                         + today_stats["cache_creation_tokens"]
                         + today_stats["cache_read_tokens"]
                     ),
-                    "cost": today_stats["total_cost"],
+                    "cost": float(today_stats["total_cost"]),
                     "avg_response_time": today_avg_rt_ms / 1000.0 if today_avg_rt_ms else 0,
                     "unique_models": today_unique_models,
                     "unique_providers": today_unique_providers,
@@ -1383,10 +1383,10 @@ class DashboardDailyStatsAdapter(DashboardAdapter):
                     + stat.cache_read_tokens
                 )
                 model_agg[model]["tokens"] += tokens
-                model_agg[model]["cost"] += stat.total_cost
+                model_agg[model]["cost"] += float(stat.total_cost or 0)
                 if stat.avg_response_time_ms is not None:
                     model_agg[model]["total_response_time"] += (
-                        stat.avg_response_time_ms * stat.total_requests
+                        float(stat.avg_response_time_ms) * stat.total_requests
                     )
                     model_agg[model]["response_count"] += stat.total_requests
 
@@ -1402,7 +1402,7 @@ class DashboardDailyStatsAdapter(DashboardAdapter):
                         "model": model,
                         "requests": stat.total_requests,
                         "tokens": tokens,
-                        "cost": stat.total_cost,
+                        "cost": float(stat.total_cost or 0),
                     }
                 )
 
@@ -1571,7 +1571,7 @@ class DashboardDailyStatsAdapter(DashboardAdapter):
                     + stat.cache_read_tokens
                 )
                 provider_agg[provider]["tokens"] += tokens
-                provider_agg[provider]["cost"] += stat.total_cost
+                provider_agg[provider]["cost"] += float(stat.total_cost or 0)
 
             # 今日实时供应商统计
             today_provider_stats = (
