@@ -531,8 +531,15 @@ class MaintenanceScheduler:
                 timeout_minutes = SystemConfigService.get_config(
                     db, "pending_request_timeout_minutes", 10
                 )
+                # pending 清理涉及 candidate 表关联查询，限制批次大小以控制内存
+                batch_size = min(
+                    max(SystemConfigService.get_config(db, "cleanup_batch_size", 1000), 1),
+                    200,
+                )
                 return UsageService.cleanup_stale_pending_requests(
-                    db, timeout_minutes=timeout_minutes
+                    db,
+                    timeout_minutes=timeout_minutes,
+                    batch_size=batch_size,
                 )
             except Exception as e:
                 logger.exception(f"清理 pending 请求失败: {e}")
@@ -929,7 +936,7 @@ class MaintenanceScheduler:
 
         total_compressed = 0
         no_progress_count = 0
-        processed_ids: set = set()
+        memory_safe_batch_size = max(1, min(batch_size, 100))
 
         while True:
             batch_db = create_session()
@@ -949,7 +956,7 @@ class MaintenanceScheduler:
                         | (Usage.provider_request_body.isnot(None))
                         | (Usage.client_response_body.isnot(None))
                     )
-                    .limit(batch_size)
+                    .limit(memory_safe_batch_size)
                     .all()
                 )
 
@@ -983,15 +990,6 @@ class MaintenanceScheduler:
                     batch_db.commit()
                     continue
 
-                current_ids = {r.id for r in valid_records}
-                repeated_ids = current_ids & processed_ids
-                if repeated_ids:
-                    logger.error(
-                        f"检测到重复处理的记录 ID: {list(repeated_ids)[:5]}...，"
-                        "说明数据库更新未生效，终止循环"
-                    )
-                    break
-
                 batch_success = 0
 
                 for r in valid_records:
@@ -1021,10 +1019,10 @@ class MaintenanceScheduler:
                                     else None
                                 ),
                             )
+                            .execution_options(synchronize_session=False)
                         )
                         if result.rowcount > 0:
                             batch_success += 1
-                            processed_ids.add(r.id)
                     except Exception as e:
                         logger.warning(f"压缩记录 {r.id} 失败: {e}")
                         continue
