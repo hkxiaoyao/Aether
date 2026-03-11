@@ -29,6 +29,36 @@ class DummyQuery:
         return self._result[0] if self._result else None
 
 
+def test_increment_provider_api_key_totals_refreshes_last_used_at_on_zero_delta() -> None:
+    db = MagicMock()
+
+    recording_module._increment_provider_api_key_totals(
+        db,
+        "provider-key-zero-delta",
+        total_tokens=0,
+        total_cost=0.0,
+    )
+
+    db.execute.assert_called_once()
+    stmt = db.execute.call_args.args[0]
+    sql = str(stmt)
+    assert "last_used_at" in sql
+    assert "updated_at" in sql
+
+
+def test_increment_provider_api_key_totals_skips_when_key_id_missing() -> None:
+    db = MagicMock()
+
+    recording_module._increment_provider_api_key_totals(
+        db,
+        None,
+        total_tokens=100,
+        total_cost=1.0,
+    )
+
+    db.execute.assert_not_called()
+
+
 @pytest.mark.asyncio
 async def test_record_usage_updates_provider_key_totals(monkeypatch: Any) -> None:
     db = MagicMock()

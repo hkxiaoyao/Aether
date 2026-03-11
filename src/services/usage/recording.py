@@ -97,19 +97,20 @@ def _increment_provider_api_key_totals(
     total_tokens: int = 0,
     total_cost: float = 0.0,
 ) -> None:
-    """原子递增 ProviderAPIKey 的累计 Token/成本。"""
+    """原子更新 ProviderAPIKey 统计并刷新最后使用时间。"""
     if not provider_api_key_id:
         return
 
+    from sqlalchemy import func as sql_func
     token_increment = int(total_tokens or 0)
     cost_increment = to_money_decimal(total_cost)
 
-    if token_increment <= 0 and cost_increment <= 0:
-        return
-
     from sqlalchemy import update
 
-    values: dict[str, Any] = {}
+    values: dict[str, Any] = {
+        "last_used_at": sql_func.now(),
+        "updated_at": sql_func.now(),
+    }
     if token_increment > 0:
         values["total_tokens"] = ProviderAPIKey.total_tokens + token_increment
     if cost_increment > 0:
