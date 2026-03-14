@@ -308,9 +308,6 @@ class ClaudeCodeAdvancedConfig(BaseModel):
     session_idle_timeout_minutes: int | None = Field(
         None, ge=1, le=1440, description="会话空闲超时（分钟）"
     )
-    enable_tls_fingerprint: bool = Field(
-        False, description="是否启用 TLS 指纹模拟（模拟 Node.js/Claude Code 客户端）"
-    )
     session_id_masking_enabled: bool = Field(
         False, description="是否启用会话 ID 伪装（固定 metadata.user_id 中 session 片段）"
     )
