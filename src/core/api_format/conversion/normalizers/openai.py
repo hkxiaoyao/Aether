@@ -216,6 +216,7 @@ class OpenAINormalizer(FormatNormalizer):
                 budget_tokens=REASONING_EFFORT_TO_THINKING_BUDGET[reasoning_effort],
                 extra={"reasoning_effort": reasoning_effort},
             )
+            extra["reasoning_effort"] = reasoning_effort
 
         # web_search_options 存入 extra 供目标 normalizer 使用
         web_search_options = request.get("web_search_options")
@@ -344,6 +345,7 @@ class OpenAINormalizer(FormatNormalizer):
             result["tool_choice"] = self._tool_choice_to_openai(internal.tool_choice)
 
         # thinking -> reasoning_effort
+        effort: str | None = None
         if internal.thinking and internal.thinking.enabled:
             effort = internal.thinking.extra.get("reasoning_effort")
             if not effort and internal.thinking.budget_tokens is not None:
@@ -351,8 +353,14 @@ class OpenAINormalizer(FormatNormalizer):
                     if internal.thinking.budget_tokens <= threshold:
                         effort = level
                         break
-            if effort:
-                result["reasoning_effort"] = effort
+        # 兜底: 从 internal.extra 读取 (支持 output_config.effort 独立于 thinking 的场景)
+        if not effort and internal.extra:
+            effort = internal.extra.get("reasoning_effort")
+        if effort:
+            # OpenAI Chat Completions 仅支持 low/medium/high，xhigh 降级为 high
+            if effort == "xhigh":
+                effort = "high"
+            result["reasoning_effort"] = effort
 
         # parallel_tool_calls
         if internal.parallel_tool_calls is not None:
