@@ -279,6 +279,15 @@ pub struct StoredProviderUsageSummary {
     pub total_cost_usd: f64,
 }
 
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+pub struct StoredProviderApiKeyUsageSummary {
+    pub provider_api_key_id: String,
+    pub request_count: u64,
+    pub total_tokens: u64,
+    pub total_cost_usd: f64,
+    pub last_used_at_unix_secs: Option<u64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct UsageAuditListQuery {
     pub created_from_unix_secs: Option<u64>,
@@ -315,6 +324,14 @@ pub trait UsageReadRepository: Send + Sync {
         &self,
         api_key_ids: &[String],
     ) -> Result<std::collections::BTreeMap<String, u64>, crate::DataLayerError>;
+
+    async fn summarize_usage_by_provider_api_key_ids(
+        &self,
+        provider_api_key_ids: &[String],
+    ) -> Result<
+        std::collections::BTreeMap<String, StoredProviderApiKeyUsageSummary>,
+        crate::DataLayerError,
+    >;
 
     async fn summarize_provider_usage_since(
         &self,

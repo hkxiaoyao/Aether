@@ -4,8 +4,9 @@ use std::sync::RwLock;
 use async_trait::async_trait;
 
 use super::{
-    StoredProviderUsageSummary, StoredProviderUsageWindow, StoredRequestUsageAudit,
-    UpsertUsageRecord, UsageAuditListQuery, UsageReadRepository, UsageWriteRepository,
+    StoredProviderApiKeyUsageSummary, StoredProviderUsageSummary, StoredProviderUsageWindow,
+    StoredRequestUsageAudit, UpsertUsageRecord, UsageAuditListQuery, UsageReadRepository,
+    UsageWriteRepository,
 };
 use crate::DataLayerError;
 
@@ -163,6 +164,46 @@ impl UsageReadRepository for InMemoryUsageReadRepository {
             *entry = (*entry).saturating_add(item.total_tokens);
         }
         Ok(totals)
+    }
+
+    async fn summarize_usage_by_provider_api_key_ids(
+        &self,
+        provider_api_key_ids: &[String],
+    ) -> Result<BTreeMap<String, StoredProviderApiKeyUsageSummary>, DataLayerError> {
+        let provider_api_key_id_set = provider_api_key_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        let mut summaries = BTreeMap::<String, StoredProviderApiKeyUsageSummary>::new();
+        for item in self
+            .by_request_id
+            .read()
+            .expect("usage repository lock")
+            .values()
+        {
+            let Some(provider_api_key_id) = item.provider_api_key_id.as_deref() else {
+                continue;
+            };
+            if !provider_api_key_id_set.contains(&provider_api_key_id) {
+                continue;
+            }
+            let entry = summaries
+                .entry(provider_api_key_id.to_string())
+                .or_insert_with(|| StoredProviderApiKeyUsageSummary {
+                    provider_api_key_id: provider_api_key_id.to_string(),
+                    ..StoredProviderApiKeyUsageSummary::default()
+                });
+            entry.request_count = entry.request_count.saturating_add(1);
+            entry.total_tokens = entry.total_tokens.saturating_add(item.total_tokens);
+            entry.total_cost_usd += item.total_cost_usd;
+            entry.last_used_at_unix_secs = Some(
+                entry
+                    .last_used_at_unix_secs
+                    .unwrap_or(0)
+                    .max(item.created_at_unix_secs),
+            );
+        }
+        Ok(summaries)
     }
 
     async fn summarize_provider_usage_since(

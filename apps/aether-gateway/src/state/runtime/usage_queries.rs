@@ -65,6 +65,19 @@ impl AppState {
             .map_err(|err| GatewayError::Internal(err.to_string()))
     }
 
+    pub(crate) async fn summarize_usage_by_provider_api_key_ids(
+        &self,
+        provider_api_key_ids: &[String],
+    ) -> Result<
+        std::collections::BTreeMap<String, usage::StoredProviderApiKeyUsageSummary>,
+        GatewayError,
+    > {
+        self.data
+            .summarize_usage_by_provider_api_key_ids(provider_api_key_ids)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
     pub(crate) async fn list_users_by_ids(
         &self,
         user_ids: &[String],

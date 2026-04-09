@@ -4,8 +4,8 @@ use sqlx::{PgPool, Postgres, QueryBuilder, Row};
 use uuid::Uuid;
 
 use super::{
-    StoredProviderUsageSummary, StoredRequestUsageAudit, UpsertUsageRecord, UsageAuditListQuery,
-    UsageReadRepository, UsageWriteRepository,
+    StoredProviderApiKeyUsageSummary, StoredProviderUsageSummary, StoredRequestUsageAudit,
+    UpsertUsageRecord, UsageAuditListQuery, UsageReadRepository, UsageWriteRepository,
 };
 use crate::postgres::PostgresTransactionRunner;
 use crate::{error::SqlxResultExt, DataLayerError};
@@ -152,6 +152,27 @@ FROM "usage"
 WHERE api_key_id = ANY($1::TEXT[])
 GROUP BY api_key_id
 ORDER BY api_key_id ASC
+"#;
+
+const SUMMARIZE_USAGE_BY_PROVIDER_API_KEY_IDS_SQL: &str = r#"
+SELECT
+  provider_api_key_id,
+  COUNT(*)::BIGINT AS request_count,
+  COALESCE(
+    SUM(
+      COALESCE(
+        total_tokens,
+        COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)
+      )
+    ),
+    0
+  ) AS total_tokens,
+  COALESCE(CAST(SUM(total_cost_usd) AS DOUBLE PRECISION), 0) AS total_cost_usd,
+  CAST(EXTRACT(EPOCH FROM MAX(created_at)) AS BIGINT) AS last_used_at_unix_secs
+FROM "usage"
+WHERE provider_api_key_id = ANY($1::TEXT[])
+GROUP BY provider_api_key_id
+ORDER BY provider_api_key_id ASC
 "#;
 
 const LIST_USAGE_AUDITS_PREFIX: &str = r#"
@@ -645,6 +666,76 @@ impl SqlxUsageReadRepository {
         Ok(totals)
     }
 
+    pub async fn summarize_usage_by_provider_api_key_ids(
+        &self,
+        provider_api_key_ids: &[String],
+    ) -> Result<std::collections::BTreeMap<String, StoredProviderApiKeyUsageSummary>, DataLayerError>
+    {
+        if provider_api_key_ids.is_empty() {
+            return Ok(std::collections::BTreeMap::new());
+        }
+
+        let rows = sqlx::query(SUMMARIZE_USAGE_BY_PROVIDER_API_KEY_IDS_SQL)
+            .bind(provider_api_key_ids)
+            .fetch_all(&self.pool)
+            .await
+            .map_postgres_err()?;
+
+        let mut summaries = std::collections::BTreeMap::new();
+        for row in rows {
+            let provider_api_key_id: String =
+                row.try_get("provider_api_key_id").map_postgres_err()?;
+            let request_count = row
+                .try_get::<i64, _>("request_count")
+                .map_postgres_err()?
+                .try_into()
+                .map_err(|_| {
+                    DataLayerError::UnexpectedValue(
+                        "usage.request_count aggregate is negative".to_string(),
+                    )
+                })?;
+            let total_tokens = row
+                .try_get::<i64, _>("total_tokens")
+                .map_postgres_err()?
+                .try_into()
+                .map_err(|_| {
+                    DataLayerError::UnexpectedValue(
+                        "usage.total_tokens aggregate is negative".to_string(),
+                    )
+                })?;
+            let total_cost_usd: f64 = row.try_get("total_cost_usd").map_postgres_err()?;
+            if !total_cost_usd.is_finite() {
+                return Err(DataLayerError::UnexpectedValue(
+                    "usage.total_cost_usd aggregate is not finite".to_string(),
+                ));
+            }
+            let last_used_at_unix_secs = row
+                .try_get::<Option<i64>, _>("last_used_at_unix_secs")
+                .map_postgres_err()?
+                .map(|value| {
+                    value.try_into().map_err(|_| {
+                        DataLayerError::UnexpectedValue(
+                            "usage.last_used_at_unix_secs aggregate is negative".to_string(),
+                        )
+                    })
+                })
+                .transpose()?;
+
+            summaries.insert(
+                provider_api_key_id.clone(),
+                StoredProviderApiKeyUsageSummary {
+                    provider_api_key_id,
+                    request_count,
+                    total_tokens,
+                    total_cost_usd,
+                    last_used_at_unix_secs,
+                },
+            );
+        }
+
+        Ok(summaries)
+    }
+
     pub async fn upsert(
         &self,
         usage: UpsertUsageRecord,
@@ -760,6 +851,14 @@ impl UsageReadRepository for SqlxUsageReadRepository {
         api_key_ids: &[String],
     ) -> Result<std::collections::BTreeMap<String, u64>, DataLayerError> {
         Self::summarize_total_tokens_by_api_key_ids(self, api_key_ids).await
+    }
+
+    async fn summarize_usage_by_provider_api_key_ids(
+        &self,
+        provider_api_key_ids: &[String],
+    ) -> Result<std::collections::BTreeMap<String, StoredProviderApiKeyUsageSummary>, DataLayerError>
+    {
+        Self::summarize_usage_by_provider_api_key_ids(self, provider_api_key_ids).await
     }
 
     async fn summarize_provider_usage_since(
@@ -973,6 +1072,14 @@ mod tests {
     fn usage_sql_summarizes_tokens_by_api_key_ids_in_database() {
         assert!(super::SUMMARIZE_TOTAL_TOKENS_BY_API_KEY_IDS_SQL.contains("GROUP BY api_key_id"));
         assert!(super::SUMMARIZE_TOTAL_TOKENS_BY_API_KEY_IDS_SQL.contains("ANY($1::TEXT[])"));
+    }
+
+    #[test]
+    fn usage_sql_summarizes_usage_by_provider_api_key_ids_in_database() {
+        assert!(super::SUMMARIZE_USAGE_BY_PROVIDER_API_KEY_IDS_SQL
+            .contains("GROUP BY provider_api_key_id"));
+        assert!(super::SUMMARIZE_USAGE_BY_PROVIDER_API_KEY_IDS_SQL.contains("MAX(created_at)"));
+        assert!(super::SUMMARIZE_USAGE_BY_PROVIDER_API_KEY_IDS_SQL.contains("ANY($1::TEXT[])"));
     }
 
     #[test]
