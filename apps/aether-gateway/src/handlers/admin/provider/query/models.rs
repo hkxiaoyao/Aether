@@ -330,14 +330,9 @@ pub(crate) async fn build_admin_provider_query_models_response(
     let mut cache_hit_count = 0usize;
     let mut fetch_count = 0usize;
     for key in active_keys {
-        let result = provider_query_fetch_models_for_key(
-            state,
-            &provider,
-            &endpoints,
-            key,
-            force_refresh,
-        )
-        .await?;
+        let result =
+            provider_query_fetch_models_for_key(state, &provider, &endpoints, key, force_refresh)
+                .await?;
         all_models.extend(result.models);
         if let Some(error) = result.error {
             all_errors.push(format!(
