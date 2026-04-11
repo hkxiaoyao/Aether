@@ -2,6 +2,7 @@ use super::{
     build_auth_error_response, query_param_value, resolve_authenticated_local_user, AppState,
     GatewayError, GatewayPublicRequestContext,
 };
+use aether_billing::normalize_total_input_context_for_cache_hit_rate;
 use aether_data_contracts::repository::usage::{StoredRequestUsageAudit, UsageAuditListQuery};
 use axum::{
     body::Body,
@@ -28,6 +29,7 @@ struct DashboardUsageTotals {
     total_tokens: u64,
     cache_creation_tokens: u64,
     cache_read_tokens: u64,
+    cache_hit_total_input_context: u64,
     cache_creation_cost_usd: f64,
     cache_read_cost_usd: f64,
     total_cost_usd: f64,
@@ -69,12 +71,14 @@ pub(super) fn decision_route_kind(request_context: &GatewayPublicRequestContext)
 
 impl DashboardUsageTotals {
     fn record(&mut self, item: &StoredRequestUsageAudit) {
+        let cache_creation_tokens = dashboard_cache_creation_tokens(item);
         self.requests += 1;
         self.input_tokens += item.input_tokens;
         self.output_tokens += item.output_tokens;
         self.total_tokens += item.total_tokens;
-        self.cache_creation_tokens += item.cache_creation_input_tokens;
+        self.cache_creation_tokens += cache_creation_tokens;
         self.cache_read_tokens += item.cache_read_input_tokens;
+        self.cache_hit_total_input_context += dashboard_total_input_context(item);
         self.cache_creation_cost_usd += item.cache_creation_cost_usd;
         self.cache_read_cost_usd += item.cache_read_cost_usd;
         self.total_cost_usd += item.total_cost_usd;
@@ -102,13 +106,43 @@ impl DashboardUsageTotals {
     }
 
     fn cache_hit_rate(&self) -> f64 {
-        let total_cache_tokens = self.cache_creation_tokens + self.cache_read_tokens;
-        if total_cache_tokens == 0 {
+        if self.cache_hit_total_input_context == 0 {
             0.0
         } else {
-            dashboard_round_f64(self.cache_read_tokens as f64 / total_cache_tokens as f64, 4)
+            dashboard_round_f64(
+                self.cache_read_tokens as f64 / self.cache_hit_total_input_context as f64 * 100.0,
+                2,
+            )
         }
     }
+}
+
+fn dashboard_cache_creation_tokens(item: &StoredRequestUsageAudit) -> u64 {
+    let classified = item
+        .cache_creation_ephemeral_5m_input_tokens
+        .saturating_add(item.cache_creation_ephemeral_1h_input_tokens);
+    if item.cache_creation_input_tokens == 0 && classified > 0 {
+        classified
+    } else {
+        item.cache_creation_input_tokens
+    }
+}
+
+fn dashboard_total_input_context(item: &StoredRequestUsageAudit) -> u64 {
+    let api_format = item
+        .endpoint_api_format
+        .as_deref()
+        .or(item.api_format.as_deref());
+    let input_tokens = i64::try_from(item.input_tokens).unwrap_or(i64::MAX);
+    let cache_creation_tokens =
+        i64::try_from(dashboard_cache_creation_tokens(item)).unwrap_or(i64::MAX);
+    let cache_read_tokens = i64::try_from(item.cache_read_input_tokens).unwrap_or(i64::MAX);
+    normalize_total_input_context_for_cache_hit_rate(
+        api_format,
+        input_tokens,
+        cache_creation_tokens,
+        cache_read_tokens,
+    ) as u64
 }
 
 fn dashboard_round_f64(value: f64, decimals: u32) -> f64 {
