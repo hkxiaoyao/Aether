@@ -8,7 +8,7 @@ use tracing::{error, info, warn};
 
 static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 static BASELINE_V2_SQL: &str = include_str!("../bootstrap/20260413020000_baseline_v2.sql");
-const BASELINE_V2_CUTOFF_VERSION: i64 = 20260413020000;
+const BASELINE_V2_CUTOFF_VERSION: i64 = 20260413030000;
 const MIGRATIONS_TABLE_EXISTS_SQL: &str =
     "SELECT to_regclass('public._sqlx_migrations') IS NOT NULL";
 const EMPTY_DATABASE_USER_TABLE_COUNT_SQL: &str = r#"
@@ -404,6 +404,7 @@ mod tests {
                 20260406000000,
                 20260410000000,
                 20260413020000,
+                20260413030000,
             ]
         );
     }
@@ -425,27 +426,47 @@ mod tests {
 
     #[test]
     fn deprecation_migration_and_baseline_mark_legacy_usage_columns() {
-        let migration = MIGRATOR
+        let settlement_migration = MIGRATOR
             .iter()
             .find(|migration| migration.version == 20260413020000)
             .expect("deprecation migration should be embedded");
+        let http_migration = MIGRATOR
+            .iter()
+            .find(|migration| migration.version == 20260413030000)
+            .expect("http/body deprecation migration should be embedded");
 
-        assert!(migration
+        assert!(settlement_migration
             .sql
             .contains("COMMENT ON COLUMN public.usage.output_price_per_1m"));
-        assert!(migration
+        assert!(settlement_migration
             .sql
             .contains("COMMENT ON COLUMN public.usage.wallet_id"));
-        assert!(migration
+        assert!(settlement_migration
             .sql
             .contains("COMMENT ON COLUMN public.usage.username"));
-        assert!(migration
+        assert!(settlement_migration
             .sql
             .contains("COMMENT ON COLUMN public.usage.api_key_name"));
+        assert!(http_migration
+            .sql
+            .contains("COMMENT ON COLUMN public.usage.request_headers"));
+        assert!(http_migration
+            .sql
+            .contains("COMMENT ON COLUMN public.usage.request_body"));
+        assert!(http_migration
+            .sql
+            .contains("COMMENT ON COLUMN public.usage.billing_status"));
+        assert!(http_migration
+            .sql
+            .contains("COMMENT ON COLUMN public.usage.finalized_at"));
         assert!(BASELINE_V2_SQL.contains("COMMENT ON COLUMN public.usage.output_price_per_1m"));
         assert!(BASELINE_V2_SQL.contains("COMMENT ON COLUMN public.usage.wallet_id"));
         assert!(BASELINE_V2_SQL.contains("COMMENT ON COLUMN public.usage.username"));
         assert!(BASELINE_V2_SQL.contains("COMMENT ON COLUMN public.usage.api_key_name"));
+        assert!(BASELINE_V2_SQL.contains("COMMENT ON COLUMN public.usage.request_headers"));
+        assert!(BASELINE_V2_SQL.contains("COMMENT ON COLUMN public.usage.request_body"));
+        assert!(BASELINE_V2_SQL.contains("COMMENT ON COLUMN public.usage.billing_status"));
+        assert!(BASELINE_V2_SQL.contains("COMMENT ON COLUMN public.usage.finalized_at"));
     }
 
     #[test]
@@ -472,7 +493,10 @@ mod tests {
             .map(|migration| migration.version)
             .collect::<Vec<_>>();
 
-        assert_eq!(pending_versions, vec![20260410000000, 20260413020000]);
+        assert_eq!(
+            pending_versions,
+            vec![20260410000000, 20260413020000, 20260413030000]
+        );
     }
 
     #[test]

@@ -49,7 +49,7 @@ cp .env.example .env
 docker compose pull && docker compose up -d
 
 # 4. 如果后续版本包含 schema 变更，再显式执行数据库迁移
-docker compose run --rm app aether-gateway --migrate
+docker compose run --rm app --migrate
 
 # 5. 升级前备份 (可选)
 docker compose exec postgres pg_dump -U postgres aether | gzip > backup_$(date +%Y%m%d_%H%M%S).sql.gz

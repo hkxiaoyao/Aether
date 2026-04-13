@@ -10,7 +10,7 @@ const FIND_USAGE_FOR_SETTLEMENT_SQL: &str = r#"
 SELECT
   usage_record.request_id,
   COALESCE(usage_settlement_snapshots.wallet_id, usage_record.wallet_id) AS wallet_id,
-  usage_record.billing_status,
+  COALESCE(usage_settlement_snapshots.billing_status, usage_record.billing_status) AS billing_status,
   COALESCE(
     CAST(usage_settlement_snapshots.wallet_balance_before AS DOUBLE PRECISION),
     CAST(usage_record.wallet_balance_before AS DOUBLE PRECISION)
@@ -369,6 +369,7 @@ RETURNING CAST(monthly_used_usd AS DOUBLE PRECISION) AS monthly_used_usd
                         }
                     }
 
+                    sync_usage_settlement_snapshot(&mut **tx, &settlement).await?;
                     sqlx::query(FINALIZE_USAGE_BILLING_SQL)
                         .bind(&input.request_id)
                         .bind(final_billing_status)
@@ -376,7 +377,6 @@ RETURNING CAST(monthly_used_usd AS DOUBLE PRECISION) AS monthly_used_usd
                         .execute(&mut **tx)
                         .await
                         .map_postgres_err()?;
-                    sync_usage_settlement_snapshot(&mut **tx, &settlement).await?;
 
                     Ok(Some(settlement))
                 })
@@ -397,7 +397,9 @@ mod tests {
         assert!(
             super::FIND_USAGE_FOR_SETTLEMENT_SQL.contains("LEFT JOIN usage_settlement_snapshots")
         );
-        assert!(super::FIND_USAGE_FOR_SETTLEMENT_SQL.contains("COALESCE("));
+        assert!(super::FIND_USAGE_FOR_SETTLEMENT_SQL.contains(
+            "COALESCE(usage_settlement_snapshots.billing_status, usage_record.billing_status)"
+        ));
         assert!(super::FIND_USAGE_FOR_SETTLEMENT_SQL.contains("FOR UPDATE OF usage_record"));
     }
 

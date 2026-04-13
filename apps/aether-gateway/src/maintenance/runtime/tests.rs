@@ -29,7 +29,8 @@ use super::{
     usage_cleanup_window, wallet_daily_usage_aggregation_target, AppState, DbMaintenanceRunSummary,
     FailedPendingUsageRow, GatewayDataState, ProxyUpgradeRolloutProbeConfig, StalePendingUsageRow,
     UsageCleanupSettings, DELETE_STALE_WALLET_DAILY_USAGE_LEDGERS_SQL,
-    SELECT_WALLET_DAILY_USAGE_AGGREGATION_ROWS_SQL, USAGE_CLEANUP_HOUR, USAGE_CLEANUP_MINUTE,
+    SELECT_STALE_PENDING_USAGE_BATCH_SQL, SELECT_WALLET_DAILY_USAGE_AGGREGATION_ROWS_SQL,
+    UPDATE_FAILED_VOID_STALE_USAGE_SQL, USAGE_CLEANUP_HOUR, USAGE_CLEANUP_MINUTE,
     WALLET_DAILY_USAGE_AGGREGATION_HOUR, WALLET_DAILY_USAGE_AGGREGATION_MINUTE,
 };
 
@@ -88,6 +89,15 @@ fn wallet_daily_usage_queries_use_settlement_snapshots_for_wallet_identity() {
     assert!(DELETE_STALE_WALLET_DAILY_USAGE_LEDGERS_SQL.contains("JOIN usage_settlement_snapshots"));
     assert!(DELETE_STALE_WALLET_DAILY_USAGE_LEDGERS_SQL
         .contains("usage_settlement_snapshots.wallet_id = ledgers.wallet_id"));
+}
+
+#[test]
+fn pending_cleanup_queries_use_settlement_snapshots_for_billing_authority() {
+    assert!(SELECT_STALE_PENDING_USAGE_BATCH_SQL.contains("LEFT JOIN usage_settlement_snapshots"));
+    assert!(SELECT_STALE_PENDING_USAGE_BATCH_SQL
+        .contains("COALESCE(usage_settlement_snapshots.billing_status, usage.billing_status)"));
+    assert!(UPDATE_FAILED_VOID_STALE_USAGE_SQL.contains("INSERT INTO usage_settlement_snapshots"));
+    assert!(UPDATE_FAILED_VOID_STALE_USAGE_SQL.contains("billing_status = EXCLUDED.billing_status"));
 }
 
 fn sample_connected_proxy_node(

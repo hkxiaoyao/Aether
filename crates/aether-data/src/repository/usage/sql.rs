@@ -18,7 +18,9 @@ use super::{
 use crate::postgres::PostgresTransactionRunner;
 use crate::{error::SqlxResultExt, DataLayerError};
 
-const MAX_INLINE_USAGE_BODY_BYTES: usize = 16 * 1024;
+// Legacy inline body columns on public.usage are deprecated. Keep the threshold at zero so
+// newly captured bodies always spill to usage_body_blobs and resolve through usage_http_audits.
+const MAX_INLINE_USAGE_BODY_BYTES: usize = 0;
 const FIND_USAGE_BODY_BLOB_BY_REF_SQL: &str =
     r#"SELECT payload_gzip FROM usage_body_blobs WHERE body_ref = $1 LIMIT 1"#;
 const UPSERT_USAGE_BODY_BLOB_SQL: &str = r#"
@@ -258,7 +260,10 @@ SELECT
   COALESCE("usage".cache_read_input_tokens, 0) AS cache_read_input_tokens,
   COALESCE(CAST("usage".cache_creation_cost_usd AS DOUBLE PRECISION), 0) AS cache_creation_cost_usd,
   COALESCE(CAST("usage".cache_read_cost_usd AS DOUBLE PRECISION), 0) AS cache_read_cost_usd,
-  CAST("usage".output_price_per_1m AS DOUBLE PRECISION) AS output_price_per_1m,
+  COALESCE(
+    CAST(usage_settlement_snapshots.output_price_per_1m AS DOUBLE PRECISION),
+    CAST("usage".output_price_per_1m AS DOUBLE PRECISION)
+  ) AS output_price_per_1m,
   COALESCE(CAST("usage".total_cost_usd AS DOUBLE PRECISION), 0) AS total_cost_usd,
   COALESCE(CAST("usage".actual_total_cost_usd AS DOUBLE PRECISION), 0) AS actual_total_cost_usd,
   "usage".status_code,
@@ -310,9 +315,19 @@ SELECT
   CAST(usage_settlement_snapshots.price_per_request AS DOUBLE PRECISION) AS settlement_price_per_request,
   CAST(EXTRACT(EPOCH FROM "usage".created_at) AS BIGINT) AS created_at_unix_ms,
   CAST(
-    EXTRACT(EPOCH FROM COALESCE("usage".finalized_at, "usage".created_at)) AS BIGINT
+    EXTRACT(
+      EPOCH FROM COALESCE(
+        usage_settlement_snapshots.finalized_at,
+        "usage".finalized_at,
+        "usage".created_at
+      )
+    ) AS BIGINT
   ) AS updated_at_unix_secs,
-  CAST(EXTRACT(EPOCH FROM "usage".finalized_at) AS BIGINT) AS finalized_at_unix_secs
+  CAST(
+    EXTRACT(
+      EPOCH FROM COALESCE(usage_settlement_snapshots.finalized_at, "usage".finalized_at)
+    ) AS BIGINT
+  ) AS finalized_at_unix_secs
 FROM "usage"
 LEFT JOIN usage_http_audits
   ON usage_http_audits.request_id = "usage".request_id
@@ -356,7 +371,10 @@ SELECT
   COALESCE("usage".cache_read_input_tokens, 0) AS cache_read_input_tokens,
   COALESCE(CAST("usage".cache_creation_cost_usd AS DOUBLE PRECISION), 0) AS cache_creation_cost_usd,
   COALESCE(CAST("usage".cache_read_cost_usd AS DOUBLE PRECISION), 0) AS cache_read_cost_usd,
-  CAST("usage".output_price_per_1m AS DOUBLE PRECISION) AS output_price_per_1m,
+  COALESCE(
+    CAST(usage_settlement_snapshots.output_price_per_1m AS DOUBLE PRECISION),
+    CAST("usage".output_price_per_1m AS DOUBLE PRECISION)
+  ) AS output_price_per_1m,
   COALESCE(CAST("usage".total_cost_usd AS DOUBLE PRECISION), 0) AS total_cost_usd,
   COALESCE(CAST("usage".actual_total_cost_usd AS DOUBLE PRECISION), 0) AS actual_total_cost_usd,
   "usage".status_code,
@@ -408,9 +426,19 @@ SELECT
   CAST(usage_settlement_snapshots.price_per_request AS DOUBLE PRECISION) AS settlement_price_per_request,
   CAST(EXTRACT(EPOCH FROM "usage".created_at) AS BIGINT) AS created_at_unix_ms,
   CAST(
-    EXTRACT(EPOCH FROM COALESCE("usage".finalized_at, "usage".created_at)) AS BIGINT
+    EXTRACT(
+      EPOCH FROM COALESCE(
+        usage_settlement_snapshots.finalized_at,
+        "usage".finalized_at,
+        "usage".created_at
+      )
+    ) AS BIGINT
   ) AS updated_at_unix_secs,
-  CAST(EXTRACT(EPOCH FROM "usage".finalized_at) AS BIGINT) AS finalized_at_unix_secs
+  CAST(
+    EXTRACT(
+      EPOCH FROM COALESCE(usage_settlement_snapshots.finalized_at, "usage".finalized_at)
+    ) AS BIGINT
+  ) AS finalized_at_unix_secs
 FROM "usage"
 LEFT JOIN usage_http_audits
   ON usage_http_audits.request_id = "usage".request_id
@@ -505,7 +533,10 @@ SELECT
   COALESCE("usage".cache_read_input_tokens, 0) AS cache_read_input_tokens,
   COALESCE(CAST("usage".cache_creation_cost_usd AS DOUBLE PRECISION), 0) AS cache_creation_cost_usd,
   COALESCE(CAST("usage".cache_read_cost_usd AS DOUBLE PRECISION), 0) AS cache_read_cost_usd,
-  CAST("usage".output_price_per_1m AS DOUBLE PRECISION) AS output_price_per_1m,
+  COALESCE(
+    CAST(usage_settlement_snapshots.output_price_per_1m AS DOUBLE PRECISION),
+    CAST("usage".output_price_per_1m AS DOUBLE PRECISION)
+  ) AS output_price_per_1m,
   COALESCE(CAST("usage".total_cost_usd AS DOUBLE PRECISION), 0) AS total_cost_usd,
   COALESCE(CAST("usage".actual_total_cost_usd AS DOUBLE PRECISION), 0) AS actual_total_cost_usd,
   "usage".status_code,
@@ -551,9 +582,19 @@ SELECT
   CAST(usage_settlement_snapshots.price_per_request AS DOUBLE PRECISION) AS settlement_price_per_request,
   CAST(EXTRACT(EPOCH FROM "usage".created_at) AS BIGINT) AS created_at_unix_ms,
   CAST(
-    EXTRACT(EPOCH FROM COALESCE("usage".finalized_at, "usage".created_at)) AS BIGINT
+    EXTRACT(
+      EPOCH FROM COALESCE(
+        usage_settlement_snapshots.finalized_at,
+        "usage".finalized_at,
+        "usage".created_at
+      )
+    ) AS BIGINT
   ) AS updated_at_unix_secs,
-  CAST(EXTRACT(EPOCH FROM "usage".finalized_at) AS BIGINT) AS finalized_at_unix_secs
+  CAST(
+    EXTRACT(
+      EPOCH FROM COALESCE(usage_settlement_snapshots.finalized_at, "usage".finalized_at)
+    ) AS BIGINT
+  ) AS finalized_at_unix_secs
 FROM "usage"
 LEFT JOIN usage_settlement_snapshots
   ON usage_settlement_snapshots.request_id = "usage".request_id
@@ -591,7 +632,10 @@ SELECT
   COALESCE("usage".cache_read_input_tokens, 0) AS cache_read_input_tokens,
   COALESCE(CAST("usage".cache_creation_cost_usd AS DOUBLE PRECISION), 0) AS cache_creation_cost_usd,
   COALESCE(CAST("usage".cache_read_cost_usd AS DOUBLE PRECISION), 0) AS cache_read_cost_usd,
-  CAST("usage".output_price_per_1m AS DOUBLE PRECISION) AS output_price_per_1m,
+  COALESCE(
+    CAST(usage_settlement_snapshots.output_price_per_1m AS DOUBLE PRECISION),
+    CAST("usage".output_price_per_1m AS DOUBLE PRECISION)
+  ) AS output_price_per_1m,
   COALESCE(CAST("usage".total_cost_usd AS DOUBLE PRECISION), 0) AS total_cost_usd,
   COALESCE(CAST("usage".actual_total_cost_usd AS DOUBLE PRECISION), 0) AS actual_total_cost_usd,
   "usage".status_code,
@@ -637,9 +681,19 @@ SELECT
   CAST(usage_settlement_snapshots.price_per_request AS DOUBLE PRECISION) AS settlement_price_per_request,
   CAST(EXTRACT(EPOCH FROM "usage".created_at) AS BIGINT) AS created_at_unix_ms,
   CAST(
-    EXTRACT(EPOCH FROM COALESCE("usage".finalized_at, "usage".created_at)) AS BIGINT
+    EXTRACT(
+      EPOCH FROM COALESCE(
+        usage_settlement_snapshots.finalized_at,
+        "usage".finalized_at,
+        "usage".created_at
+      )
+    ) AS BIGINT
   ) AS updated_at_unix_secs,
-  CAST(EXTRACT(EPOCH FROM "usage".finalized_at) AS BIGINT) AS finalized_at_unix_secs
+  CAST(
+    EXTRACT(
+      EPOCH FROM COALESCE(usage_settlement_snapshots.finalized_at, "usage".finalized_at)
+    ) AS BIGINT
+  ) AS finalized_at_unix_secs
 FROM "usage"
 LEFT JOIN usage_settlement_snapshots
   ON usage_settlement_snapshots.request_id = "usage".request_id
@@ -792,7 +846,7 @@ DO UPDATE SET
   cache_read_input_tokens = CASE WHEN "usage".billing_status = 'pending' THEN COALESCE(EXCLUDED.cache_read_input_tokens, "usage".cache_read_input_tokens) ELSE "usage".cache_read_input_tokens END,
   cache_creation_cost_usd = CASE WHEN "usage".billing_status = 'pending' THEN COALESCE(EXCLUDED.cache_creation_cost_usd, "usage".cache_creation_cost_usd) ELSE "usage".cache_creation_cost_usd END,
   cache_read_cost_usd = CASE WHEN "usage".billing_status = 'pending' THEN COALESCE(EXCLUDED.cache_read_cost_usd, "usage".cache_read_cost_usd) ELSE "usage".cache_read_cost_usd END,
-  output_price_per_1m = "usage".output_price_per_1m,
+  output_price_per_1m = NULL,
   total_cost_usd = CASE WHEN "usage".billing_status = 'pending' THEN COALESCE(EXCLUDED.total_cost_usd, "usage".total_cost_usd) ELSE "usage".total_cost_usd END,
   actual_total_cost_usd = CASE WHEN "usage".billing_status = 'pending' THEN COALESCE(EXCLUDED.actual_total_cost_usd, "usage".actual_total_cost_usd) ELSE "usage".actual_total_cost_usd END,
   status_code = CASE WHEN "usage".billing_status = 'pending' THEN CASE
@@ -811,7 +865,7 @@ DO UPDATE SET
   first_byte_time_ms = CASE WHEN "usage".billing_status = 'pending' THEN COALESCE(EXCLUDED.first_byte_time_ms, "usage".first_byte_time_ms) ELSE "usage".first_byte_time_ms END,
   status = CASE WHEN "usage".billing_status = 'pending' THEN EXCLUDED.status ELSE "usage".status END,
   billing_status = CASE WHEN "usage".billing_status = 'pending' THEN EXCLUDED.billing_status ELSE "usage".billing_status END,
-  request_headers = CASE WHEN "usage".billing_status = 'pending' THEN COALESCE(EXCLUDED.request_headers, "usage".request_headers) ELSE "usage".request_headers END,
+  request_headers = NULL,
   request_body = CASE WHEN "usage".billing_status = 'pending' THEN CASE
     WHEN EXCLUDED.request_body_compressed IS NOT NULL OR $56 THEN NULL
     ELSE COALESCE(EXCLUDED.request_body, "usage".request_body)
@@ -820,7 +874,7 @@ DO UPDATE SET
     WHEN EXCLUDED.request_body IS NOT NULL OR $56 THEN NULL
     ELSE COALESCE(EXCLUDED.request_body_compressed, "usage".request_body_compressed)
   END ELSE "usage".request_body_compressed END,
-  provider_request_headers = CASE WHEN "usage".billing_status = 'pending' THEN COALESCE(EXCLUDED.provider_request_headers, "usage".provider_request_headers) ELSE "usage".provider_request_headers END,
+  provider_request_headers = NULL,
   provider_request_body = CASE WHEN "usage".billing_status = 'pending' THEN CASE
     WHEN EXCLUDED.provider_request_body_compressed IS NOT NULL OR $57 THEN NULL
     ELSE COALESCE(EXCLUDED.provider_request_body, "usage".provider_request_body)
@@ -829,7 +883,7 @@ DO UPDATE SET
     WHEN EXCLUDED.provider_request_body IS NOT NULL OR $57 THEN NULL
     ELSE COALESCE(EXCLUDED.provider_request_body_compressed, "usage".provider_request_body_compressed)
   END ELSE "usage".provider_request_body_compressed END,
-  response_headers = CASE WHEN "usage".billing_status = 'pending' THEN COALESCE(EXCLUDED.response_headers, "usage".response_headers) ELSE "usage".response_headers END,
+  response_headers = NULL,
   response_body = CASE WHEN "usage".billing_status = 'pending' THEN CASE
     WHEN EXCLUDED.response_body_compressed IS NOT NULL OR $58 THEN NULL
     ELSE COALESCE(EXCLUDED.response_body, "usage".response_body)
@@ -838,7 +892,7 @@ DO UPDATE SET
     WHEN EXCLUDED.response_body IS NOT NULL OR $58 THEN NULL
     ELSE COALESCE(EXCLUDED.response_body_compressed, "usage".response_body_compressed)
   END ELSE "usage".response_body_compressed END,
-  client_response_headers = CASE WHEN "usage".billing_status = 'pending' THEN COALESCE(EXCLUDED.client_response_headers, "usage".client_response_headers) ELSE "usage".client_response_headers END,
+  client_response_headers = NULL,
   client_response_body = CASE WHEN "usage".billing_status = 'pending' THEN CASE
     WHEN EXCLUDED.client_response_body_compressed IS NOT NULL OR $59 THEN NULL
     ELSE COALESCE(EXCLUDED.client_response_body, "usage".client_response_body)
@@ -1550,6 +1604,7 @@ impl SqlxUsageReadRepository {
                     stored.execution_path = routing_snapshot.execution_path.clone();
                     stored.local_execution_runtime_miss_reason =
                         routing_snapshot.local_execution_runtime_miss_reason.clone();
+                    stored.output_price_per_1m = settlement_pricing_snapshot.output_price_per_1m;
                     stored.request_metadata = request_metadata_value;
                     Ok(stored)
                 }) as BoxFuture<'_, Result<StoredRequestUsageAudit, DataLayerError>>
@@ -1910,7 +1965,8 @@ struct UsageSettlementPricingSnapshot {
 
 impl UsageSettlementPricingSnapshot {
     fn any_present(&self) -> bool {
-        self.billing_snapshot_schema_version.is_some()
+        self.billing_status.is_some()
+            || self.billing_snapshot_schema_version.is_some()
             || self.billing_snapshot_status.is_some()
             || self.rate_multiplier.is_some()
             || self.is_free_tier.is_some()
@@ -2907,11 +2963,10 @@ mod tests {
                 )
             );
             assert!(sql.contains(
-                "CAST(\"usage\".output_price_per_1m AS DOUBLE PRECISION) AS output_price_per_1m"
+                "CAST(usage_settlement_snapshots.output_price_per_1m AS DOUBLE PRECISION)"
             ));
             assert!(sql.contains("EXTRACT(EPOCH FROM \"usage\".created_at)"));
-            assert!(sql.contains("COALESCE(\"usage\".finalized_at, \"usage\".created_at)"));
-            assert!(sql.contains("EXTRACT(EPOCH FROM \"usage\".finalized_at)"));
+            assert!(sql.contains("usage_settlement_snapshots.finalized_at"));
             assert!(!sql.contains("CAST(EXTRACT(EPOCH FROM created_at) AS BIGINT)"));
             assert!(!sql.contains("CAST(output_price_per_1m AS DOUBLE PRECISION)"));
         }
@@ -2955,17 +3010,11 @@ mod tests {
     }
 
     #[test]
-    fn usage_sql_keeps_list_output_price_reads_legacy_only() {
-        assert!(super::LIST_USAGE_AUDITS_PREFIX.contains(
-            "CAST(\"usage\".output_price_per_1m AS DOUBLE PRECISION) AS output_price_per_1m"
-        ));
-        assert!(super::LIST_RECENT_USAGE_AUDITS_PREFIX.contains(
-            "CAST(\"usage\".output_price_per_1m AS DOUBLE PRECISION) AS output_price_per_1m"
-        ));
-        assert!(!super::LIST_USAGE_AUDITS_PREFIX
-            .contains("COALESCE(\n      usage_settlement_snapshots.output_price_per_1m,"));
-        assert!(!super::LIST_RECENT_USAGE_AUDITS_PREFIX
-            .contains("COALESCE(\n      usage_settlement_snapshots.output_price_per_1m,"));
+    fn usage_sql_reads_list_output_price_from_settlement_snapshots_before_legacy_usage_column() {
+        assert!(super::LIST_USAGE_AUDITS_PREFIX
+            .contains("CAST(usage_settlement_snapshots.output_price_per_1m AS DOUBLE PRECISION)"));
+        assert!(super::LIST_RECENT_USAGE_AUDITS_PREFIX
+            .contains("CAST(usage_settlement_snapshots.output_price_per_1m AS DOUBLE PRECISION)"));
     }
 
     #[test]
@@ -3007,9 +3056,17 @@ mod tests {
     }
 
     #[test]
-    fn usage_sql_preserves_legacy_output_price_column_on_upsert() {
-        assert!(super::UPSERT_SQL.contains("output_price_per_1m = \"usage\".output_price_per_1m"));
+    fn usage_sql_clears_legacy_output_price_column_on_upsert() {
+        assert!(super::UPSERT_SQL.contains("output_price_per_1m = NULL"));
         assert!(include_str!("sql.rs").contains(".bind(None::<f64>)"));
+    }
+
+    #[test]
+    fn usage_sql_clears_legacy_header_columns_on_upsert() {
+        assert!(super::UPSERT_SQL.contains("request_headers = NULL"));
+        assert!(super::UPSERT_SQL.contains("provider_request_headers = NULL"));
+        assert!(super::UPSERT_SQL.contains("response_headers = NULL"));
+        assert!(super::UPSERT_SQL.contains("client_response_headers = NULL"));
     }
 
     #[test]
@@ -3040,14 +3097,18 @@ mod tests {
     }
 
     #[test]
-    fn prepare_usage_body_storage_keeps_small_payloads_inline() {
+    fn prepare_usage_body_storage_detaches_small_payloads_into_blob_storage() {
         let payload = json!({"message": "hello"});
         let storage = prepare_usage_body_storage(Some(&payload)).expect("storage should serialize");
 
-        assert!(storage.detached_blob_bytes.is_none());
+        assert!(storage.inline_json.is_none());
+        let compressed = storage
+            .detached_blob_bytes
+            .as_deref()
+            .expect("small payload should now be ref-backed");
         assert_eq!(
-            storage.inline_json.as_deref(),
-            Some(payload.to_string().as_str())
+            inflate_usage_json_value(compressed).expect("payload should inflate"),
+            payload
         );
     }
 
@@ -3746,6 +3807,16 @@ mod tests {
                 price_per_request: Some(0.02),
             }
         );
+    }
+
+    #[test]
+    fn usage_settlement_pricing_snapshot_with_billing_status_only_is_still_persisted() {
+        let snapshot = UsageSettlementPricingSnapshot {
+            billing_status: Some("pending".to_string()),
+            ..UsageSettlementPricingSnapshot::default()
+        };
+
+        assert!(snapshot.any_present());
     }
 
     #[test]

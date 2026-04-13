@@ -184,16 +184,18 @@ WHERE ledgers.billing_date = $1
 "#;
 const SELECT_STALE_PENDING_USAGE_BATCH_SQL: &str = r#"
 SELECT
-  id,
-  request_id,
-  status,
-  billing_status
+  usage.id,
+  usage.request_id,
+  usage.status,
+  COALESCE(usage_settlement_snapshots.billing_status, usage.billing_status) AS billing_status
 FROM usage
-WHERE status = ANY($1)
-  AND created_at < $2
-ORDER BY created_at ASC, id ASC
+LEFT JOIN usage_settlement_snapshots
+  ON usage_settlement_snapshots.request_id = usage.request_id
+WHERE usage.status = ANY($1)
+  AND usage.created_at < $2
+ORDER BY usage.created_at ASC, usage.id ASC
 LIMIT $3
-FOR UPDATE SKIP LOCKED
+FOR UPDATE OF usage SKIP LOCKED
 "#;
 const SELECT_COMPLETED_PENDING_REQUEST_IDS_SQL: &str = r#"
 SELECT DISTINCT request_id
@@ -222,17 +224,35 @@ SET status = 'failed',
 WHERE id = $1
 "#;
 const UPDATE_FAILED_VOID_STALE_USAGE_SQL: &str = r#"
-UPDATE usage
-SET status = 'failed',
-    status_code = 504,
-    error_message = $2,
-    billing_status = 'void',
-    finalized_at = $3,
-    total_cost_usd = 0,
-    request_cost_usd = 0,
-    actual_total_cost_usd = 0,
-    actual_request_cost_usd = 0
-WHERE id = $1
+WITH updated_usage AS (
+    UPDATE usage
+    SET status = 'failed',
+        status_code = 504,
+        error_message = $2,
+        billing_status = 'void',
+        finalized_at = $3,
+        total_cost_usd = 0,
+        request_cost_usd = 0,
+        actual_total_cost_usd = 0,
+        actual_request_cost_usd = 0
+    WHERE id = $1
+    RETURNING request_id
+)
+INSERT INTO usage_settlement_snapshots (
+    request_id,
+    billing_status,
+    finalized_at
+)
+SELECT request_id, 'void', $3
+FROM updated_usage
+ON CONFLICT (request_id)
+DO UPDATE SET
+    billing_status = EXCLUDED.billing_status,
+    finalized_at = COALESCE(
+        usage_settlement_snapshots.finalized_at,
+        EXCLUDED.finalized_at
+    ),
+    updated_at = NOW()
 "#;
 const UPDATE_RECOVERED_STREAMING_CANDIDATES_SQL: &str = r#"
 UPDATE request_candidates
