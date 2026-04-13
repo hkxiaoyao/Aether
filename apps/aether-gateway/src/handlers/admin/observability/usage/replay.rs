@@ -107,40 +107,6 @@ pub(super) fn build_admin_usage_curl_response(
     )
 }
 
-#[cfg(test)]
-mod tests {
-    use super::admin_usage_body_value_from_sources;
-    use serde_json::json;
-
-    #[test]
-    fn resolved_reference_body_wins_over_inline_fallback() {
-        let inline_body = json!({
-            "truncated": true,
-            "reason": "usage_capture_limits_exceeded"
-        });
-        let ref_body = json!({
-            "messages": [{"role": "user", "content": "real request body"}]
-        });
-
-        assert_eq!(
-            admin_usage_body_value_from_sources(Some(ref_body.clone()), Some(&inline_body)),
-            Some(ref_body)
-        );
-    }
-
-    #[test]
-    fn inline_body_is_used_when_reference_body_is_unavailable() {
-        let inline_body = json!({
-            "messages": [{"role": "user", "content": "fallback inline body"}]
-        });
-
-        assert_eq!(
-            admin_usage_body_value_from_sources(None, Some(&inline_body)),
-            Some(inline_body)
-        );
-    }
-}
-
 pub(super) fn build_admin_usage_detail_payload(
     item: &StoredRequestUsageAudit,
     users_by_id: &BTreeMap<String, aether_data::repository::users::StoredUserSummary>,
@@ -414,4 +380,38 @@ pub(super) fn admin_usage_build_curl_command(
     body: Option<&serde_json::Value>,
 ) -> String {
     aether_admin::observability::usage::admin_usage_build_curl_command(url, headers, body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::admin_usage_body_value_from_sources;
+    use serde_json::json;
+
+    #[test]
+    fn resolved_reference_body_wins_over_inline_fallback() {
+        let inline_body = json!({
+            "truncated": true,
+            "reason": "usage_capture_limits_exceeded"
+        });
+        let ref_body = json!({
+            "messages": [{"role": "user", "content": "real request body"}]
+        });
+
+        assert_eq!(
+            admin_usage_body_value_from_sources(Some(ref_body.clone()), Some(&inline_body)),
+            Some(ref_body)
+        );
+    }
+
+    #[test]
+    fn inline_body_is_used_when_reference_body_is_unavailable() {
+        let inline_body = json!({
+            "messages": [{"role": "user", "content": "fallback inline body"}]
+        });
+
+        assert_eq!(
+            admin_usage_body_value_from_sources(None, Some(&inline_body)),
+            Some(inline_body)
+        );
+    }
 }

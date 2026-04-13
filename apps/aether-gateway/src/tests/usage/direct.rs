@@ -111,7 +111,10 @@ async fn gateway_records_usage_for_execution_runtime_sync_when_runtime_enabled()
             .find_by_request_id("req-usage-sync-123")
             .await
             .expect("usage lookup should succeed");
-        if stored.is_some() {
+        if stored
+            .as_ref()
+            .is_some_and(|usage| usage.status == "completed")
+        {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;

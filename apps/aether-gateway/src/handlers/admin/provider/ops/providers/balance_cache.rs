@@ -7,6 +7,7 @@ use tokio::sync::{Mutex, Semaphore};
 use tracing::{debug, warn};
 
 const ADMIN_PROVIDER_OPS_BALANCE_CACHE_PREFIX: &str = "provider_ops:balance:";
+const ADMIN_PROVIDER_OPS_BALANCE_REFRESH_PREFIX: &str = "provider_ops:balance_refresh:";
 const ADMIN_PROVIDER_OPS_BALANCE_CACHE_TTL_SECS: u64 = 86_400;
 const ADMIN_PROVIDER_OPS_BALANCE_AUTH_FAILED_CACHE_TTL_SECS: u64 = 60;
 const ADMIN_PROVIDER_OPS_BALANCE_REFRESH_CONCURRENCY: usize = 3;
@@ -139,8 +140,9 @@ pub(super) async fn spawn_admin_provider_ops_balance_refresh(
     state: &AdminAppState<'_>,
     provider_id: &str,
 ) {
+    let refresh_key = admin_provider_ops_balance_refresh_key(state, provider_id);
     let mut guard = ADMIN_PROVIDER_OPS_REFRESHING_PROVIDERS.lock().await;
-    if !guard.insert(provider_id.to_string()) {
+    if !guard.insert(refresh_key.clone()) {
         debug!(provider_id, "provider ops balance refresh already running");
         return;
     }
@@ -162,12 +164,12 @@ pub(super) async fn spawn_admin_provider_ops_balance_refresh(
                     error = %err,
                     "provider ops balance refresh semaphore closed"
                 );
-                finish_refresh_provider(&provider_id).await;
+                finish_refresh_provider(&refresh_key).await;
                 return;
             }
             Err(_) => {
                 debug!(provider_id = %provider_id, "provider ops balance refresh skipped by concurrency limit");
-                finish_refresh_provider(&provider_id).await;
+                finish_refresh_provider(&refresh_key).await;
                 return;
             }
         };
@@ -186,7 +188,7 @@ pub(super) async fn spawn_admin_provider_ops_balance_refresh(
                     "failed to load provider for balance refresh"
                 );
                 drop(permit);
-                finish_refresh_provider(&provider_id).await;
+                finish_refresh_provider(&refresh_key).await;
                 return;
             }
         };
@@ -204,7 +206,7 @@ pub(super) async fn spawn_admin_provider_ops_balance_refresh(
                         "failed to load endpoints for balance refresh"
                     );
                     drop(permit);
-                    finish_refresh_provider(&provider_id).await;
+                    finish_refresh_provider(&refresh_key).await;
                     return;
                 }
             }
@@ -223,7 +225,7 @@ pub(super) async fn spawn_admin_provider_ops_balance_refresh(
         .await;
         store_admin_provider_ops_balance_cache(&admin_state, &provider_id, &payload).await;
         drop(permit);
-        finish_refresh_provider(&provider_id).await;
+        finish_refresh_provider(&refresh_key).await;
     });
 }
 
@@ -239,11 +241,24 @@ fn balance_cache_ttl_seconds(payload: &Value) -> Option<u64> {
     }
 }
 
-async fn finish_refresh_provider(provider_id: &str) {
+fn admin_provider_ops_balance_refresh_key(state: &AdminAppState<'_>, provider_id: &str) -> String {
+    let raw_key = format!("{ADMIN_PROVIDER_OPS_BALANCE_REFRESH_PREFIX}{provider_id}");
+    if let Some(runner) = state.redis_kv_runner() {
+        format!(
+            "{:p}:{}",
+            state.app(),
+            runner.keyspace().key(raw_key.as_str())
+        )
+    } else {
+        format!("{:p}:{raw_key}", state.app())
+    }
+}
+
+async fn finish_refresh_provider(refresh_key: &str) {
     ADMIN_PROVIDER_OPS_REFRESHING_PROVIDERS
         .lock()
         .await
-        .remove(provider_id);
+        .remove(refresh_key);
 }
 
 fn admin_provider_ops_action_response(

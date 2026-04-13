@@ -145,7 +145,10 @@ async fn gateway_settles_wallet_for_completed_execution_runtime_sync_usage() {
             .find_by_request_id("req-usage-wallet-sync-123")
             .await
             .expect("usage lookup should succeed");
-        if stored.is_some() {
+        if stored
+            .as_ref()
+            .is_some_and(|usage| usage.status == "completed")
+        {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -154,11 +157,20 @@ async fn gateway_settles_wallet_for_completed_execution_runtime_sync_usage() {
     assert_eq!(stored.status, "completed");
     assert_eq!(stored.total_tokens, 1500);
 
-    let wallet = wallet_repository
-        .find(WalletLookupKey::UserId("user-usage-sync-123"))
-        .await
-        .expect("wallet lookup should succeed")
-        .expect("wallet should exist");
+    let mut wallet = None;
+    for _ in 0..50 {
+        wallet = wallet_repository
+            .find(WalletLookupKey::UserId("user-usage-sync-123"))
+            .await
+            .expect("wallet lookup should succeed");
+        if wallet.as_ref().is_some_and(|wallet| {
+            wallet.balance < 10.0 || wallet.gift_balance < 2.0 || wallet.total_consumed > 0.0
+        }) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let wallet = wallet.expect("wallet should exist");
     assert!(wallet.balance < 10.0 || wallet.gift_balance < 2.0);
     assert!(wallet.total_consumed > 0.0);
 

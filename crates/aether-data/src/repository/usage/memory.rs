@@ -100,6 +100,14 @@ impl InMemoryUsageReadRepository {
     }
 }
 
+fn usage_status_is_finalized(status: &str) -> bool {
+    matches!(status, "completed" | "failed" | "cancelled")
+}
+
+fn usage_status_is_lifecycle(status: &str) -> bool {
+    matches!(status, "pending" | "streaming")
+}
+
 #[async_trait]
 impl UsageReadRepository for InMemoryUsageReadRepository {
     async fn find_by_id(
@@ -439,6 +447,12 @@ impl UsageWriteRepository for InMemoryUsageReadRepository {
             })
             .unwrap_or_default();
         let existing = by_request_id.get(&usage.request_id);
+        if existing.is_some_and(|existing| {
+            usage_status_is_finalized(existing.status.as_str())
+                && usage_status_is_lifecycle(usage.status.as_str())
+        }) {
+            return Ok(existing.expect("existing usage should be present").clone());
+        }
 
         let request_metadata = usage
             .request_metadata
@@ -688,6 +702,158 @@ mod tests {
 
         assert_eq!(usage.request_id, "req-2");
         assert_eq!(usage.total_tokens, 150);
+    }
+
+    #[tokio::test]
+    async fn stale_pending_update_does_not_regress_finalized_usage() {
+        let repository = InMemoryUsageReadRepository::default();
+        repository
+            .upsert(UpsertUsageRecord {
+                request_id: "req-finalized-1".to_string(),
+                user_id: Some("user-1".to_string()),
+                api_key_id: Some("api-key-1".to_string()),
+                username: None,
+                api_key_name: None,
+                provider_name: "OpenAI".to_string(),
+                model: "gpt-5".to_string(),
+                target_model: None,
+                provider_id: Some("provider-1".to_string()),
+                provider_endpoint_id: Some("endpoint-1".to_string()),
+                provider_api_key_id: Some("provider-key-1".to_string()),
+                request_type: Some("chat".to_string()),
+                api_format: Some("openai:chat".to_string()),
+                api_family: Some("openai".to_string()),
+                endpoint_kind: Some("chat".to_string()),
+                endpoint_api_format: Some("openai:chat".to_string()),
+                provider_api_family: Some("openai".to_string()),
+                provider_endpoint_kind: Some("chat".to_string()),
+                has_format_conversion: Some(false),
+                is_stream: Some(false),
+                input_tokens: Some(3),
+                output_tokens: Some(5),
+                total_tokens: Some(8),
+                cache_creation_input_tokens: None,
+                cache_creation_ephemeral_5m_input_tokens: None,
+                cache_creation_ephemeral_1h_input_tokens: None,
+                cache_read_input_tokens: None,
+                cache_creation_cost_usd: None,
+                cache_read_cost_usd: None,
+                output_price_per_1m: None,
+                total_cost_usd: None,
+                actual_total_cost_usd: None,
+                status_code: Some(200),
+                error_message: None,
+                error_category: None,
+                response_time_ms: Some(45),
+                first_byte_time_ms: None,
+                status: "completed".to_string(),
+                billing_status: "pending".to_string(),
+                request_headers: None,
+                request_body: None,
+                request_body_ref: None,
+                provider_request_headers: None,
+                provider_request_body: None,
+                provider_request_body_ref: None,
+                response_headers: None,
+                response_body: None,
+                response_body_ref: None,
+                client_response_headers: None,
+                client_response_body: None,
+                client_response_body_ref: None,
+                candidate_id: None,
+                candidate_index: None,
+                key_name: None,
+                planner_kind: None,
+                route_family: None,
+                route_kind: None,
+                execution_path: None,
+                local_execution_runtime_miss_reason: None,
+                request_metadata: None,
+                finalized_at_unix_secs: Some(101),
+                created_at_unix_ms: Some(100),
+                updated_at_unix_secs: 101,
+            })
+            .await
+            .expect("completed usage should upsert");
+
+        repository
+            .upsert(UpsertUsageRecord {
+                request_id: "req-finalized-1".to_string(),
+                user_id: Some("user-1".to_string()),
+                api_key_id: Some("api-key-1".to_string()),
+                username: None,
+                api_key_name: None,
+                provider_name: "OpenAI".to_string(),
+                model: "gpt-5".to_string(),
+                target_model: None,
+                provider_id: Some("provider-1".to_string()),
+                provider_endpoint_id: Some("endpoint-1".to_string()),
+                provider_api_key_id: Some("provider-key-1".to_string()),
+                request_type: Some("chat".to_string()),
+                api_format: Some("openai:chat".to_string()),
+                api_family: Some("openai".to_string()),
+                endpoint_kind: Some("chat".to_string()),
+                endpoint_api_format: Some("openai:chat".to_string()),
+                provider_api_family: Some("openai".to_string()),
+                provider_endpoint_kind: Some("chat".to_string()),
+                has_format_conversion: Some(false),
+                is_stream: Some(false),
+                input_tokens: None,
+                output_tokens: None,
+                total_tokens: None,
+                cache_creation_input_tokens: None,
+                cache_creation_ephemeral_5m_input_tokens: None,
+                cache_creation_ephemeral_1h_input_tokens: None,
+                cache_read_input_tokens: None,
+                cache_creation_cost_usd: None,
+                cache_read_cost_usd: None,
+                output_price_per_1m: None,
+                total_cost_usd: None,
+                actual_total_cost_usd: None,
+                status_code: None,
+                error_message: None,
+                error_category: None,
+                response_time_ms: None,
+                first_byte_time_ms: None,
+                status: "pending".to_string(),
+                billing_status: "pending".to_string(),
+                request_headers: None,
+                request_body: None,
+                request_body_ref: None,
+                provider_request_headers: None,
+                provider_request_body: None,
+                provider_request_body_ref: None,
+                response_headers: None,
+                response_body: None,
+                response_body_ref: None,
+                client_response_headers: None,
+                client_response_body: None,
+                client_response_body_ref: None,
+                candidate_id: None,
+                candidate_index: None,
+                key_name: None,
+                planner_kind: None,
+                route_family: None,
+                route_kind: None,
+                execution_path: None,
+                local_execution_runtime_miss_reason: None,
+                request_metadata: None,
+                finalized_at_unix_secs: None,
+                created_at_unix_ms: Some(100),
+                updated_at_unix_secs: 102,
+            })
+            .await
+            .expect("stale pending usage should upsert");
+
+        let stored = repository
+            .find_by_request_id("req-finalized-1")
+            .await
+            .expect("usage lookup should succeed")
+            .expect("usage should exist");
+        assert_eq!(stored.status, "completed");
+        assert_eq!(stored.status_code, Some(200));
+        assert_eq!(stored.total_tokens, 8);
+        assert_eq!(stored.finalized_at_unix_secs, Some(101));
     }
 
     #[tokio::test]

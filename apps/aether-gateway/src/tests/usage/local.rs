@@ -309,7 +309,10 @@ async fn gateway_truncates_deep_request_echo_for_local_openai_chat_sync_usage() 
             .find_by_request_id("trace-openai-chat-local-report-sync-deep-123")
             .await
             .expect("usage lookup should succeed");
-        if stored_usage.is_some() {
+        if stored_usage
+            .as_ref()
+            .is_some_and(|usage| usage.status == "completed")
+        {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;

@@ -1,5 +1,6 @@
 use super::super::stats::{AdminStatsTimeRange, AdminStatsUsageFilter};
-use super::analytics::{admin_usage_api_key_names, admin_usage_provider_key_names};
+use super::analytics::admin_usage_api_key_names;
+use super::analytics::admin_usage_provider_key_names;
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::handlers::admin::shared::query_param_value;
 use crate::GatewayError;

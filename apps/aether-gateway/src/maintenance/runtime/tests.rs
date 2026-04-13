@@ -29,8 +29,8 @@ use super::{
     usage_cleanup_window, wallet_daily_usage_aggregation_target, AppState, DbMaintenanceRunSummary,
     FailedPendingUsageRow, GatewayDataState, ProxyUpgradeRolloutProbeConfig, StalePendingUsageRow,
     UsageCleanupSettings, DELETE_STALE_WALLET_DAILY_USAGE_LEDGERS_SQL,
-    SELECT_STALE_PENDING_USAGE_BATCH_SQL, UPSERT_WALLET_DAILY_USAGE_LEDGER_SQL,
-    UPDATE_FAILED_VOID_STALE_USAGE_SQL, USAGE_CLEANUP_HOUR, USAGE_CLEANUP_MINUTE,
+    SELECT_STALE_PENDING_USAGE_BATCH_SQL, UPDATE_FAILED_VOID_STALE_USAGE_SQL,
+    UPSERT_WALLET_DAILY_USAGE_LEDGER_SQL, USAGE_CLEANUP_HOUR, USAGE_CLEANUP_MINUTE,
     WALLET_DAILY_USAGE_AGGREGATION_HOUR, WALLET_DAILY_USAGE_AGGREGATION_MINUTE,
 };
 
@@ -81,11 +81,8 @@ async fn spawn_pool_monitor_worker_skips_when_postgres_unavailable() {
 
 #[test]
 fn wallet_daily_usage_queries_use_settlement_snapshots_for_wallet_identity() {
-    assert!(
-        UPSERT_WALLET_DAILY_USAGE_LEDGER_SQL.contains("JOIN usage_settlement_snapshots")
-    );
-    assert!(UPSERT_WALLET_DAILY_USAGE_LEDGER_SQL
-        .contains("usage_settlement_snapshots.wallet_id"));
+    assert!(UPSERT_WALLET_DAILY_USAGE_LEDGER_SQL.contains("JOIN usage_settlement_snapshots"));
+    assert!(UPSERT_WALLET_DAILY_USAGE_LEDGER_SQL.contains("usage_settlement_snapshots.wallet_id"));
     assert!(DELETE_STALE_WALLET_DAILY_USAGE_LEDGERS_SQL.contains("JOIN usage_settlement_snapshots"));
     assert!(DELETE_STALE_WALLET_DAILY_USAGE_LEDGERS_SQL
         .contains("usage_settlement_snapshots.wallet_id = ledgers.wallet_id"));
