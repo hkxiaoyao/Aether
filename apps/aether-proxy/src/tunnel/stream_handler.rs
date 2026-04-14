@@ -1594,13 +1594,18 @@ mod tests {
             log_max_files: 30,
             tunnel_reconnect_base_ms: 500,
             tunnel_reconnect_max_ms: 30_000,
-            tunnel_ping_interval_secs: 15,
+            tunnel_ping_interval_ms: 15_000,
             tunnel_max_streams: Some(8),
-            tunnel_connect_timeout_secs: 15,
+            tunnel_connect_timeout_ms: 15_000,
             tunnel_tcp_keepalive_secs: 30,
             tunnel_tcp_nodelay: true,
-            tunnel_stale_timeout_secs: 45,
-            tunnel_connections: 1,
+            tunnel_stale_timeout_ms: 45_000,
+            tunnel_connections: Some(1),
+            tunnel_connections_max: Some(1),
+            tunnel_scale_check_interval_ms: 1_000,
+            tunnel_scale_up_threshold_percent: 70,
+            tunnel_scale_down_threshold_percent: 35,
+            tunnel_scale_down_grace_secs: 15,
         }
     }
 

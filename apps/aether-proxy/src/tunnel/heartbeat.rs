@@ -24,7 +24,7 @@ static NON_ROOT_UPGRADE_WARNED: AtomicBool = AtomicBool::new(false);
 
 enum AckDecision {
     Accept {
-        heartbeat_id: Option<u64>,
+        heartbeat_id: u64,
         upgrade_to: Option<String>,
     },
     Ignore,
@@ -143,16 +143,8 @@ pub fn spawn(
                             upgrade_to,
                         } => {
                             if let Some((pending_id, _)) = pending {
-                                match ack_id {
-                                    Some(id) if id == pending_id => {
-                                        pending = None;
-                                    }
-                                    None => {
-                                        // Backward-compatible with servers that don't echo
-                                        // heartbeat_id in ACK payload yet.
-                                        pending = None;
-                                    }
-                                    _ => {}
+                                if ack_id == pending_id {
+                                    pending = None;
                                 }
                             }
                             maybe_trigger_upgrade(upgrade_to);
@@ -266,6 +258,7 @@ async fn build_heartbeat_payload(
         "node_id": node_id,
         "heartbeat_session_id": heartbeat_session_id,
         "heartbeat_id": heartbeat_id,
+        "heartbeat_interval": server.dynamic.load().heartbeat_interval,
         "active_connections": server.active_connections.load(Ordering::Acquire),
         "total_requests": snapshot.requests,
         "avg_latency_ms": avg_latency_ms,
@@ -283,10 +276,8 @@ async fn build_heartbeat_payload(
 
 fn handle_ack(server: &ServerContext, payload: &[u8]) -> AckDecision {
     if payload.is_empty() {
-        return AckDecision::Accept {
-            heartbeat_id: None,
-            upgrade_to: None,
-        };
+        warn!("received empty heartbeat ACK");
+        return AckDecision::Ignore;
     }
 
     #[derive(serde::Deserialize)]
@@ -295,8 +286,7 @@ fn handle_ack(server: &ServerContext, payload: &[u8]) -> AckDecision {
         remote_config: Option<RemoteConfig>,
         #[serde(default)]
         config_version: u64,
-        #[serde(default)]
-        heartbeat_id: Option<u64>,
+        heartbeat_id: u64,
         #[serde(default)]
         upgrade_to: Option<String>,
     }
@@ -370,4 +360,75 @@ fn maybe_trigger_upgrade(version: Option<String>) {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::AtomicU64;
+    use std::sync::{Arc, RwLock};
+
+    use arc_swap::ArcSwap;
+    use clap::Parser;
+
+    use super::{handle_ack, AckDecision};
+    use crate::registration::client::AetherClient;
+    use crate::runtime::DynamicConfig;
+    use crate::state::{ProxyMetrics, ServerContext};
+
+    fn sample_server() -> Arc<ServerContext> {
+        let config = Arc::new(crate::config::Config::parse_from([
+            "aether-proxy",
+            "--aether-url",
+            "https://example.com",
+            "--management-token",
+            "ae_test",
+            "--node-name",
+            "proxy-test",
+        ]));
+        Arc::new(ServerContext {
+            server_label: "heartbeat-test".to_string(),
+            aether_url: config.aether_url.clone(),
+            management_token: config.management_token.clone(),
+            node_name: config.node_name.clone(),
+            node_id: Arc::new(RwLock::new("node-123".to_string())),
+            aether_client: Arc::new(AetherClient::new(
+                &config,
+                &config.aether_url,
+                &config.management_token,
+            )),
+            dynamic: Arc::new(ArcSwap::from_pointee(DynamicConfig::from_config(&config))),
+            active_connections: Arc::new(AtomicU64::new(0)),
+            metrics: Arc::new(ProxyMetrics::new()),
+        })
+    }
+
+    #[test]
+    fn heartbeat_ack_requires_heartbeat_id() {
+        let server = sample_server();
+        let decision = handle_ack(
+            &server,
+            br#"{"config_version":1,"remote_config":{"heartbeat_interval":9}}"#,
+        );
+
+        assert!(matches!(decision, AckDecision::Ignore));
+        assert_eq!(server.dynamic.load().heartbeat_interval, 5);
+    }
+
+    #[test]
+    fn heartbeat_ack_applies_remote_config_with_heartbeat_id() {
+        let server = sample_server();
+        let decision = handle_ack(
+            &server,
+            br#"{"heartbeat_id":7,"config_version":1,"remote_config":{"heartbeat_interval":9}}"#,
+        );
+
+        assert!(matches!(
+            decision,
+            AckDecision::Accept {
+                heartbeat_id: 7,
+                upgrade_to: None
+            }
+        ));
+        assert_eq!(server.dynamic.load().heartbeat_interval, 9);
+    }
 }

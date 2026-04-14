@@ -39,7 +39,7 @@ pub struct AdminEmailTemplateUpdate {
 }
 
 pub const ADMIN_SYSTEM_CONFIG_EXPORT_VERSION: &str = "2.2";
-pub const ADMIN_SYSTEM_CONFIG_SUPPORTED_VERSIONS: &[&str] = &["2.0", "2.1", "2.2"];
+pub const ADMIN_SYSTEM_CONFIG_SUPPORTED_VERSIONS: &[&str] = &[ADMIN_SYSTEM_CONFIG_EXPORT_VERSION];
 pub const ADMIN_SYSTEM_PROVIDER_OPS_SENSITIVE_CREDENTIAL_FIELDS: &[&str] = &[
     "api_key",
     "password",
@@ -63,9 +63,7 @@ fn invalid_request(detail: impl Into<String>) -> (http::StatusCode, serde_json::
     )
 }
 
-fn deserialize_optional_f64_from_number_or_string<'de, D>(
-    deserializer: D,
-) -> Result<Option<f64>, D::Error>
+fn deserialize_optional_f64_from_number<'de, D>(deserializer: D) -> Result<Option<f64>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -77,16 +75,7 @@ where
             .filter(|value| value.is_finite())
             .map(Some)
             .ok_or_else(|| de::Error::custom("expected a finite number")),
-        Some(Value::String(raw)) => raw
-            .trim()
-            .parse::<f64>()
-            .ok()
-            .filter(|value| value.is_finite())
-            .map(Some)
-            .ok_or_else(|| de::Error::custom("expected a finite number or numeric string")),
-        Some(_) => Err(de::Error::custom(
-            "expected a finite number or numeric string",
-        )),
+        Some(_) => Err(de::Error::custom("expected a finite number")),
     }
 }
 
@@ -166,10 +155,7 @@ pub struct AdminSystemConfigImportStats {
 pub struct AdminSystemConfigGlobalModel {
     pub name: String,
     pub display_name: String,
-    #[serde(
-        default,
-        deserialize_with = "deserialize_optional_f64_from_number_or_string"
-    )]
+    #[serde(default, deserialize_with = "deserialize_optional_f64_from_number")]
     pub default_price_per_request: Option<f64>,
     #[serde(default)]
     pub default_tiered_pricing: Option<Value>,
@@ -258,10 +244,7 @@ pub struct AdminSystemConfigProviderModel {
     pub provider_model_name: String,
     #[serde(default)]
     pub provider_model_mappings: Option<Value>,
-    #[serde(
-        default,
-        deserialize_with = "deserialize_optional_f64_from_number_or_string"
-    )]
+    #[serde(default, deserialize_with = "deserialize_optional_f64_from_number")]
     pub price_per_request: Option<f64>,
     #[serde(default)]
     pub tiered_pricing: Option<Value>,
@@ -292,10 +275,7 @@ pub struct AdminSystemConfigProvider {
     pub provider_type: Option<String>,
     #[serde(default)]
     pub billing_type: Option<String>,
-    #[serde(
-        default,
-        deserialize_with = "deserialize_optional_f64_from_number_or_string"
-    )]
+    #[serde(default, deserialize_with = "deserialize_optional_f64_from_number")]
     pub monthly_quota_usd: Option<f64>,
     #[serde(default)]
     pub quota_reset_day: Option<u64>,
@@ -311,15 +291,9 @@ pub struct AdminSystemConfigProvider {
     pub concurrent_limit: Option<i32>,
     #[serde(default)]
     pub max_retries: Option<i32>,
-    #[serde(
-        default,
-        deserialize_with = "deserialize_optional_f64_from_number_or_string"
-    )]
+    #[serde(default, deserialize_with = "deserialize_optional_f64_from_number")]
     pub stream_first_byte_timeout: Option<f64>,
-    #[serde(
-        default,
-        deserialize_with = "deserialize_optional_f64_from_number_or_string"
-    )]
+    #[serde(default, deserialize_with = "deserialize_optional_f64_from_number")]
     pub request_timeout: Option<f64>,
     #[serde(default)]
     pub proxy: Option<Value>,
@@ -1888,8 +1862,31 @@ mod tests {
 
     #[test]
     fn parse_admin_system_config_import_request_accepts_supported_versions() {
-        for version in ADMIN_SYSTEM_CONFIG_SUPPORTED_VERSIONS {
-            let parsed = parse_admin_system_config_import_request(
+        let parsed = parse_admin_system_config_import_request(
+            json!({
+                "version": ADMIN_SYSTEM_CONFIG_EXPORT_VERSION,
+                "global_models": [],
+                "providers": [],
+            })
+            .to_string()
+            .as_bytes(),
+        )
+        .expect("current version should parse");
+
+        assert_eq!(
+            parsed.request.document.version,
+            ADMIN_SYSTEM_CONFIG_EXPORT_VERSION
+        );
+        assert_eq!(parsed.request.merge_mode, AdminImportMergeMode::Skip);
+        assert!(parsed.request.document.oauth_providers.is_empty());
+        assert!(parsed.request.document.system_configs.is_empty());
+        assert!(parsed.request.document.ldap_config.is_none());
+    }
+
+    #[test]
+    fn parse_admin_system_config_import_request_rejects_removed_versions() {
+        for version in ["2.0", "2.1"] {
+            let err = parse_admin_system_config_import_request(
                 json!({
                     "version": version,
                     "global_models": [],
@@ -1898,13 +1895,16 @@ mod tests {
                 .to_string()
                 .as_bytes(),
             )
-            .expect("supported version should parse");
+            .expect_err("removed versions should fail");
 
-            assert_eq!(parsed.request.document.version, *version);
-            assert_eq!(parsed.request.merge_mode, AdminImportMergeMode::Skip);
-            assert!(parsed.request.document.oauth_providers.is_empty());
-            assert!(parsed.request.document.system_configs.is_empty());
-            assert!(parsed.request.document.ldap_config.is_none());
+            assert_eq!(err.0, http::StatusCode::BAD_REQUEST);
+            assert_eq!(
+                err.1["detail"],
+                format!(
+                    "不支持的配置版本: {version}，支持的版本: {}",
+                    ADMIN_SYSTEM_CONFIG_SUPPORTED_VERSIONS.join(", ")
+                )
+            );
         }
     }
 
@@ -1954,8 +1954,8 @@ mod tests {
     }
 
     #[test]
-    fn parse_admin_system_config_import_request_accepts_numeric_string_fields() {
-        let parsed = parse_admin_system_config_import_request(
+    fn parse_admin_system_config_import_request_rejects_numeric_string_fields() {
+        let err = parse_admin_system_config_import_request(
             json!({
                 "version": "2.2",
                 "global_models": [{
@@ -1978,27 +1978,12 @@ mod tests {
             .to_string()
             .as_bytes(),
         )
-        .expect("numeric string fields should parse");
+        .expect_err("numeric string fields should fail");
 
-        let global_model = parsed
-            .request
-            .document
-            .global_models
-            .first()
-            .expect("global model should exist");
-        assert_eq!(global_model.default_price_per_request, Some(1.8));
-
-        let provider = parsed
-            .request
-            .document
-            .providers
-            .first()
-            .expect("provider should exist");
-        assert_eq!(provider.monthly_quota_usd, Some(12.5));
-        assert_eq!(provider.stream_first_byte_timeout, Some(60.0));
-        assert_eq!(provider.request_timeout, Some(120.0));
-        assert_eq!(provider.models.len(), 1);
-        assert_eq!(provider.models[0].price_per_request, Some(0.7));
+        assert_eq!(err.0, http::StatusCode::BAD_REQUEST);
+        let detail = err.1["detail"].as_str().expect("detail should be a string");
+        assert!(detail.contains("配置文件格式无效"));
+        assert!(detail.contains("default_price_per_request"));
     }
 
     #[test]

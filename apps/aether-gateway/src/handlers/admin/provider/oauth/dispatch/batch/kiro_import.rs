@@ -2,9 +2,11 @@ use super::parse::{AdminProviderOAuthBatchImportEntry, AdminProviderOAuthBatchIm
 use crate::handlers::admin::provider::oauth::duplicates::find_duplicate_provider_oauth_key;
 use crate::handlers::admin::provider::oauth::provisioning::{
     create_provider_oauth_catalog_key, provider_oauth_active_api_formats,
-    provider_oauth_key_proxy_value, update_existing_provider_oauth_catalog_key,
+    update_existing_provider_oauth_catalog_key,
 };
-use crate::handlers::admin::provider::oauth::runtime::refresh_provider_oauth_account_state_after_update;
+use crate::handlers::admin::provider::oauth::runtime::{
+    provider_oauth_runtime_endpoint_for_provider, refresh_provider_oauth_account_state_after_update,
+};
 use crate::handlers::admin::provider::oauth::state::decode_jwt_claims;
 use crate::handlers::admin::provider::shared::support::ADMIN_PROVIDER_OAUTH_DATA_UNAVAILABLE_DETAIL;
 use crate::handlers::admin::request::{AdminAppState, AdminKiroAuthConfig};
@@ -14,6 +16,7 @@ use aether_admin::provider::oauth::{
     build_kiro_batch_import_key_name, coerce_admin_provider_oauth_import_str,
     parse_admin_provider_oauth_kiro_batch_import_entries,
 };
+use aether_contracts::ProxySnapshot;
 use serde_json::{json, Map, Value};
 use std::collections::BTreeSet;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -102,7 +105,7 @@ fn admin_provider_oauth_kiro_refresh_error_detail(
 async fn refresh_admin_provider_oauth_kiro_auth_config(
     state: &AdminAppState<'_>,
     auth_config: &AdminKiroAuthConfig,
-    proxy_node_id: Option<&str>,
+    proxy: Option<ProxySnapshot>,
     social_refresh_base_url: Option<&str>,
     idc_refresh_base_url: Option<&str>,
 ) -> Result<AdminKiroAuthConfig, String> {
@@ -164,7 +167,7 @@ async fn refresh_admin_provider_oauth_kiro_auth_config(
                     "grantType": "refresh_token",
                 })),
                 None,
-                proxy_node_id,
+                proxy.clone(),
             )
             .await
             .map_err(|err| format!("IDC refresh 请求失败: {err}"))?;
@@ -268,7 +271,7 @@ async fn refresh_admin_provider_oauth_kiro_auth_config(
                     .unwrap_or_default(),
             })),
             None,
-            proxy_node_id,
+            proxy,
         )
         .await
         .map_err(|err| format!("social refresh 请求失败: {err}"))?;
@@ -352,7 +355,18 @@ pub(super) async fn execute_admin_provider_oauth_kiro_batch_import(
     let endpoints = state
         .list_provider_catalog_endpoints_by_provider_ids(&[provider_id.to_string()])
         .await?;
-    let key_proxy = provider_oauth_key_proxy_value(proxy_node_id);
+    let runtime_endpoint = provider_oauth_runtime_endpoint_for_provider("kiro", &endpoints);
+    let request_proxy = state
+        .resolve_admin_provider_oauth_operation_proxy_snapshot(
+            proxy_node_id,
+            &[
+                runtime_endpoint
+                    .as_ref()
+                    .and_then(|endpoint| endpoint.proxy.as_ref()),
+                provider.proxy.as_ref(),
+            ],
+        )
+        .await;
     let social_refresh_base_url =
         admin_provider_oauth_kiro_refresh_base_url_override(state, "kiro_social_refresh");
     let idc_refresh_base_url =
@@ -392,7 +406,7 @@ pub(super) async fn execute_admin_provider_oauth_kiro_batch_import(
         refreshed_auth_config = match refresh_admin_provider_oauth_kiro_auth_config(
             state,
             &refreshed_auth_config,
-            proxy_node_id,
+            request_proxy.clone(),
             social_refresh_base_url.as_deref(),
             idc_refresh_base_url.as_deref(),
         )
@@ -477,7 +491,7 @@ pub(super) async fn execute_admin_provider_oauth_kiro_batch_import(
                 &existing_key,
                 &access_token,
                 &auth_config,
-                key_proxy.clone(),
+                None,
                 refreshed_auth_config.expires_at,
             )
             .await?
@@ -511,7 +525,7 @@ pub(super) async fn execute_admin_provider_oauth_kiro_batch_import(
                 &access_token,
                 &auth_config,
                 &provider_oauth_active_api_formats(&endpoints),
-                key_proxy.clone(),
+                None,
                 refreshed_auth_config.expires_at,
             )
             .await?

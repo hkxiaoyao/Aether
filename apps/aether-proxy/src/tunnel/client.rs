@@ -31,6 +31,7 @@ pub async fn connect_and_run(
     server: &Arc<ServerContext>,
     conn_idx: usize,
     shutdown: &mut watch::Receiver<bool>,
+    drain: watch::Receiver<bool>,
 ) -> Result<TunnelOutcome, anyhow::Error> {
     let ws_url = build_tunnel_url(server);
     info!(url = %ws_url, conn = conn_idx, "connecting tunnel");
@@ -53,8 +54,7 @@ pub async fn connect_and_run(
         http::HeaderValue::from_str(&dynamic_node_name)?,
     );
     // Advertise per-connection max concurrent streams so the backend can
-    // respect the proxy's capacity limit (backward-compatible: old backends
-    // ignore this header).
+    // respect the proxy's capacity limit.
     let max_streams = state.config.tunnel_max_streams.unwrap_or(128);
     headers.insert("X-Tunnel-Max-Streams", http::HeaderValue::from(max_streams));
 
@@ -67,13 +67,16 @@ pub async fn connect_and_run(
     let port = uri.port_u16().unwrap_or(if is_tls { 443 } else { 80 });
 
     // TCP connect with timeout
-    let connect_timeout = Duration::from_secs(state.config.tunnel_connect_timeout_secs);
+    let connect_timeout = state
+        .config
+        .tunnel_connect_timeout()
+        .expect("validated config should resolve tunnel connect timeout");
     let tcp_stream = tokio::time::timeout(connect_timeout, TcpStream::connect((host, port)))
         .await
         .map_err(|_| {
             anyhow::anyhow!(
-                "tunnel TCP connect timeout ({}s)",
-                connect_timeout.as_secs()
+                "tunnel TCP connect timeout ({}ms)",
+                connect_timeout.as_millis()
             )
         })??;
 
@@ -96,7 +99,7 @@ pub async fn connect_and_run(
         max_message_size: Some(64 << 20),
         ..Default::default()
     };
-    let handshake_timeout = Duration::from_secs(state.config.tunnel_connect_timeout_secs);
+    let handshake_timeout = connect_timeout;
     let (ws_stream, _response) = tokio::time::timeout(
         handshake_timeout,
         tokio_tungstenite::client_async_tls_with_config(
@@ -109,16 +112,25 @@ pub async fn connect_and_run(
     .await
     .map_err(|_| {
         anyhow::anyhow!(
-            "tunnel WebSocket handshake timeout ({}s)",
-            handshake_timeout.as_secs()
+            "tunnel WebSocket handshake timeout ({}ms)",
+            handshake_timeout.as_millis()
         )
     })??;
+    let stale_timeout = state
+        .config
+        .tunnel_stale_timeout()
+        .expect("validated config should resolve tunnel stale timeout");
+    let ping_interval = state
+        .config
+        .tunnel_ping_interval()
+        .expect("validated config should resolve tunnel ping interval");
     info!(
         conn = conn_idx,
         tcp_keepalive_secs = state.config.tunnel_tcp_keepalive_secs,
         tcp_nodelay = state.config.tunnel_tcp_nodelay,
-        connect_timeout_secs = state.config.tunnel_connect_timeout_secs,
-        stale_timeout_secs = state.config.tunnel_stale_timeout_secs,
+        connect_timeout_ms = connect_timeout.as_millis(),
+        stale_timeout_ms = stale_timeout.as_millis(),
+        ping_interval_ms = ping_interval.as_millis(),
         "tunnel connected"
     );
 
@@ -129,8 +141,8 @@ pub async fn connect_and_run(
     let (ws_sink, ws_read) = futures_util::StreamExt::split(ws_stream);
 
     // Spawn writer task (with WebSocket ping keepalive)
-    let ping_interval = Duration::from_secs(state.config.tunnel_ping_interval_secs);
     let (frame_tx, mut writer_handle) = writer::spawn_writer(ws_sink, ping_interval);
+    let drain_signal = spawn_drain_signal(conn_idx, frame_tx.clone(), drain.clone());
 
     // Spawn heartbeat task (only for primary connection to avoid
     // resetting shared atomic metrics via swap(0))
@@ -153,7 +165,14 @@ pub async fn connect_and_run(
     let state_clone = Arc::clone(state);
     let server_clone = Arc::clone(server);
     let outcome = tokio::select! {
-        result = dispatcher::run(state_clone, server_clone, ws_read, frame_tx.clone(), hb_handle) => {
+        result = dispatcher::run(
+            state_clone,
+            server_clone,
+            ws_read,
+            frame_tx.clone(),
+            hb_handle,
+            drain.clone(),
+        ) => {
             match result {
                 Ok(()) => TunnelOutcome::Disconnected,
                 Err(e) => return Err(e),
@@ -181,6 +200,10 @@ pub async fn connect_and_run(
     // Drop our sender; the writer will exit once all stream handler clones
     // are also dropped (i.e. after they finish their in-flight work).
     drop(frame_tx);
+    if !drain_signal.is_finished() {
+        drain_signal.abort();
+        let _ = drain_signal.await;
+    }
 
     // Wait for the writer task to finish with a generous timeout — the
     // dispatcher already waits up to 30s for stream handlers, so 35s here
@@ -192,6 +215,35 @@ pub async fn connect_and_run(
 
     info!("tunnel disconnected");
     Ok(outcome)
+}
+
+fn spawn_drain_signal(
+    conn_idx: usize,
+    frame_tx: writer::FrameSender,
+    mut drain: watch::Receiver<bool>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        if !*drain.borrow() {
+            loop {
+                if drain.changed().await.is_err() {
+                    return;
+                }
+                if *drain.borrow() {
+                    break;
+                }
+            }
+        }
+
+        debug!(conn = conn_idx, "sending GOAWAY for tunnel drain");
+        let _ = tokio::time::timeout(
+            Duration::from_millis(250),
+            frame_tx.send(super::protocol::Frame::control(
+                super::protocol::MsgType::GoAway,
+                bytes::Bytes::new(),
+            )),
+        )
+        .await;
+    })
 }
 
 /// Configure TCP keepalive and NODELAY on an established socket.

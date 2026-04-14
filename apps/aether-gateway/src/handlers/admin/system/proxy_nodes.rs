@@ -1,5 +1,6 @@
 use std::time::{Duration, Instant};
 
+use crate::execution_runtime::transport::format_upstream_request_error;
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::handlers::admin::shared::query_param_value;
 use crate::maintenance::{
@@ -12,6 +13,9 @@ use aether_admin::system::{
     admin_proxy_node_event_node_id_from_path, build_admin_proxy_node_payload,
     build_admin_proxy_nodes_data_unavailable_response, build_admin_proxy_nodes_not_found_response,
 };
+use aether_contracts::tunnel::{
+    TUNNEL_RELAY_FORWARDED_BY_HEADER, TUNNEL_RELAY_OWNER_INSTANCE_HEADER,
+};
 use axum::{
     body::{Body, Bytes},
     http,
@@ -21,7 +25,6 @@ use axum::{
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use tokio::{net::TcpStream, time::timeout};
 
 #[derive(Debug, Deserialize)]
 struct ProxyNodeRegisterRequest {
@@ -131,6 +134,61 @@ const JSON_OBJECT_REQUIRED_DETAIL: &str = "请求体必须是合法的 JSON 对�
 const DEFAULT_PROXY_UPGRADE_BATCH_SIZE: usize = 1;
 const DEFAULT_PROXY_UPGRADE_COOLDOWN_SECS: u64 = 60;
 const DEFAULT_PROXY_UPGRADE_PROBE_TIMEOUT_SECS: u64 = 10;
+const DEFAULT_PROXY_CONNECTIVITY_PROBE_URL: &str = "https://www.cloudflare.com/cdn-cgi/trace";
+const PROXY_CONNECTIVITY_TIMEOUT_SECS: u64 = 10;
+const TUNNEL_RELAY_ENVELOPE_CONTENT_TYPE: &str = "application/vnd.aether.tunnel-envelope";
+const MAX_PROXY_CONNECTIVITY_RESPONSE_BYTES: usize = 64 * 1024;
+
+#[cfg(test)]
+fn manual_proxy_connectivity_probe_url_override() -> &'static std::sync::RwLock<Option<String>> {
+    static OVERRIDE: std::sync::OnceLock<std::sync::RwLock<Option<String>>> =
+        std::sync::OnceLock::new();
+    OVERRIDE.get_or_init(|| std::sync::RwLock::new(None))
+}
+
+#[cfg(test)]
+fn manual_proxy_connectivity_probe_url_override_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
+fn proxy_connectivity_probe_url() -> String {
+    #[cfg(test)]
+    if let Some(url) = manual_proxy_connectivity_probe_url_override()
+        .read()
+        .expect("probe url override lock should read")
+        .clone()
+    {
+        return url;
+    }
+
+    DEFAULT_PROXY_CONNECTIVITY_PROBE_URL.to_string()
+}
+
+#[cfg(test)]
+pub(crate) struct ProxyConnectivityProbeUrlOverrideGuard(std::sync::MutexGuard<'static, ()>);
+
+#[cfg(test)]
+pub(crate) fn override_proxy_connectivity_probe_url_for_tests(
+    url: impl Into<String>,
+) -> ProxyConnectivityProbeUrlOverrideGuard {
+    let guard = manual_proxy_connectivity_probe_url_override_lock()
+        .lock()
+        .expect("probe url override lock should acquire");
+    *manual_proxy_connectivity_probe_url_override()
+        .write()
+        .expect("probe url override lock should write") = Some(url.into());
+    ProxyConnectivityProbeUrlOverrideGuard(guard)
+}
+
+#[cfg(test)]
+impl Drop for ProxyConnectivityProbeUrlOverrideGuard {
+    fn drop(&mut self) {
+        *manual_proxy_connectivity_probe_url_override()
+            .write()
+            .expect("probe url override lock should write") = None;
+    }
+}
 
 pub(crate) async fn maybe_build_local_admin_proxy_nodes_response(
     state: &AdminAppState<'_>,
@@ -184,6 +242,26 @@ pub(crate) async fn maybe_build_local_admin_proxy_nodes_response(
             state
                 .build_admin_proxy_node_events_response(node_id, limit)
                 .await?,
+        ));
+    }
+
+    if decision.route_kind.as_deref() == Some("get_node")
+        && request_context.method() == http::Method::GET
+    {
+        if !state.has_proxy_node_reader() {
+            return Ok(Some(build_admin_proxy_nodes_data_unavailable_response()));
+        }
+        let Some(node_id) = admin_proxy_node_node_id_from_path(request_context.path()) else {
+            return Ok(Some(build_admin_proxy_nodes_not_found_response()));
+        };
+        let Some(node) = state.find_proxy_node(&node_id).await? else {
+            return Ok(Some(build_admin_proxy_nodes_not_found_response()));
+        };
+        return Ok(Some(
+            Json(json!({
+                "node": build_admin_proxy_node_detail_payload(&node),
+            }))
+            .into_response(),
         ));
     }
 
@@ -367,7 +445,7 @@ pub(crate) async fn maybe_build_local_admin_proxy_nodes_response(
             return Ok(Some(build_admin_proxy_nodes_not_found_response()));
         };
         return Ok(Some(
-            Json(test_proxy_node_connectivity(&node).await).into_response(),
+            Json(test_proxy_node_connectivity(state, &node).await).into_response(),
         ));
     }
 
@@ -383,15 +461,7 @@ pub(crate) async fn maybe_build_local_admin_proxy_nodes_response(
             Err(response) => return Ok(Some(response)),
         };
         return Ok(Some(
-            Json(
-                test_manual_proxy_connectivity(
-                    &normalized.proxy_url,
-                    normalized.host.as_str(),
-                    normalized.port,
-                )
-                .await,
-            )
-            .into_response(),
+            Json(test_manual_proxy_connectivity(&normalized).await).into_response(),
         ));
     }
 
@@ -716,6 +786,18 @@ struct DeletedProxyNodeCleanup {
     cleared_keys: usize,
 }
 
+fn build_admin_proxy_node_detail_payload(
+    node: &aether_data::repository::proxy_nodes::StoredProxyNode,
+) -> Value {
+    let mut payload = build_admin_proxy_node_payload(node);
+    if node.is_manual {
+        if let Value::Object(object) = &mut payload {
+            object.insert("proxy_password".to_string(), json!(node.proxy_password));
+        }
+    }
+    payload
+}
+
 #[derive(Debug, Clone)]
 struct NormalizedManualProxyEndpoint {
     proxy_url: String,
@@ -832,6 +914,7 @@ fn proxy_reference_matches_node_id(value: Option<&Value>, node_id: &str) -> bool
 }
 
 async fn test_proxy_node_connectivity(
+    state: &AdminAppState<'_>,
     node: &aether_data::repository::proxy_nodes::StoredProxyNode,
 ) -> Value {
     if node.is_manual {
@@ -854,12 +937,13 @@ async fn test_proxy_node_connectivity(
                 });
             }
         };
-        return test_manual_proxy_connectivity(
+        let proxy_url = proxy_url_with_auth(
             &endpoint.proxy_url,
-            endpoint.host.as_str(),
-            endpoint.port,
+            node.proxy_username.as_deref(),
+            node.proxy_password.as_deref(),
         )
-        .await;
+        .unwrap_or(endpoint.proxy_url);
+        return test_manual_proxy_connectivity(&proxy_url).await;
     }
 
     if !node.tunnel_mode {
@@ -880,39 +964,269 @@ async fn test_proxy_node_connectivity(
         });
     }
 
+    let probe_url = proxy_connectivity_probe_url();
+    match probe_tunnel_proxy_connectivity(state.app(), &node.id, &probe_url).await {
+        Ok(result) => {
+            if let Ok(status) = reqwest::StatusCode::from_u16(result.status) {
+                if status.is_success() {
+                    return json!({
+                        "success": true,
+                        "latency_ms": result.latency_ms,
+                        "exit_ip": parse_proxy_probe_exit_ip(&result.body),
+                        "error": null,
+                    });
+                }
+
+                return json!({
+                    "success": false,
+                    "latency_ms": null,
+                    "exit_ip": null,
+                    "error": sanitize_proxy_error(&format_proxy_probe_status_error(status, &result.body)),
+                });
+            }
+
+            json!({
+                "success": false,
+                "latency_ms": null,
+                "exit_ip": null,
+                "error": format!("代理探测返回非法状态码: {}", result.status),
+            })
+        }
+        Err(error) => json!({
+            "success": false,
+            "latency_ms": null,
+            "exit_ip": null,
+            "error": sanitize_proxy_error(&error),
+        }),
+    }
+}
+
+async fn test_manual_proxy_connectivity(proxy_url: &str) -> Value {
+    let probe_url = proxy_connectivity_probe_url();
+    test_manual_proxy_connectivity_with_probe_url(proxy_url, &probe_url).await
+}
+
+async fn test_manual_proxy_connectivity_with_probe_url(proxy_url: &str, probe_url: &str) -> Value {
+    let started_at = Instant::now();
+    let proxy = match reqwest::Proxy::all(proxy_url) {
+        Ok(proxy) => proxy,
+        Err(error) => {
+            return json!({
+                "success": false,
+                "latency_ms": null,
+                "exit_ip": null,
+                "error": sanitize_proxy_error(&format_upstream_request_error(&error)),
+            });
+        }
+    };
+    let mut builder = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(PROXY_CONNECTIVITY_TIMEOUT_SECS))
+        .proxy(proxy)
+        .user_agent("aether-gateway/proxy-connectivity");
+    if proxy_url
+        .trim()
+        .to_ascii_lowercase()
+        .starts_with("https://")
+    {
+        builder = builder.danger_accept_invalid_certs(true);
+    }
+    let client = match builder.build() {
+        Ok(client) => client,
+        Err(error) => {
+            return json!({
+                "success": false,
+                "latency_ms": null,
+                "exit_ip": null,
+                "error": sanitize_proxy_error(&format_upstream_request_error(&error)),
+            });
+        }
+    };
+
+    let response = match client.get(probe_url).send().await {
+        Ok(response) => response,
+        Err(error) => {
+            return json!({
+                "success": false,
+                "latency_ms": null,
+                "exit_ip": null,
+                "error": sanitize_proxy_error(&format_upstream_request_error(&error)),
+            });
+        }
+    };
+    let status = response.status();
+    let body = match response.text().await {
+        Ok(body) => body,
+        Err(error) => {
+            return json!({
+                "success": false,
+                "latency_ms": null,
+                "exit_ip": null,
+                "error": sanitize_proxy_error(&format_upstream_request_error(&error)),
+            });
+        }
+    };
+
+    if !status.is_success() {
+        return json!({
+            "success": false,
+            "latency_ms": null,
+            "exit_ip": null,
+            "error": sanitize_proxy_error(&format_proxy_probe_status_error(status, &body)),
+        });
+    }
+
     json!({
         "success": true,
-        "latency_ms": node.avg_latency_ms.map(|value| value.max(0.0).round() as u64),
-        "exit_ip": null,
+        "latency_ms": started_at.elapsed().as_millis() as u64,
+        "exit_ip": parse_proxy_probe_exit_ip(&body),
         "error": null,
     })
 }
 
-async fn test_manual_proxy_connectivity(_proxy_url: &str, host: &str, port: u16) -> Value {
-    let started_at = Instant::now();
-    match timeout(Duration::from_secs(5), TcpStream::connect((host, port))).await {
-        Ok(Ok(stream)) => {
-            drop(stream);
-            json!({
-                "success": true,
-                "latency_ms": started_at.elapsed().as_millis() as u64,
-                "exit_ip": null,
-                "error": null,
-            })
-        }
-        Ok(Err(error)) => json!({
-            "success": false,
-            "latency_ms": null,
-            "exit_ip": null,
-            "error": sanitize_proxy_error(&error.to_string()),
-        }),
-        Err(_) => json!({
-            "success": false,
-            "latency_ms": null,
-            "exit_ip": null,
-            "error": "连接超时",
-        }),
+struct TunnelConnectivityProbeResult {
+    status: u16,
+    body: String,
+    latency_ms: u64,
+}
+
+async fn probe_tunnel_proxy_connectivity(
+    state: &crate::AppState,
+    node_id: &str,
+    probe_url: &str,
+) -> Result<TunnelConnectivityProbeResult, String> {
+    let trimmed_node_id = node_id.trim();
+    if trimmed_node_id.is_empty() {
+        return Err("proxy node id is empty".to_string());
     }
+
+    if state.tunnel.has_local_proxy(trimmed_node_id) {
+        return probe_tunnel_proxy_connectivity_locally(state, trimmed_node_id, probe_url).await;
+    }
+
+    if let Some(owner) = state
+        .tunnel
+        .lookup_attachment_owner(state.data.as_ref(), trimmed_node_id)
+        .await
+        .map_err(|err| format!("lookup tunnel attachment owner failed: {err}"))?
+    {
+        if owner.gateway_instance_id != state.tunnel.local_instance_id() {
+            return probe_tunnel_proxy_connectivity_via_owner(
+                state,
+                trimmed_node_id,
+                probe_url,
+                &owner.relay_base_url,
+                &owner.gateway_instance_id,
+            )
+            .await;
+        }
+
+        state
+            .tunnel
+            .clear_local_attachment_if_stale(state.data.as_ref(), trimmed_node_id)
+            .await
+            .map_err(|err| format!("clear stale local tunnel attachment failed: {err}"))?;
+    }
+
+    probe_tunnel_proxy_connectivity_locally(state, trimmed_node_id, probe_url).await
+}
+
+async fn probe_tunnel_proxy_connectivity_locally(
+    state: &crate::AppState,
+    node_id: &str,
+    probe_url: &str,
+) -> Result<TunnelConnectivityProbeResult, String> {
+    let started_at = Instant::now();
+    let result = state
+        .tunnel
+        .probe_node_url_with_response(node_id, probe_url, PROXY_CONNECTIVITY_TIMEOUT_SECS)
+        .await?;
+    Ok(TunnelConnectivityProbeResult {
+        status: result.status,
+        body: result.body,
+        latency_ms: started_at.elapsed().as_millis() as u64,
+    })
+}
+
+async fn probe_tunnel_proxy_connectivity_via_owner(
+    state: &crate::AppState,
+    node_id: &str,
+    probe_url: &str,
+    relay_base_url: &str,
+    owner_instance_id: &str,
+) -> Result<TunnelConnectivityProbeResult, String> {
+    let owner_url = build_tunnel_owner_relay_url(relay_base_url, node_id)?;
+    let started_at = Instant::now();
+    let response = state
+        .client
+        .post(owner_url)
+        .header(
+            http::header::CONTENT_TYPE,
+            TUNNEL_RELAY_ENVELOPE_CONTENT_TYPE,
+        )
+        .header(
+            TUNNEL_RELAY_FORWARDED_BY_HEADER,
+            state.tunnel.local_instance_id(),
+        )
+        .header(TUNNEL_RELAY_OWNER_INSTANCE_HEADER, owner_instance_id)
+        .timeout(Duration::from_secs(PROXY_CONNECTIVITY_TIMEOUT_SECS))
+        .body(build_tunnel_probe_relay_envelope(probe_url)?)
+        .send()
+        .await
+        .map_err(|error| format!("owner tunnel relay probe failed: {error}"))?;
+    let status = response.status();
+    let body = response
+        .bytes()
+        .await
+        .map_err(|error| format!("failed to read owner tunnel relay probe body: {error}"))?;
+    if body.len() > MAX_PROXY_CONNECTIVITY_RESPONSE_BYTES {
+        return Err(format!(
+            "owner tunnel relay probe body exceeds {} bytes",
+            MAX_PROXY_CONNECTIVITY_RESPONSE_BYTES
+        ));
+    }
+
+    Ok(TunnelConnectivityProbeResult {
+        status: status.as_u16(),
+        body: String::from_utf8_lossy(&body).to_string(),
+        latency_ms: started_at.elapsed().as_millis() as u64,
+    })
+}
+
+fn build_tunnel_probe_relay_envelope(probe_url: &str) -> Result<Vec<u8>, String> {
+    let meta = crate::tunnel::tunnel_protocol::RequestMeta {
+        method: "GET".to_string(),
+        url: probe_url.trim().to_string(),
+        headers: std::collections::HashMap::new(),
+        timeout: PROXY_CONNECTIVITY_TIMEOUT_SECS,
+        follow_redirects: Some(false),
+        http1_only: false,
+    };
+    let meta_bytes = serde_json::to_vec(&meta)
+        .map_err(|error| format!("encode tunnel probe metadata failed: {error}"))?;
+    let mut envelope = Vec::with_capacity(4 + meta_bytes.len());
+    envelope.extend_from_slice(&(meta_bytes.len() as u32).to_be_bytes());
+    envelope.extend_from_slice(&meta_bytes);
+    Ok(envelope)
+}
+
+fn build_tunnel_owner_relay_url(relay_base_url: &str, node_id: &str) -> Result<String, String> {
+    let mut url = url::Url::parse(relay_base_url)
+        .map_err(|error| format!("invalid owner relay base url: {error}"))?;
+    {
+        let mut segments = url
+            .path_segments_mut()
+            .map_err(|_| "owner relay base url cannot be a base-less URL".to_string())?;
+        segments.pop_if_empty();
+        segments.push("api");
+        segments.push("internal");
+        segments.push("tunnel");
+        segments.push("relay");
+        segments.push(node_id.trim());
+    }
+    Ok(url.to_string())
 }
 
 fn validate_register_request(
@@ -1039,10 +1353,16 @@ fn validate_manual_update_request(
 
 fn validate_proxy_test_url_request(
     input: ProxyNodeTestUrlRequest,
-) -> Result<NormalizedManualProxyEndpoint, Response<Body>> {
-    let _ = normalize_optional_string(input.username.as_deref(), "username", 255)?;
-    let _ = normalize_optional_string(input.password.as_deref(), "password", 500)?;
-    normalize_manual_proxy_endpoint(&input.proxy_url)
+) -> Result<String, Response<Body>> {
+    let username = normalize_optional_string(input.username.as_deref(), "username", 255)?;
+    let password = normalize_optional_string(input.password.as_deref(), "password", 500)?;
+    let endpoint = normalize_manual_proxy_endpoint(&input.proxy_url)?;
+    Ok(proxy_url_with_auth(
+        &endpoint.proxy_url,
+        username.as_deref(),
+        password.as_deref(),
+    )
+    .unwrap_or(endpoint.proxy_url))
 }
 
 fn admin_proxy_node_upgrade_action_node_id_from_path(path: &str, suffix: &str) -> Option<String> {
@@ -1423,6 +1743,53 @@ fn sanitize_proxy_error(detail: &str) -> String {
         },
         None => detail.to_string(),
     }
+}
+
+fn proxy_url_with_auth(
+    proxy_url: &str,
+    username: Option<&str>,
+    password: Option<&str>,
+) -> Option<String> {
+    let username = username.map(str::trim).filter(|value| !value.is_empty())?;
+    let mut parsed = url::Url::parse(proxy_url).ok()?;
+    if parsed.set_username(username).is_err() {
+        return None;
+    }
+
+    let password = password.map(str::trim).filter(|value| !value.is_empty());
+    if parsed.set_password(password).is_err() {
+        return None;
+    }
+    Some(parsed.to_string())
+}
+
+fn parse_proxy_probe_exit_ip(body: &str) -> Option<String> {
+    body.lines().find_map(|line| {
+        let (key, value) = line.split_once('=')?;
+        if key.trim() != "ip" {
+            return None;
+        }
+        let value = value.trim();
+        if value.is_empty() {
+            return None;
+        }
+        Some(value.to_string())
+    })
+}
+
+fn format_proxy_probe_status_error(status: reqwest::StatusCode, body: &str) -> String {
+    let body = body.trim();
+    if body.is_empty() {
+        return format!("代理探测返回 HTTP {}", status.as_u16());
+    }
+
+    let truncated = if body.chars().count() > 200 {
+        let shortened: String = body.chars().take(200).collect();
+        format!("{shortened}...")
+    } else {
+        body.to_string()
+    };
+    format!("代理探测返回 HTTP {}: {truncated}", status.as_u16())
 }
 
 fn validate_optional_counter(value: Option<i64>, field: &str) -> Result<(), Response<Body>> {

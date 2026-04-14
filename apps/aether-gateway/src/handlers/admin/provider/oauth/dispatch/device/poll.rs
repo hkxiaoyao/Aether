@@ -5,9 +5,11 @@ use crate::handlers::admin::provider::oauth::duplicates::find_duplicate_provider
 use crate::handlers::admin::provider::oauth::errors::build_internal_control_error_response;
 use crate::handlers::admin::provider::oauth::provisioning::{
     create_provider_oauth_catalog_key, provider_oauth_active_api_formats,
-    provider_oauth_key_proxy_value, update_existing_provider_oauth_catalog_key,
+    update_existing_provider_oauth_catalog_key,
 };
-use crate::handlers::admin::provider::oauth::runtime::refresh_provider_oauth_account_state_after_update;
+use crate::handlers::admin::provider::oauth::runtime::{
+    provider_oauth_runtime_endpoint_for_provider, refresh_provider_oauth_account_state_after_update,
+};
 use crate::handlers::admin::provider::oauth::state::{
     build_admin_provider_oauth_backend_unavailable_response, build_kiro_device_key_name,
     current_unix_secs, decode_jwt_claims, json_non_empty_string, json_u64_value,
@@ -125,6 +127,21 @@ pub(super) async fn handle_admin_provider_oauth_device_poll(
             "Provider 不存在",
         ));
     };
+    let endpoints = state
+        .list_provider_catalog_endpoints_by_provider_ids(std::slice::from_ref(&provider_id))
+        .await?;
+    let runtime_endpoint = provider_oauth_runtime_endpoint_for_provider("kiro", &endpoints);
+    let request_proxy = state
+        .resolve_admin_provider_oauth_operation_proxy_snapshot(
+            session.proxy_node_id.as_deref(),
+            &[
+                runtime_endpoint
+                    .as_ref()
+                    .and_then(|endpoint| endpoint.proxy.as_ref()),
+                provider.proxy.as_ref(),
+            ],
+        )
+        .await;
 
     let token_result = match state
         .poll_admin_kiro_device_token(
@@ -132,7 +149,7 @@ pub(super) async fn handle_admin_provider_oauth_device_poll(
             &session.client_id,
             &session.client_secret,
             &session.device_code,
-            session.proxy_node_id.as_deref(),
+            request_proxy,
         )
         .await
     {
@@ -252,12 +269,7 @@ pub(super) async fn handle_admin_provider_oauth_device_poll(
         }
     };
 
-    let key_proxy = provider_oauth_key_proxy_value(session.proxy_node_id.as_deref());
-    let api_formats = provider_oauth_active_api_formats(
-        &state
-            .list_provider_catalog_endpoints_by_provider_ids(std::slice::from_ref(&provider_id))
-            .await?,
-    );
+    let api_formats = provider_oauth_active_api_formats(&endpoints);
     let mut replaced = false;
     let persisted_key = if let Some(existing_key) = duplicate {
         replaced = true;
@@ -266,7 +278,7 @@ pub(super) async fn handle_admin_provider_oauth_device_poll(
                 &existing_key,
                 &access_token,
                 &auth_config,
-                key_proxy.clone(),
+                None,
                 Some(expires_at),
             )
             .await?
@@ -288,7 +300,7 @@ pub(super) async fn handle_admin_provider_oauth_device_poll(
                 &access_token,
                 &auth_config,
                 &api_formats,
-                key_proxy.clone(),
+                None,
                 Some(expires_at),
             )
             .await?

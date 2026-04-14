@@ -3,8 +3,17 @@ use super::super::errors::{
 };
 use super::json_non_empty_string;
 use crate::handlers::admin::request::{AdminAppState, AdminProviderOAuthTemplate};
+use aether_contracts::ProxySnapshot;
 use axum::{body::Body, http, response::Response};
 use url::form_urlencoded;
+
+fn provider_oauth_transport_error_detail(prefix: &str, error: &str) -> String {
+    let error = error.trim();
+    if error.is_empty() {
+        return prefix.to_string();
+    }
+    format!("{prefix}: {error}")
+}
 
 pub(crate) async fn exchange_admin_provider_oauth_code(
     state: &AdminAppState<'_>,
@@ -12,7 +21,7 @@ pub(crate) async fn exchange_admin_provider_oauth_code(
     code: &str,
     state_nonce: &str,
     pkce_verifier: Option<&str>,
-    proxy_node_id: Option<&str>,
+    proxy: Option<ProxySnapshot>,
 ) -> Result<serde_json::Value, Response<Body>> {
     let token_url = state.provider_oauth_token_url(template.provider_type, template.token_url);
     let response = if template.provider_type == "claude_code" {
@@ -63,7 +72,7 @@ pub(crate) async fn exchange_admin_provider_oauth_code(
                 Some("application/json"),
                 Some(serde_json::Value::Object(body)),
                 None,
-                proxy_node_id,
+                proxy.clone(),
             )
             .await
     } else {
@@ -100,12 +109,15 @@ pub(crate) async fn exchange_admin_provider_oauth_code(
                 Some("application/x-www-form-urlencoded"),
                 None,
                 Some(form_body),
-                proxy_node_id,
+                proxy.clone(),
             )
             .await
     }
-    .map_err(|_| {
-        build_internal_control_error_response(http::StatusCode::BAD_REQUEST, "token exchange 失败")
+    .map_err(|error| {
+        build_internal_control_error_response(
+            http::StatusCode::BAD_REQUEST,
+            provider_oauth_transport_error_detail("token exchange 失败", &error),
+        )
     })?;
 
     if !response.status.is_success() {
@@ -134,7 +146,7 @@ pub(crate) async fn exchange_admin_provider_oauth_refresh_token(
     state: &AdminAppState<'_>,
     template: AdminProviderOAuthTemplate,
     refresh_token: &str,
-    proxy_node_id: Option<&str>,
+    proxy: Option<ProxySnapshot>,
 ) -> Result<serde_json::Value, Response<Body>> {
     let token_url = state.provider_oauth_token_url(template.provider_type, template.token_url);
     let scope = template.scopes.join(" ");
@@ -175,7 +187,7 @@ pub(crate) async fn exchange_admin_provider_oauth_refresh_token(
                 Some("application/json"),
                 Some(serde_json::Value::Object(body)),
                 None,
-                proxy_node_id,
+                proxy.clone(),
             )
             .await
     } else {
@@ -211,14 +223,17 @@ pub(crate) async fn exchange_admin_provider_oauth_refresh_token(
                 Some("application/x-www-form-urlencoded"),
                 None,
                 Some(form_body),
-                proxy_node_id,
+                proxy.clone(),
             )
             .await
     }
-    .map_err(|_| {
+    .map_err(|error| {
         build_internal_control_error_response(
             http::StatusCode::BAD_REQUEST,
-            "Refresh Token 验证失败: token exchange 失败",
+            provider_oauth_transport_error_detail(
+                "Refresh Token 验证失败: token exchange 失败",
+                &error,
+            ),
         )
     })?;
 

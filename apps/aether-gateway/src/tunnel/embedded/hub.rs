@@ -85,6 +85,7 @@ pub struct ProxyConn {
     next_stream_id: AtomicU32,
     pub stream_count: AtomicUsize,
     pub max_streams: usize,
+    draining: AtomicBool,
 }
 
 impl ProxyConn {
@@ -104,6 +105,7 @@ impl ProxyConn {
             next_stream_id: AtomicU32::new(2),
             stream_count: AtomicUsize::new(0),
             max_streams,
+            draining: AtomicBool::new(false),
         }
     }
 
@@ -159,11 +161,19 @@ impl ProxyConn {
     }
 
     pub fn is_available(&self) -> bool {
-        !self.outbound.is_closing()
+        !self.outbound.is_closing() && !self.is_draining()
     }
 
     pub fn request_close(&self) {
         self.outbound.mark_closing();
+    }
+
+    pub fn mark_draining(&self) -> bool {
+        !self.draining.swap(true, Ordering::AcqRel)
+    }
+
+    pub fn is_draining(&self) -> bool {
+        self.draining.load(Ordering::Acquire)
     }
 
     pub fn send(&self, msg: Message) -> SendStatus {
@@ -659,10 +669,16 @@ impl HubRouter {
             }
             protocol::PONG => {}
             protocol::GOAWAY => {
-                warn!(
-                    proxy_conn_id = proxy_conn_id,
-                    "received GOAWAY from proxy connection"
-                );
+                if let Some(pc) = self.proxy_conns_by_id.get(&proxy_conn_id) {
+                    let first = pc.mark_draining();
+                    if first {
+                        warn!(
+                            proxy_conn_id = proxy_conn_id,
+                            node_id = %pc.node_id,
+                            "received GOAWAY from proxy connection; marking connection draining"
+                        );
+                    }
+                }
             }
             _ => {
                 debug!(
@@ -973,6 +989,63 @@ mod tests {
         let second_header = protocol::FrameHeader::parse(&second).expect("second body header");
         assert_eq!(second_header.msg_type, protocol::REQUEST_BODY);
         assert_ne!(second_header.flags & protocol::FLAG_END_STREAM, 0);
+    }
+
+    #[tokio::test]
+    async fn goaway_marks_connection_draining_and_reroutes_new_streams() {
+        let hub = HubRouter::new(ControlPlaneClient::disabled());
+
+        let (proxy_one_tx, mut proxy_one_rx) = bounded_queue(8);
+        let (proxy_one_close_tx, _) = watch::channel(false);
+        let proxy_one = Arc::new(ProxyConn::new(
+            201,
+            "node-drain".to_string(),
+            "Node Drain".to_string(),
+            proxy_one_tx,
+            proxy_one_close_tx,
+            16,
+        ));
+        hub.register_proxy(Arc::clone(&proxy_one));
+
+        let (proxy_two_tx, mut proxy_two_rx) = bounded_queue(8);
+        let (proxy_two_close_tx, _) = watch::channel(false);
+        let proxy_two = Arc::new(ProxyConn::new(
+            202,
+            "node-drain".to_string(),
+            "Node Drain".to_string(),
+            proxy_two_tx,
+            proxy_two_close_tx,
+            16,
+        ));
+        hub.register_proxy(Arc::clone(&proxy_two));
+
+        let mut goaway = protocol::encode_goaway();
+        hub.handle_proxy_frame(201, &mut goaway).await;
+        assert!(
+            proxy_one.is_draining(),
+            "first connection should be draining"
+        );
+        assert!(
+            !proxy_two.is_draining(),
+            "second connection should remain schedulable"
+        );
+
+        let _stream = hub
+            .open_local_stream("node-drain", &build_meta())
+            .expect("open local stream");
+        assert!(
+            proxy_one_rx.try_recv().is_err(),
+            "draining connection should not receive new streams"
+        );
+        let routed = proxy_two_rx
+            .try_recv()
+            .expect("headers should route to second connection");
+        let routed_data = match routed {
+            Message::Binary(data) => data.to_vec(),
+            other => panic!("unexpected message: {other:?}"),
+        };
+        let header = protocol::FrameHeader::parse(&routed_data).expect("frame header");
+        assert_eq!(header.msg_type, protocol::REQUEST_HEADERS);
     }
 
     #[tokio::test]

@@ -6,4 +6,6 @@ mod proxy_nodes;
 mod routes;
 pub(super) mod shared;
 
+#[cfg(test)]
+pub(crate) use self::proxy_nodes::override_proxy_connectivity_probe_url_for_tests;
 pub(super) use self::routes::maybe_build_local_admin_system_response;

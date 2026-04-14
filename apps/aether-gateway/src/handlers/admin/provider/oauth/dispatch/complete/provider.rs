@@ -2,10 +2,11 @@ use super::super::super::duplicates::find_duplicate_provider_oauth_key;
 use super::super::super::errors::build_internal_control_error_response;
 use super::super::super::provisioning::{
     build_provider_oauth_auth_config_from_token_payload, create_provider_oauth_catalog_key,
-    provider_oauth_active_api_formats, provider_oauth_key_proxy_value,
-    update_existing_provider_oauth_catalog_key,
+    provider_oauth_active_api_formats, update_existing_provider_oauth_catalog_key,
 };
-use super::super::super::runtime::refresh_provider_oauth_account_state_after_update;
+use super::super::super::runtime::{
+    provider_oauth_runtime_endpoint_for_provider, refresh_provider_oauth_account_state_after_update,
+};
 use super::super::super::state::{
     admin_provider_oauth_template, build_admin_provider_oauth_backend_unavailable_response,
     is_fixed_provider_type_for_provider_oauth,
@@ -114,6 +115,21 @@ pub(super) async fn handle_admin_provider_oauth_complete_provider(
             "该 Provider 不支持 OAuth 授权",
         ));
     };
+    let endpoints = state
+        .list_provider_catalog_endpoints_by_provider_ids(std::slice::from_ref(&provider_id))
+        .await?;
+    let runtime_endpoint = provider_oauth_runtime_endpoint_for_provider(&provider_type, &endpoints);
+    let request_proxy = state
+        .resolve_admin_provider_oauth_operation_proxy_snapshot(
+            payload.proxy_node_id.as_deref(),
+            &[
+                runtime_endpoint
+                    .as_ref()
+                    .and_then(|endpoint| endpoint.proxy.as_ref()),
+                provider.proxy.as_ref(),
+            ],
+        )
+        .await;
 
     let token_payload = match state
         .exchange_admin_provider_oauth_code(
@@ -121,7 +137,7 @@ pub(super) async fn handle_admin_provider_oauth_complete_provider(
             &callback.code,
             &callback.state_nonce,
             state_data.pkce_verifier.as_deref(),
-            payload.proxy_node_id.as_deref(),
+            request_proxy,
         )
         .await
     {
@@ -138,11 +154,7 @@ pub(super) async fn handle_admin_provider_oauth_complete_provider(
         ));
     };
 
-    let endpoints = state
-        .list_provider_catalog_endpoints_by_provider_ids(std::slice::from_ref(&provider_id))
-        .await?;
     let api_formats = provider_oauth_active_api_formats(&endpoints);
-    let key_proxy = provider_oauth_key_proxy_value(payload.proxy_node_id.as_deref());
     let duplicate = match state
         .find_duplicate_provider_oauth_key(&provider_id, &auth_config, None)
         .await
@@ -163,7 +175,7 @@ pub(super) async fn handle_admin_provider_oauth_complete_provider(
                 &existing_key,
                 &access_token,
                 &auth_config,
-                key_proxy.clone(),
+                None,
                 expires_at,
             )
             .await?
@@ -204,7 +216,7 @@ pub(super) async fn handle_admin_provider_oauth_complete_provider(
                 &access_token,
                 &auth_config,
                 &api_formats,
-                key_proxy.clone(),
+                None,
                 expires_at,
             )
             .await?

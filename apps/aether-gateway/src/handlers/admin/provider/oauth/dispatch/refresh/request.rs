@@ -79,7 +79,7 @@ pub(super) async fn parse_admin_provider_oauth_refresh_request(
     let endpoints = state
         .list_provider_catalog_endpoints_by_provider_ids(std::slice::from_ref(&provider_id))
         .await?;
-    let Some(endpoint) = provider_oauth_runtime_endpoint_for_provider(&provider_type, endpoints)
+    let Some(endpoint) = provider_oauth_runtime_endpoint_for_provider(&provider_type, &endpoints)
     else {
         return Ok(RefreshDispatch::Respond(response::control_error_response(
             http::StatusCode::BAD_REQUEST,

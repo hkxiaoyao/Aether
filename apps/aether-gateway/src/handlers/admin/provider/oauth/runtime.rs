@@ -9,28 +9,34 @@ use aether_data_contracts::repository::provider_catalog::{
 
 pub(crate) fn provider_oauth_runtime_endpoint_for_provider(
     provider_type: &str,
-    endpoints: Vec<StoredProviderCatalogEndpoint>,
+    endpoints: &[StoredProviderCatalogEndpoint],
 ) -> Option<StoredProviderCatalogEndpoint> {
     let provider_type = provider_type.trim().to_ascii_lowercase();
     match provider_type.as_str() {
-        "codex" => endpoints.into_iter().find(|endpoint| {
-            endpoint.is_active
-                && endpoint
-                    .api_format
-                    .trim()
-                    .eq_ignore_ascii_case("openai:cli")
-        }),
-        "antigravity" => endpoints.into_iter().find(|endpoint| {
-            endpoint.is_active
-                && (endpoint
-                    .api_format
-                    .trim()
-                    .eq_ignore_ascii_case("gemini:chat")
-                    || endpoint
+        "codex" => endpoints
+            .iter()
+            .find(|endpoint| {
+                endpoint.is_active
+                    && endpoint
                         .api_format
                         .trim()
-                        .eq_ignore_ascii_case("gemini:cli"))
-        }),
+                        .eq_ignore_ascii_case("openai:cli")
+            })
+            .cloned(),
+        "antigravity" => endpoints
+            .iter()
+            .find(|endpoint| {
+                endpoint.is_active
+                    && (endpoint
+                        .api_format
+                        .trim()
+                        .eq_ignore_ascii_case("gemini:chat")
+                        || endpoint
+                            .api_format
+                            .trim()
+                            .eq_ignore_ascii_case("gemini:cli"))
+            })
+            .cloned(),
         "kiro" => endpoints
             .iter()
             .find(|endpoint| {
@@ -41,8 +47,16 @@ pub(crate) fn provider_oauth_runtime_endpoint_for_provider(
                         .eq_ignore_ascii_case("claude:cli")
             })
             .cloned()
-            .or_else(|| endpoints.into_iter().find(|endpoint| endpoint.is_active)),
-        _ => endpoints.into_iter().find(|endpoint| endpoint.is_active),
+            .or_else(|| {
+                endpoints
+                    .iter()
+                    .find(|endpoint| endpoint.is_active)
+                    .cloned()
+            }),
+        _ => endpoints
+            .iter()
+            .find(|endpoint| endpoint.is_active)
+            .cloned(),
     }
 }
 
@@ -59,7 +73,7 @@ pub(crate) async fn refresh_provider_oauth_account_state_after_update(
     let endpoints = state
         .list_provider_catalog_endpoints_by_provider_ids(std::slice::from_ref(&provider.id))
         .await?;
-    let Some(endpoint) = provider_oauth_runtime_endpoint_for_provider(&provider_type, endpoints)
+    let Some(endpoint) = provider_oauth_runtime_endpoint_for_provider(&provider_type, &endpoints)
     else {
         return Ok((false, None));
     };

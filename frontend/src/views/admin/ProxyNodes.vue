@@ -1208,6 +1208,7 @@ import {
   type ProxyNodeEvent,
   type ProxyNodeRemoteConfig,
   type ProxyNodeSchedulingState,
+  type ProxyNodeTestResult,
   type ProxyNodeUpgradeRolloutTrackedNode,
 } from '@/api/proxy-nodes'
 
@@ -1428,6 +1429,12 @@ async function refresh() {
   await store.fetchNodes()
 }
 
+function formatConnectivityTestParts(result: ProxyNodeTestResult): string[] {
+  const parts = [`延迟: ${result.latency_ms != null ? `${result.latency_ms}ms` : '暂无样本'}`]
+  if (result.exit_ip) parts.push(`出口IP: ${result.exit_ip}`)
+  return parts
+}
+
 async function handleTestUrl() {
   if (!addForm.value.proxy_url || testingUrl.value) return
   testingUrl.value = true
@@ -1438,9 +1445,7 @@ async function handleTestUrl() {
       password: addForm.value.password || undefined,
     })
     if (result.success) {
-      const parts = [`延迟: ${result.latency_ms}ms`]
-      if (result.exit_ip) parts.push(`出口IP: ${result.exit_ip}`)
-      success(`连通性测试通过，${parts.join('，')}`)
+      success(`连通性测试通过，${formatConnectivityTestParts(result).join('，')}`)
     } else {
       toastError(`连通性测试失败: ${result.error || '未知错误'}`)
     }
@@ -1451,16 +1456,21 @@ async function handleTestUrl() {
   }
 }
 
-function handleEdit(node: ProxyNode) {
-  editingNode.value = node
-  addForm.value = {
-    name: node.name,
-    proxy_url: node.proxy_url || '',
-    username: node.proxy_username || '',
-    password: '', // 不回填密码（已脱敏）
-    region: node.region || '',
+async function handleEdit(node: ProxyNode) {
+  try {
+    const { node: detail } = await proxyNodesApi.getNode(node.id)
+    editingNode.value = detail
+    addForm.value = {
+      name: detail.name,
+      proxy_url: detail.proxy_url || '',
+      username: detail.proxy_username || '',
+      password: detail.proxy_password || '',
+      region: detail.region || '',
+    }
+    showAddDialog.value = true
+  } catch (err: unknown) {
+    toastError(parseApiError(err, '读取代理节点详情失败'))
   }
-  showAddDialog.value = true
 }
 
 function handleDialogClose(open: boolean) {
@@ -1757,9 +1767,7 @@ async function handleTest(node: ProxyNode) {
   try {
     const result = await proxyNodesApi.testNode(node.id)
     if (result.success) {
-      const parts = [`延迟: ${result.latency_ms}ms`]
-      if (result.exit_ip) parts.push(`出口IP: ${result.exit_ip}`)
-      success(`连通性测试通过，${parts.join('，')}`)
+      success(`连通性测试通过，${formatConnectivityTestParts(result).join('，')}`)
     } else {
       toastError(`连通性测试失败: ${result.error || '未知错误'}`)
     }

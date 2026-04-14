@@ -4,14 +4,35 @@ use crate::handlers::admin::provider::shared::payloads::{
 use crate::handlers::admin::request::{AdminAppState, AdminGatewayProviderTransportSnapshot};
 use crate::GatewayError;
 use aether_admin::provider::quota as admin_provider_quota_pure;
-use aether_contracts::{ExecutionPlan, ExecutionResult};
+use aether_contracts::{ExecutionPlan, ExecutionResult, ExecutionTimeouts, ProxySnapshot};
 use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::warn;
 
+const PROVIDER_QUOTA_DEFAULT_TIMEOUT_MS: u64 = 30_000;
+const PROVIDER_QUOTA_PROXY_TIMEOUT_MS: u64 = 60_000;
+
 pub(super) enum ProviderQuotaExecutionOutcome {
     Response(ExecutionResult),
     Failure(String),
+}
+
+pub(super) fn default_provider_quota_execution_timeouts(
+    proxy: Option<&ProxySnapshot>,
+) -> ExecutionTimeouts {
+    let timeout_ms = if proxy.is_some() {
+        PROVIDER_QUOTA_PROXY_TIMEOUT_MS
+    } else {
+        PROVIDER_QUOTA_DEFAULT_TIMEOUT_MS
+    };
+    ExecutionTimeouts {
+        connect_ms: Some(timeout_ms),
+        read_ms: Some(timeout_ms),
+        write_ms: Some(timeout_ms),
+        pool_ms: Some(timeout_ms),
+        total_ms: Some(timeout_ms),
+        ..ExecutionTimeouts::default()
+    }
 }
 
 pub(super) fn provider_auto_remove_banned_keys(config: Option<&serde_json::Value>) -> bool {
@@ -127,6 +148,9 @@ pub(super) async fn execute_provider_quota_plan(
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
                 .map(ToOwned::to_owned);
+            let proxy_source = state
+                .resolve_transport_proxy_source_with_tunnel_affinity(transport)
+                .await;
             let proxy_url_present = plan
                 .proxy
                 .as_ref()
@@ -138,6 +162,7 @@ pub(super) async fn execute_provider_quota_plan(
                 endpoint_id = %transport.endpoint.id,
                 url = %plan.url,
                 tls_profile = ?plan.tls_profile.as_deref(),
+                proxy_source = ?proxy_source,
                 proxy_node_id = ?proxy_node_id,
                 proxy_url_present,
                 error = %error,

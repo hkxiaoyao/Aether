@@ -793,7 +793,7 @@ mod tests {
     use axum::{Json, Router};
     use serde_json::json;
 
-    use super::DirectSyncExecutionRuntime;
+    use super::{build_client, DirectSyncExecutionRuntime, ExecutionTransportControls};
     use crate::frontdoor_loop_guard::{
         frontdoor_self_loop_public_ai_path, gateway_frontdoor_self_loop_guard_error_with_port,
         gateway_frontdoor_self_loop_guard_matches_with_port,
@@ -840,6 +840,32 @@ mod tests {
                     .to_string()
             )
         );
+    }
+
+    #[test]
+    fn direct_sync_execution_runtime_builds_clients_for_socks_proxy_urls() {
+        let timeouts = ExecutionTimeouts {
+            connect_ms: Some(5_000),
+            total_ms: Some(5_000),
+            ..ExecutionTimeouts::default()
+        };
+
+        for proxy_url in ["socks5://127.0.0.1:1080", "socks5h://127.0.0.1:1080"] {
+            build_client(
+                Some(&timeouts),
+                Some(&aether_contracts::ProxySnapshot {
+                    enabled: Some(true),
+                    mode: Some("socks".into()),
+                    node_id: None,
+                    label: Some("manual-proxy".into()),
+                    url: Some(proxy_url.to_string()),
+                    extra: None,
+                }),
+                None,
+                ExecutionTransportControls::default(),
+            )
+            .unwrap_or_else(|err| panic!("client should build for {proxy_url}: {err}"));
+        }
     }
 
     fn tunnel_proxy_snapshot(base_url: String) -> aether_contracts::ProxySnapshot {

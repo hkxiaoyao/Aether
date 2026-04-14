@@ -1,13 +1,14 @@
 use super::shared::{
-    coerce_json_f64, coerce_json_string, execute_provider_quota_plan,
-    extract_execution_error_message, persist_provider_quota_refresh_state,
-    quota_refresh_success_invalid_state, ProviderQuotaExecutionOutcome,
+    coerce_json_f64, coerce_json_string, default_provider_quota_execution_timeouts,
+    execute_provider_quota_plan, extract_execution_error_message,
+    persist_provider_quota_refresh_state, quota_refresh_success_invalid_state,
+    ProviderQuotaExecutionOutcome,
 };
 use crate::handlers::admin::provider::shared::payloads::ANTIGRAVITY_FETCH_AVAILABLE_MODELS_PATH;
 use crate::handlers::admin::request::{AdminAppState, AdminGatewayProviderTransportSnapshot};
 use crate::GatewayError;
 use aether_admin::provider::quota::parse_antigravity_usage_response;
-use aether_contracts::{ExecutionPlan, ExecutionTimeouts, RequestBody};
+use aether_contracts::{ExecutionPlan, RequestBody};
 use aether_data_contracts::repository::provider_catalog::{
     StoredProviderCatalogEndpoint, StoredProviderCatalogKey, StoredProviderCatalogProvider,
 };
@@ -31,6 +32,14 @@ async fn execute_antigravity_quota_plan(
         .or_insert_with(|| "antigravity".to_string());
 
     let body = json!({ "project": project_id });
+    let proxy = state
+        .resolve_transport_proxy_snapshot_with_tunnel_affinity(transport)
+        .await;
+    let timeouts = state
+        .resolve_transport_execution_timeouts(transport)
+        .or(Some(default_provider_quota_execution_timeouts(
+            proxy.as_ref(),
+        )));
     let plan = ExecutionPlan {
         request_id: format!("antigravity-quota:{}", transport.key.id),
         candidate_id: None,
@@ -56,20 +65,9 @@ async fn execute_antigravity_quota_plan(
         client_api_format: "gemini:chat".to_string(),
         provider_api_format: "antigravity:fetch_available_models".to_string(),
         model_name: Some("fetchAvailableModels".to_string()),
-        proxy: state
-            .resolve_transport_proxy_snapshot_with_tunnel_affinity(transport)
-            .await,
+        proxy,
         tls_profile: state.resolve_transport_tls_profile(transport),
-        timeouts: state
-            .resolve_transport_execution_timeouts(transport)
-            .or(Some(ExecutionTimeouts {
-                connect_ms: Some(30_000),
-                read_ms: Some(30_000),
-                write_ms: Some(30_000),
-                pool_ms: Some(30_000),
-                total_ms: Some(30_000),
-                ..ExecutionTimeouts::default()
-            })),
+        timeouts,
     };
 
     execute_provider_quota_plan(state, transport, plan, "antigravity").await

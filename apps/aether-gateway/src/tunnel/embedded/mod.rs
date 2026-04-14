@@ -22,7 +22,7 @@ use tracing::warn;
 use crate::data::GatewayDataState;
 
 pub use control_plane::ControlPlaneClient;
-pub use hub::{ConnConfig, HubRouter, ProxyConn};
+pub use hub::{ConnConfig, HubRouter, LocalBodyEvent, ProxyConn};
 pub use local_relay::relay_request;
 
 #[derive(Clone)]

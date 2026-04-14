@@ -1,9 +1,12 @@
 use std::fmt;
 use std::path::Path;
+use std::time::Duration;
 
 use aether_runtime::{FileLoggingConfig, LogDestination, LogRotation, ServiceRuntimeConfig};
 use clap::Parser;
 use serde::{Deserialize, Serialize};
+
+use crate::hardware::HardwareInfo;
 
 /// Fields that existed in 0.1.x but were removed in 0.2.0.
 const LEGACY_ONLY_KEYS: &[&str] = &[
@@ -16,6 +19,12 @@ const LEGACY_ONLY_KEYS: &[&str] = &[
     "tls_cert",
     "tls_key",
 ];
+const REMOVED_TUNNEL_SECONDS_KEYS: &[&str] = &[
+    "tunnel_ping_interval_secs",
+    "tunnel_connect_timeout_secs",
+    "tunnel_stale_timeout_secs",
+];
+const REMOVED_SINGLE_SERVER_KEYS: &[&str] = &["aether_url", "management_token"];
 
 /// Fields renamed from 0.1.x `delegate_*` to 0.2.0 `upstream_*`.
 const DELEGATE_TO_UPSTREAM: &[(&str, &str)] = &[
@@ -38,13 +47,31 @@ const DELEGATE_TO_UPSTREAM: &[(&str, &str)] = &[
 /// Default bytes buffered before a tunnel request becomes non-replayable for
 /// 307/308 redirects. Kept aligned with the current admin-side request size
 /// default, but exposed as an independent proxy transport budget.
-pub const DEFAULT_HEARTBEAT_INTERVAL_SECS: u64 = 30;
+pub const DEFAULT_HEARTBEAT_INTERVAL_SECS: u64 = 5;
 #[allow(dead_code)]
 pub const DEFAULT_REDIRECT_REPLAY_BUDGET_BYTES: usize = 5_242_880;
 pub const DEFAULT_REDIRECT_REPLAY_BUDGET_HUMAN: &str = "5M";
 pub const DEFAULT_LOG_RETENTION_DAYS: u64 = 7;
 pub const DEFAULT_LOG_MAX_FILES: usize = 30;
+pub const DEFAULT_TUNNEL_PING_INTERVAL_MS: u64 = 250;
+pub const DEFAULT_TUNNEL_CONNECT_TIMEOUT_MS: u64 = 800;
+pub const DEFAULT_TUNNEL_STALE_TIMEOUT_MS: u64 = 900;
+pub const DEFAULT_TUNNEL_SCALE_CHECK_INTERVAL_MS: u64 = 1_000;
+pub const DEFAULT_TUNNEL_SCALE_UP_THRESHOLD_PERCENT: u32 = 70;
+pub const DEFAULT_TUNNEL_SCALE_DOWN_THRESHOLD_PERCENT: u32 = 35;
+pub const DEFAULT_TUNNEL_SCALE_DOWN_GRACE_SECS: u64 = 15;
+const AUTO_TUNNEL_CONNECTIONS_BASE_CAP: u64 = 4;
+const AUTO_TUNNEL_CONNECTIONS_MAX_CAP: u64 = 8;
 
+const TUNNEL_PING_INTERVAL_MS_ENV: &str = "AETHER_PROXY_TUNNEL_PING_INTERVAL_MS";
+const TUNNEL_CONNECT_TIMEOUT_MS_ENV: &str = "AETHER_PROXY_TUNNEL_CONNECT_TIMEOUT_MS";
+const TUNNEL_STALE_TIMEOUT_MS_ENV: &str = "AETHER_PROXY_TUNNEL_STALE_TIMEOUT_MS";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TunnelPoolSizing {
+    pub initial_connections: u32,
+    pub max_connections: u32,
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ByteSizeValue {
     Text(String),
@@ -473,7 +500,7 @@ pub struct Config {
     #[arg(
         long,
         env = "AETHER_PROXY_TUNNEL_RECONNECT_BASE_MS",
-        default_value_t = 500
+        default_value_t = 50
     )]
     pub tunnel_reconnect_base_ms: u64,
 
@@ -485,21 +512,25 @@ pub struct Config {
     )]
     pub tunnel_reconnect_max_ms: u64,
 
-    /// WebSocket tunnel ping interval in seconds
-    #[arg(long, env = "AETHER_PROXY_TUNNEL_PING_INTERVAL", default_value_t = 15)]
-    pub tunnel_ping_interval_secs: u64,
+    /// WebSocket tunnel ping interval in milliseconds
+    #[arg(
+        long,
+        env = TUNNEL_PING_INTERVAL_MS_ENV,
+        default_value_t = DEFAULT_TUNNEL_PING_INTERVAL_MS
+    )]
+    pub tunnel_ping_interval_ms: u64,
 
     /// Maximum concurrent streams over tunnel (auto-detected from hardware if omitted)
     #[arg(long, env = "AETHER_PROXY_TUNNEL_MAX_STREAMS")]
     pub tunnel_max_streams: Option<u32>,
 
-    /// WebSocket tunnel TCP connect timeout in seconds
+    /// WebSocket tunnel TCP connect timeout in milliseconds
     #[arg(
         long,
-        env = "AETHER_PROXY_TUNNEL_CONNECT_TIMEOUT",
-        default_value_t = 15
+        env = TUNNEL_CONNECT_TIMEOUT_MS_ENV,
+        default_value_t = DEFAULT_TUNNEL_CONNECT_TIMEOUT_MS
     )]
-    pub tunnel_connect_timeout_secs: u64,
+    pub tunnel_connect_timeout_ms: u64,
 
     /// WebSocket tunnel TCP keepalive in seconds (0 disables)
     #[arg(long, env = "AETHER_PROXY_TUNNEL_TCP_KEEPALIVE", default_value_t = 30)]
@@ -509,13 +540,55 @@ pub struct Config {
     #[arg(long, env = "AETHER_PROXY_TUNNEL_TCP_NODELAY", default_value_t = true)]
     pub tunnel_tcp_nodelay: bool,
 
-    /// Tunnel connection staleness timeout in seconds (triggers reconnect if no data received)
-    #[arg(long, env = "AETHER_PROXY_TUNNEL_STALE_TIMEOUT", default_value_t = 45)]
-    pub tunnel_stale_timeout_secs: u64,
+    /// Tunnel connection staleness timeout in milliseconds
+    #[arg(
+        long,
+        env = TUNNEL_STALE_TIMEOUT_MS_ENV,
+        default_value_t = DEFAULT_TUNNEL_STALE_TIMEOUT_MS
+    )]
+    pub tunnel_stale_timeout_ms: u64,
 
-    /// Number of parallel WebSocket tunnel connections per server (connection pool)
-    #[arg(long, env = "AETHER_PROXY_TUNNEL_CONNECTIONS", default_value_t = 3)]
-    pub tunnel_connections: u32,
+    /// Minimum number of parallel WebSocket tunnel connections per server.
+    /// If omitted, a device-aware value is auto-detected at startup.
+    #[arg(long, env = "AETHER_PROXY_TUNNEL_CONNECTIONS")]
+    pub tunnel_connections: Option<u32>,
+
+    /// Maximum number of WebSocket tunnel connections per server.
+    /// When larger than `tunnel_connections`, the proxy may autoscale up to this limit.
+    #[arg(long, env = "AETHER_PROXY_TUNNEL_CONNECTIONS_MAX")]
+    pub tunnel_connections_max: Option<u32>,
+
+    /// Autoscale evaluation interval for the tunnel pool.
+    #[arg(
+        long,
+        env = "AETHER_PROXY_TUNNEL_SCALE_CHECK_INTERVAL_MS",
+        default_value_t = DEFAULT_TUNNEL_SCALE_CHECK_INTERVAL_MS
+    )]
+    pub tunnel_scale_check_interval_ms: u64,
+
+    /// Per-tunnel occupancy percentage that triggers scale-up.
+    #[arg(
+        long,
+        env = "AETHER_PROXY_TUNNEL_SCALE_UP_THRESHOLD_PERCENT",
+        default_value_t = DEFAULT_TUNNEL_SCALE_UP_THRESHOLD_PERCENT
+    )]
+    pub tunnel_scale_up_threshold_percent: u32,
+
+    /// Per-tunnel occupancy percentage that allows scale-down after the grace window.
+    #[arg(
+        long,
+        env = "AETHER_PROXY_TUNNEL_SCALE_DOWN_THRESHOLD_PERCENT",
+        default_value_t = DEFAULT_TUNNEL_SCALE_DOWN_THRESHOLD_PERCENT
+    )]
+    pub tunnel_scale_down_threshold_percent: u32,
+
+    /// Low-load grace window before a secondary tunnel is drained.
+    #[arg(
+        long,
+        env = "AETHER_PROXY_TUNNEL_SCALE_DOWN_GRACE_SECS",
+        default_value_t = DEFAULT_TUNNEL_SCALE_DOWN_GRACE_SECS
+    )]
+    pub tunnel_scale_down_grace_secs: u64,
 }
 
 impl Config {
@@ -539,21 +612,51 @@ impl Config {
                 anyhow::bail!("allowed_ports: port 0 is not valid");
             }
         }
-        if self.tunnel_connect_timeout_secs == 0 {
-            anyhow::bail!("tunnel_connect_timeout_secs must be > 0");
+        let tunnel_connect_timeout = self.tunnel_connect_timeout()?;
+        if tunnel_connect_timeout.is_zero() {
+            anyhow::bail!("effective tunnel connect timeout must be > 0");
         }
-        if self.tunnel_ping_interval_secs == 0 {
-            anyhow::bail!("tunnel_ping_interval_secs must be > 0");
+        let tunnel_ping_interval = self.tunnel_ping_interval()?;
+        if tunnel_ping_interval.is_zero() {
+            anyhow::bail!("effective tunnel ping interval must be > 0");
         }
-        if self.tunnel_stale_timeout_secs <= self.tunnel_ping_interval_secs {
+        let tunnel_stale_timeout = self.tunnel_stale_timeout()?;
+        if tunnel_stale_timeout <= tunnel_ping_interval {
             anyhow::bail!(
-                "tunnel_stale_timeout_secs ({}) must be > tunnel_ping_interval_secs ({})",
-                self.tunnel_stale_timeout_secs,
-                self.tunnel_ping_interval_secs
+                "effective tunnel stale timeout ({:?}) must be > effective tunnel ping interval ({:?})",
+                tunnel_stale_timeout,
+                tunnel_ping_interval
             );
         }
-        if self.tunnel_connections == 0 {
+        if matches!(self.tunnel_connections, Some(0)) {
             anyhow::bail!("tunnel_connections must be > 0");
+        }
+        if matches!(self.tunnel_connections_max, Some(0)) {
+            anyhow::bail!("tunnel_connections_max must be > 0");
+        }
+        if let (Some(min_connections), Some(max_connections)) =
+            (self.tunnel_connections, self.tunnel_connections_max)
+        {
+            if max_connections < min_connections {
+                anyhow::bail!("tunnel_connections_max must be >= tunnel_connections");
+            }
+        }
+        if self.tunnel_scale_check_interval_ms == 0 {
+            anyhow::bail!("tunnel_scale_check_interval_ms must be > 0");
+        }
+        if self.tunnel_scale_down_grace_secs == 0 {
+            anyhow::bail!("tunnel_scale_down_grace_secs must be > 0");
+        }
+        if !(1..=100).contains(&self.tunnel_scale_up_threshold_percent) {
+            anyhow::bail!("tunnel_scale_up_threshold_percent must be within 1..=100");
+        }
+        if !(1..100).contains(&self.tunnel_scale_down_threshold_percent) {
+            anyhow::bail!("tunnel_scale_down_threshold_percent must be within 1..100");
+        }
+        if self.tunnel_scale_down_threshold_percent >= self.tunnel_scale_up_threshold_percent {
+            anyhow::bail!(
+                "tunnel_scale_down_threshold_percent must be < tunnel_scale_up_threshold_percent"
+            );
         }
         if self.aether_retry_max_attempts == 0 {
             anyhow::bail!("aether_retry_max_attempts must be >= 1");
@@ -600,6 +703,54 @@ impl Config {
         Ok(())
     }
 
+    pub fn tunnel_ping_interval(&self) -> anyhow::Result<Duration> {
+        Ok(Duration::from_millis(self.tunnel_ping_interval_ms))
+    }
+
+    pub fn tunnel_connect_timeout(&self) -> anyhow::Result<Duration> {
+        Ok(Duration::from_millis(self.tunnel_connect_timeout_ms))
+    }
+
+    pub fn tunnel_stale_timeout(&self) -> anyhow::Result<Duration> {
+        Ok(Duration::from_millis(self.tunnel_stale_timeout_ms))
+    }
+
+    pub fn resolve_tunnel_pool_sizing(
+        &self,
+        hw_info: &HardwareInfo,
+    ) -> anyhow::Result<TunnelPoolSizing> {
+        let per_tunnel_capacity = u64::from(self.tunnel_max_streams.unwrap_or(128).max(1));
+        let estimated = hw_info.estimated_max_concurrency.max(per_tunnel_capacity);
+        let cpu_cap = u64::from(hw_info.cpu_cores).clamp(1, AUTO_TUNNEL_CONNECTIONS_MAX_CAP);
+
+        let auto_initial = div_ceil_u64(estimated, per_tunnel_capacity.saturating_mul(8))
+            .clamp(1, AUTO_TUNNEL_CONNECTIONS_BASE_CAP)
+            .min(cpu_cap);
+        let auto_max = div_ceil_u64(estimated, per_tunnel_capacity.saturating_mul(4))
+            .clamp(auto_initial, AUTO_TUNNEL_CONNECTIONS_MAX_CAP)
+            .min(cpu_cap.max(auto_initial));
+
+        let initial_connections = u64::from(self.tunnel_connections.unwrap_or(auto_initial as u32));
+        let max_connections = match self.tunnel_connections_max {
+            Some(explicit) => u64::from(explicit),
+            None if self.tunnel_connections.is_some() => initial_connections,
+            None => auto_max,
+        };
+
+        if max_connections < initial_connections {
+            anyhow::bail!(
+                "effective tunnel_connections_max ({max_connections}) must be >= tunnel_connections ({initial_connections})"
+            );
+        }
+
+        Ok(TunnelPoolSizing {
+            initial_connections: u32::try_from(initial_connections)
+                .expect("effective tunnel initial connections should fit in u32"),
+            max_connections: u32::try_from(max_connections)
+                .expect("effective tunnel max connections should fit in u32"),
+        })
+    }
+
     pub fn service_runtime_config(&self) -> anyhow::Result<ServiceRuntimeConfig> {
         let mut config = ServiceRuntimeConfig::new("aether-proxy", "aether_proxy=info")
             .with_log_format(aether_runtime::LogFormat::Pretty)
@@ -629,6 +780,7 @@ impl Config {
 
 /// Per-server connection config (used in multi-server TOML `[[servers]]`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ServerEntry {
     pub aether_url: String,
     pub management_token: String,
@@ -643,11 +795,8 @@ pub struct ServerEntry {
 /// Serializable config for TOML file persistence.
 /// All fields are optional -- only populated values are written.
 #[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ConfigFile {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub aether_url: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub management_token: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub public_ip: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -717,23 +866,31 @@ pub struct ConfigFile {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tunnel_reconnect_max_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tunnel_ping_interval_secs: Option<u64>,
+    pub tunnel_ping_interval_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tunnel_max_streams: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tunnel_connect_timeout_secs: Option<u64>,
+    pub tunnel_connect_timeout_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tunnel_tcp_keepalive_secs: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tunnel_tcp_nodelay: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tunnel_stale_timeout_secs: Option<u64>,
+    pub tunnel_stale_timeout_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tunnel_connections: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tunnel_connections_max: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tunnel_scale_check_interval_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tunnel_scale_up_threshold_percent: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tunnel_scale_down_threshold_percent: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tunnel_scale_down_grace_secs: Option<u64>,
 
     /// Multi-server config: each entry connects to a separate Aether instance.
-    /// When present, top-level aether_url/management_token are ignored for
-    /// tunnel connections (but still injected as env for clap compatibility).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub servers: Vec<ServerEntry>,
 }
@@ -742,6 +899,7 @@ impl ConfigFile {
     /// Load from a TOML file.
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path)?;
+        reject_removed_config_keys(&content)?;
         Ok(toml::from_str(&content)?)
     }
 
@@ -750,102 +908,6 @@ impl ConfigFile {
         let content = toml::to_string_pretty(self)?;
         std::fs::write(path, content)?;
         Ok(())
-    }
-
-    /// Detect and migrate a 0.1.x config file to 0.2.0 format in-place.
-    ///
-    /// Returns `true` if migration was performed, `false` if already current.
-    /// The original file is backed up as `<name>.v1.bak` before rewriting.
-    pub fn migrate_legacy(path: &Path) -> anyhow::Result<bool> {
-        let content = match std::fs::read_to_string(path) {
-            Ok(c) => c,
-            Err(_) => return Ok(false),
-        };
-        let mut table: toml::map::Map<String, toml::Value> = toml::from_str(&content)?;
-
-        // Detect legacy format: presence of any 0.1.x-only key.
-        let is_legacy = LEGACY_ONLY_KEYS.iter().any(|k| table.contains_key(*k))
-            || DELEGATE_TO_UPSTREAM
-                .iter()
-                .any(|(old, _)| table.contains_key(*old));
-
-        if !is_legacy {
-            return Ok(false);
-        }
-
-        // 1. Rename delegate_* -> upstream_* (carry over user-customized values)
-        for &(old, new) in DELEGATE_TO_UPSTREAM {
-            if let Some(val) = table.remove(old) {
-                table.entry(new.to_string()).or_insert(val);
-            }
-        }
-
-        // 2. Build [[servers]] from top-level aether_url + management_token + node_name
-        if !table.contains_key("servers") {
-            let aether_url = table.get("aether_url").and_then(|v| v.as_str());
-            let management_token = table.get("management_token").and_then(|v| v.as_str());
-            if let (Some(url), Some(token)) = (aether_url, management_token) {
-                let mut entry = toml::map::Map::new();
-                entry.insert("aether_url".into(), toml::Value::String(url.to_string()));
-                entry.insert(
-                    "management_token".into(),
-                    toml::Value::String(token.to_string()),
-                );
-                if let Some(name) = table.get("node_name").and_then(|v| v.as_str()) {
-                    entry.insert("node_name".into(), toml::Value::String(name.to_string()));
-                }
-                table.insert(
-                    "servers".into(),
-                    toml::Value::Array(vec![toml::Value::Table(entry)]),
-                );
-            }
-        }
-
-        // 3. Remove top-level fields that are now in [[servers]] or obsolete
-        table.remove("aether_url");
-        table.remove("management_token");
-        table.remove("node_name");
-        for &key in LEGACY_ONLY_KEYS {
-            table.remove(key);
-        }
-
-        // 4. Backup original file (abort migration if backup fails)
-        let backup_path = path.with_extension("v1.bak");
-        std::fs::copy(path, &backup_path).map_err(|e| {
-            anyhow::anyhow!(
-                "failed to backup config before migration: {} -> {}: {}",
-                path.display(),
-                backup_path.display(),
-                e
-            )
-        })?;
-
-        // 5. Write migrated config
-        let new_content = toml::to_string_pretty(&table)?;
-        std::fs::write(path, &new_content)?;
-
-        eprintln!("  Config migrated from 0.1.x to 0.2.0 format.");
-        eprintln!("  Backup saved: {}", backup_path.display());
-
-        Ok(true)
-    }
-
-    /// Resolve the effective server list.
-    ///
-    /// If `[[servers]]` is present, use it. Otherwise fall back to the
-    /// top-level `aether_url` + `management_token` as a single server.
-    pub fn effective_servers(&self) -> Vec<ServerEntry> {
-        if !self.servers.is_empty() {
-            return self.servers.clone();
-        }
-        match (&self.aether_url, &self.management_token) {
-            (Some(url), Some(token)) => vec![ServerEntry {
-                aether_url: url.clone(),
-                management_token: token.clone(),
-                node_name: None,
-            }],
-            _ => vec![],
-        }
     }
 
     /// Inject values as environment variables so clap picks them up.
@@ -874,18 +936,9 @@ impl ConfigFile {
             };
         }
 
-        // When top-level fields are absent, fall back to the first [[servers]]
-        // entry so that clap's required `aether_url` / `management_token` are
-        // satisfied even with the new config format.
         let first_server = self.servers.first();
-        let aether_url = self
-            .aether_url
-            .as_deref()
-            .or(first_server.map(|s| s.aether_url.as_str()));
-        let management_token = self
-            .management_token
-            .as_deref()
-            .or(first_server.map(|s| s.management_token.as_str()));
+        let aether_url = first_server.map(|s| s.aether_url.as_str());
+        let management_token = first_server.map(|s| s.management_token.as_str());
         let node_name = self
             .node_name
             .as_deref()
@@ -988,25 +1041,39 @@ impl ConfigFile {
             "AETHER_PROXY_TUNNEL_RECONNECT_MAX_MS",
             self.tunnel_reconnect_max_ms
         );
-        set!(
-            "AETHER_PROXY_TUNNEL_PING_INTERVAL",
-            self.tunnel_ping_interval_secs
-        );
+        set!(TUNNEL_PING_INTERVAL_MS_ENV, self.tunnel_ping_interval_ms);
         set!("AETHER_PROXY_TUNNEL_MAX_STREAMS", self.tunnel_max_streams);
         set!(
-            "AETHER_PROXY_TUNNEL_CONNECT_TIMEOUT",
-            self.tunnel_connect_timeout_secs
+            TUNNEL_CONNECT_TIMEOUT_MS_ENV,
+            self.tunnel_connect_timeout_ms
         );
         set!(
             "AETHER_PROXY_TUNNEL_TCP_KEEPALIVE",
             self.tunnel_tcp_keepalive_secs
         );
         set!("AETHER_PROXY_TUNNEL_TCP_NODELAY", self.tunnel_tcp_nodelay);
-        set!(
-            "AETHER_PROXY_TUNNEL_STALE_TIMEOUT",
-            self.tunnel_stale_timeout_secs
-        );
+        set!(TUNNEL_STALE_TIMEOUT_MS_ENV, self.tunnel_stale_timeout_ms);
         set!("AETHER_PROXY_TUNNEL_CONNECTIONS", self.tunnel_connections);
+        set!(
+            "AETHER_PROXY_TUNNEL_CONNECTIONS_MAX",
+            self.tunnel_connections_max
+        );
+        set!(
+            "AETHER_PROXY_TUNNEL_SCALE_CHECK_INTERVAL_MS",
+            self.tunnel_scale_check_interval_ms
+        );
+        set!(
+            "AETHER_PROXY_TUNNEL_SCALE_UP_THRESHOLD_PERCENT",
+            self.tunnel_scale_up_threshold_percent
+        );
+        set!(
+            "AETHER_PROXY_TUNNEL_SCALE_DOWN_THRESHOLD_PERCENT",
+            self.tunnel_scale_down_threshold_percent
+        );
+        set!(
+            "AETHER_PROXY_TUNNEL_SCALE_DOWN_GRACE_SECS",
+            self.tunnel_scale_down_grace_secs
+        );
 
         // allowed_ports needs special handling (comma-separated)
         if let Some(ref ports) = self.allowed_ports {
@@ -1022,11 +1089,70 @@ impl ConfigFile {
     }
 }
 
+fn reject_removed_config_keys(content: &str) -> anyhow::Result<()> {
+    let value: toml::Value = toml::from_str(content)?;
+    let Some(table) = value.as_table() else {
+        return Ok(());
+    };
+
+    let removed_seconds = REMOVED_TUNNEL_SECONDS_KEYS
+        .iter()
+        .copied()
+        .filter(|key| table.contains_key(*key))
+        .collect::<Vec<_>>();
+    if !removed_seconds.is_empty() {
+        anyhow::bail!(
+            "removed tunnel config keys detected: {}. Use *_ms variants instead",
+            removed_seconds.join(", ")
+        );
+    }
+
+    let removed_single_server = REMOVED_SINGLE_SERVER_KEYS
+        .iter()
+        .copied()
+        .filter(|key| table.contains_key(*key))
+        .collect::<Vec<_>>();
+    if !removed_single_server.is_empty() {
+        anyhow::bail!(
+            "single-server top-level config keys are no longer supported: {}. Use [[servers]] entries instead",
+            removed_single_server.join(", ")
+        );
+    }
+
+    let removed_legacy = LEGACY_ONLY_KEYS
+        .iter()
+        .copied()
+        .filter(|key| table.contains_key(*key))
+        .chain(
+            DELEGATE_TO_UPSTREAM
+                .iter()
+                .map(|(old, _)| *old)
+                .filter(|key| table.contains_key(*key)),
+        )
+        .collect::<Vec<_>>();
+    if !removed_legacy.is_empty() {
+        anyhow::bail!(
+            "legacy config keys are no longer supported: {}",
+            removed_legacy.join(", ")
+        );
+    }
+
+    Ok(())
+}
+
+fn div_ceil_u64(value: u64, divisor: u64) -> u64 {
+    if divisor == 0 {
+        return value;
+    }
+    value.saturating_add(divisor.saturating_sub(1)) / divisor
+}
+
 #[cfg(test)]
 mod tests {
-    use clap::CommandFactory;
+    use clap::{CommandFactory, Parser};
 
     use super::*;
+    use crate::hardware::HardwareInfo;
 
     #[test]
     fn parse_byte_size_supports_human_units() {
@@ -1057,6 +1183,36 @@ mod tests {
     }
 
     #[test]
+    fn config_file_rejects_removed_tunnel_seconds_keys() {
+        let error = reject_removed_config_keys("tunnel_ping_interval_secs = 5")
+            .expect_err("removed tunnel seconds keys should be rejected");
+        assert!(
+            error.to_string().contains("tunnel_ping_interval_secs"),
+            "error should mention removed key"
+        );
+    }
+
+    #[test]
+    fn config_file_rejects_top_level_single_server_keys() {
+        let error = reject_removed_config_keys("aether_url = \"https://example.com\"")
+            .expect_err("top-level single-server key should be rejected");
+        assert!(
+            error.to_string().contains("aether_url"),
+            "error should mention removed single-server key"
+        );
+    }
+
+    #[test]
+    fn config_file_rejects_legacy_keys() {
+        let error = reject_removed_config_keys("delegate_connect_timeout_secs = 10")
+            .expect_err("legacy delegate key should be rejected");
+        assert!(
+            error.to_string().contains("delegate_connect_timeout_secs"),
+            "error should mention removed legacy key"
+        );
+    }
+
+    #[test]
     fn config_requires_node_name() {
         let command = Config::command();
         let node_name = command
@@ -1066,5 +1222,131 @@ mod tests {
 
         assert!(node_name.is_required_set());
         assert!(node_name.get_default_values().is_empty());
+    }
+
+    #[test]
+    fn tunnel_fast_recovery_defaults_use_millisecond_values() {
+        let config = Config::parse_from([
+            "aether-proxy",
+            "--aether-url",
+            "https://example.com",
+            "--management-token",
+            "ae_test",
+            "--node-name",
+            "proxy-test",
+        ]);
+        assert_eq!(
+            config
+                .tunnel_ping_interval()
+                .expect("ping interval should resolve"),
+            Duration::from_millis(DEFAULT_TUNNEL_PING_INTERVAL_MS)
+        );
+        assert_eq!(
+            config
+                .tunnel_connect_timeout()
+                .expect("connect timeout should resolve"),
+            Duration::from_millis(DEFAULT_TUNNEL_CONNECT_TIMEOUT_MS)
+        );
+        assert_eq!(
+            config
+                .tunnel_stale_timeout()
+                .expect("stale timeout should resolve"),
+            Duration::from_millis(DEFAULT_TUNNEL_STALE_TIMEOUT_MS)
+        );
+    }
+
+    #[test]
+    fn tunnel_millisecond_flags_take_effect_when_explicitly_set() {
+        let config = Config::parse_from([
+            "aether-proxy",
+            "--aether-url",
+            "https://example.com",
+            "--management-token",
+            "ae_test",
+            "--node-name",
+            "proxy-test",
+            "--tunnel-ping-interval-ms",
+            "100",
+            "--tunnel-connect-timeout-ms",
+            "200",
+            "--tunnel-stale-timeout-ms",
+            "300",
+        ]);
+        assert_eq!(
+            config
+                .tunnel_ping_interval()
+                .expect("ping interval should resolve"),
+            Duration::from_millis(100)
+        );
+        assert_eq!(
+            config
+                .tunnel_connect_timeout()
+                .expect("connect timeout should resolve"),
+            Duration::from_millis(200)
+        );
+        assert_eq!(
+            config
+                .tunnel_stale_timeout()
+                .expect("stale timeout should resolve"),
+            Duration::from_millis(300)
+        );
+    }
+
+    #[test]
+    fn auto_tunnel_pool_sizing_uses_hardware_capacity() {
+        let config = Config::parse_from([
+            "aether-proxy",
+            "--aether-url",
+            "https://example.com",
+            "--management-token",
+            "ae_test",
+            "--node-name",
+            "proxy-test",
+            "--tunnel-max-streams",
+            "1024",
+        ]);
+        let hw = HardwareInfo {
+            cpu_cores: 12,
+            total_memory_mb: 20_480,
+            os_info: "test".to_string(),
+            fd_limit: 1_048_576,
+            estimated_max_concurrency: 24_000,
+        };
+
+        let sizing = config
+            .resolve_tunnel_pool_sizing(&hw)
+            .expect("sizing should resolve");
+        assert_eq!(sizing.initial_connections, 3);
+        assert_eq!(sizing.max_connections, 6);
+    }
+
+    #[test]
+    fn explicit_tunnel_connections_keep_fixed_pool_without_max_override() {
+        let config = Config::parse_from([
+            "aether-proxy",
+            "--aether-url",
+            "https://example.com",
+            "--management-token",
+            "ae_test",
+            "--node-name",
+            "proxy-test",
+            "--tunnel-max-streams",
+            "512",
+            "--tunnel-connections",
+            "2",
+        ]);
+        let hw = HardwareInfo {
+            cpu_cores: 12,
+            total_memory_mb: 20_480,
+            os_info: "test".to_string(),
+            fd_limit: 1_048_576,
+            estimated_max_concurrency: 24_000,
+        };
+
+        let sizing = config
+            .resolve_tunnel_pool_sizing(&hw)
+            .expect("sizing should resolve");
+        assert_eq!(sizing.initial_connections, 2);
+        assert_eq!(sizing.max_connections, 2);
     }
 }

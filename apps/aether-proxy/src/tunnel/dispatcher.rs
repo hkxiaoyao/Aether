@@ -7,6 +7,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{debug, error, info, warn};
@@ -25,6 +26,7 @@ pub async fn run<S>(
     mut ws_stream: S,
     frame_tx: FrameSender,
     heartbeat: HeartbeatHandle,
+    mut drain: watch::Receiver<bool>,
 ) -> Result<(), anyhow::Error>
 where
     S: StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>>
@@ -38,12 +40,21 @@ where
     let mut handler_handles: Vec<JoinHandle<()>> = Vec::new();
     let max_streams = state.config.tunnel_max_streams.unwrap_or(128) as usize;
     let mut frames_since_cleanup: u32 = 0;
-    let stale_timeout = Duration::from_secs(state.config.tunnel_stale_timeout_secs);
+    let stale_timeout = state
+        .config
+        .tunnel_stale_timeout()
+        .expect("validated config should resolve tunnel stale timeout");
 
     // Track last time we received any data to detect stale connections
     let mut last_data_at = tokio::time::Instant::now();
+    let mut draining = *drain.borrow();
 
     let read_err = loop {
+        if draining && streams.is_empty() {
+            info!("tunnel drained after in-flight streams completed");
+            break None;
+        }
+
         let msg_result = tokio::select! {
             msg = ws_stream.next() => {
                 match msg {
@@ -51,9 +62,19 @@ where
                     None => break None,
                 }
             }
+            changed = drain.changed() => {
+                if changed.is_err() {
+                    continue;
+                }
+                if *drain.borrow() {
+                    info!("tunnel drain requested, waiting for in-flight streams");
+                    draining = true;
+                }
+                continue;
+            }
             _ = tokio::time::sleep_until(last_data_at + stale_timeout) => {
                 warn!(
-                    stale_secs = stale_timeout.as_secs(),
+                    stale_ms = stale_timeout.as_millis(),
                     "tunnel connection stale, no data received"
                 );
                 break None;
@@ -92,6 +113,24 @@ where
 
         match frame.msg_type {
             MsgType::RequestHeaders => {
+                if draining {
+                    if frame_tx
+                        .try_send(Frame::new(
+                            frame.stream_id,
+                            MsgType::StreamError,
+                            0,
+                            Bytes::from("tunnel draining"),
+                        ))
+                        .is_err()
+                    {
+                        warn!(
+                            stream_id = frame.stream_id,
+                            "writer channel full, StreamError dropped during drain"
+                        );
+                    }
+                    continue;
+                }
+
                 // Decompress if the frame is gzip-compressed, then parse metadata
                 let payload = match decompress_if_gzip(&frame) {
                     Ok(p) => p,
@@ -176,6 +215,10 @@ where
                     let _ = tx.send(frame).await;
                     if is_end {
                         streams.remove(&sid);
+                        if draining && streams.is_empty() {
+                            info!("tunnel drained after request body completion");
+                            break None;
+                        }
                     }
                 }
             }
@@ -184,6 +227,10 @@ where
                 // Client-side cancellation or end
                 if let Some(tx) = streams.remove(&frame.stream_id) {
                     let _ = tx.send(frame).await;
+                    if draining && streams.is_empty() {
+                        info!("tunnel drained after stream termination");
+                        break None;
+                    }
                 }
             }
 

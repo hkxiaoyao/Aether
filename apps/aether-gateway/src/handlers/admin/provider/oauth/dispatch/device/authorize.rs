@@ -1,5 +1,6 @@
 use super::session::AdminProviderOAuthDeviceAuthorizePayload;
 use crate::handlers::admin::provider::oauth::errors::build_internal_control_error_response;
+use crate::handlers::admin::provider::oauth::runtime::provider_oauth_runtime_endpoint_for_provider;
 use crate::handlers::admin::provider::oauth::state::{
     build_admin_provider_oauth_backend_unavailable_response, current_unix_secs,
     default_kiro_device_start_url, generate_provider_oauth_nonce, json_non_empty_string,
@@ -69,6 +70,21 @@ pub(super) async fn handle_admin_provider_oauth_device_authorize(
             "设备授权仅支持 Kiro provider",
         ));
     }
+    let endpoints = state
+        .list_provider_catalog_endpoints_by_provider_ids(std::slice::from_ref(&provider_id))
+        .await?;
+    let runtime_endpoint = provider_oauth_runtime_endpoint_for_provider("kiro", &endpoints);
+    let request_proxy = state
+        .resolve_admin_provider_oauth_operation_proxy_snapshot(
+            payload.proxy_node_id.as_deref(),
+            &[
+                runtime_endpoint
+                    .as_ref()
+                    .and_then(|endpoint| endpoint.proxy.as_ref()),
+                provider.proxy.as_ref(),
+            ],
+        )
+        .await;
 
     let region = normalize_kiro_device_region(Some(payload.region.as_str())).ok_or_else(|| {
         build_internal_control_error_response(http::StatusCode::BAD_REQUEST, "region 格式无效")
@@ -85,11 +101,7 @@ pub(super) async fn handle_admin_provider_oauth_device_authorize(
     };
 
     let client_registration = match state
-        .register_admin_kiro_device_oidc_client(
-            &region,
-            &start_url,
-            payload.proxy_node_id.as_deref(),
-        )
+        .register_admin_kiro_device_oidc_client(&region, &start_url, request_proxy.clone())
         .await
     {
         Ok(payload) => payload,
@@ -114,7 +126,7 @@ pub(super) async fn handle_admin_provider_oauth_device_authorize(
             &client_id,
             &client_secret,
             &start_url,
-            payload.proxy_node_id.as_deref(),
+            request_proxy,
         )
         .await
     {

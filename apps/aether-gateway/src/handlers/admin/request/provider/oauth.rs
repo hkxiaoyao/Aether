@@ -1,7 +1,7 @@
 use super::*;
 use crate::handlers::admin::provider::oauth::errors::build_internal_control_error_response;
 use aether_contracts::{
-    ExecutionPlan, ExecutionResult, ExecutionTimeouts, RequestBody,
+    ExecutionPlan, ExecutionResult, ExecutionTimeouts, ProxySnapshot, RequestBody,
     EXECUTION_REQUEST_FOLLOW_REDIRECTS_HEADER,
 };
 use aether_data::repository::provider_oauth::{
@@ -21,6 +21,7 @@ use url::Url;
 const KIRO_IDC_AMZ_USER_AGENT: &str =
     "aws-sdk-js/3.738.0 ua/2.1 os/other lang/js md/browser#unknown_unknown api/sso-oidc#3.738.0 m/E KiroIDE";
 const ADMIN_PROVIDER_OAUTH_TIMEOUT_MS: u64 = 30_000;
+const ADMIN_PROVIDER_OAUTH_PROXY_TIMEOUT_MS: u64 = 60_000;
 
 pub(crate) struct AdminProviderOAuthHttpResponse {
     pub(crate) status: http::StatusCode,
@@ -132,7 +133,7 @@ impl<'a> AdminAppState<'a> {
         code: &str,
         state_nonce: &str,
         pkce_verifier: Option<&str>,
-        proxy_node_id: Option<&str>,
+        proxy: Option<ProxySnapshot>,
     ) -> Result<serde_json::Value, Response<Body>> {
         crate::handlers::admin::provider::oauth::state::exchange_admin_provider_oauth_code(
             self,
@@ -140,7 +141,7 @@ impl<'a> AdminAppState<'a> {
             code,
             state_nonce,
             pkce_verifier,
-            proxy_node_id,
+            proxy,
         )
         .await
     }
@@ -149,13 +150,13 @@ impl<'a> AdminAppState<'a> {
         &self,
         template: AdminProviderOAuthTemplate,
         refresh_token: &str,
-        proxy_node_id: Option<&str>,
+        proxy: Option<ProxySnapshot>,
     ) -> Result<serde_json::Value, Response<Body>> {
         crate::handlers::admin::provider::oauth::state::exchange_admin_provider_oauth_refresh_token(
             self,
             template,
             refresh_token,
-            proxy_node_id,
+            proxy,
         )
         .await
     }
@@ -315,7 +316,7 @@ impl<'a> AdminAppState<'a> {
         &self,
         region: &str,
         start_url: &str,
-        proxy_node_id: Option<&str>,
+        proxy: Option<ProxySnapshot>,
     ) -> Result<serde_json::Value, Response<Body>> {
         let payload = post_kiro_device_oidc_json(
             self,
@@ -337,7 +338,7 @@ impl<'a> AdminAppState<'a> {
                 ],
                 "issuerUrl": start_url,
             }),
-            proxy_node_id,
+            proxy,
         )
         .await?;
         if payload
@@ -364,7 +365,7 @@ impl<'a> AdminAppState<'a> {
         client_id: &str,
         client_secret: &str,
         start_url: &str,
-        proxy_node_id: Option<&str>,
+        proxy: Option<ProxySnapshot>,
     ) -> Result<serde_json::Value, Response<Body>> {
         let payload = post_kiro_device_oidc_json(
             self,
@@ -375,7 +376,7 @@ impl<'a> AdminAppState<'a> {
                 "clientSecret": client_secret,
                 "startUrl": start_url,
             }),
-            proxy_node_id,
+            proxy,
         )
         .await?;
         if payload
@@ -402,7 +403,7 @@ impl<'a> AdminAppState<'a> {
         client_id: &str,
         client_secret: &str,
         device_code: &str,
-        proxy_node_id: Option<&str>,
+        proxy: Option<ProxySnapshot>,
     ) -> Result<serde_json::Value, Response<Body>> {
         post_kiro_device_oidc_json(
             self,
@@ -414,9 +415,33 @@ impl<'a> AdminAppState<'a> {
                 "grantType": "urn:ietf:params:oauth:grant-type:device_code",
                 "deviceCode": device_code,
             }),
-            proxy_node_id,
+            proxy,
         )
         .await
+    }
+
+    pub(crate) async fn resolve_admin_provider_oauth_operation_proxy_snapshot(
+        &self,
+        temporary_proxy_node_id: Option<&str>,
+        configured_proxies: &[Option<&serde_json::Value>],
+    ) -> Option<ProxySnapshot> {
+        if let Some(snapshot) = self
+            .resolve_admin_proxy_node_snapshot(temporary_proxy_node_id)
+            .await
+        {
+            return Some(snapshot);
+        }
+
+        for proxy in configured_proxies {
+            if let Some(snapshot) = self
+                .app
+                .resolve_configured_proxy_snapshot_with_tunnel_affinity(*proxy)
+                .await
+            {
+                return Some(snapshot);
+            }
+        }
+        self.app.resolve_system_proxy_snapshot().await
     }
 
     pub(crate) async fn find_duplicate_provider_oauth_key(
@@ -504,7 +529,7 @@ async fn post_kiro_device_oidc_json(
     endpoint_key: &str,
     default_url: String,
     body: serde_json::Value,
-    proxy_node_id: Option<&str>,
+    proxy: Option<ProxySnapshot>,
 ) -> Result<serde_json::Value, Response<Body>> {
     let url = state.provider_oauth_token_url(endpoint_key, &default_url);
     let host = Url::parse(&url)
@@ -539,7 +564,7 @@ async fn post_kiro_device_oidc_json(
             Some("application/json"),
             Some(body),
             None,
-            proxy_node_id,
+            proxy,
         )
         .await
         .map_err(|_| {
@@ -570,7 +595,7 @@ impl<'a> AdminAppState<'a> {
         content_type: Option<&str>,
         json_body: Option<serde_json::Value>,
         body_bytes: Option<Vec<u8>>,
-        proxy_node_id: Option<&str>,
+        proxy: Option<ProxySnapshot>,
     ) -> Result<AdminProviderOAuthHttpResponse, String> {
         let body = if let Some(json_body) = json_body {
             RequestBody::from_json(json_body)
@@ -581,6 +606,7 @@ impl<'a> AdminAppState<'a> {
                 body_ref: None,
             }
         };
+        let timeout_ms = admin_provider_oauth_timeout_ms(proxy.as_ref());
         let plan = ExecutionPlan {
             request_id: request_id.to_string(),
             candidate_id: None,
@@ -601,21 +627,14 @@ impl<'a> AdminAppState<'a> {
             client_api_format: "provider_oauth:exchange".to_string(),
             provider_api_format: "provider_oauth:exchange".to_string(),
             model_name: Some("oauth-exchange".to_string()),
-            proxy: if proxy_node_id
-                .map(str::trim)
-                .is_some_and(|value| !value.is_empty())
-            {
-                self.resolve_admin_proxy_node_snapshot(proxy_node_id).await
-            } else {
-                self.app.resolve_system_proxy_snapshot().await
-            },
+            proxy,
             tls_profile: None,
             timeouts: Some(ExecutionTimeouts {
-                connect_ms: Some(ADMIN_PROVIDER_OAUTH_TIMEOUT_MS),
-                read_ms: Some(ADMIN_PROVIDER_OAUTH_TIMEOUT_MS),
-                write_ms: Some(ADMIN_PROVIDER_OAUTH_TIMEOUT_MS),
-                pool_ms: Some(ADMIN_PROVIDER_OAUTH_TIMEOUT_MS),
-                total_ms: Some(ADMIN_PROVIDER_OAUTH_TIMEOUT_MS),
+                connect_ms: Some(timeout_ms),
+                read_ms: Some(timeout_ms),
+                write_ms: Some(timeout_ms),
+                pool_ms: Some(timeout_ms),
+                total_ms: Some(timeout_ms),
                 ..ExecutionTimeouts::default()
             }),
         };
@@ -629,6 +648,14 @@ impl<'a> AdminAppState<'a> {
             body_text: admin_provider_oauth_execution_body_text(&result),
             json_body: admin_provider_oauth_execution_json_body(&result),
         })
+    }
+}
+
+fn admin_provider_oauth_timeout_ms(proxy: Option<&ProxySnapshot>) -> u64 {
+    if proxy.is_some() {
+        ADMIN_PROVIDER_OAUTH_PROXY_TIMEOUT_MS
+    } else {
+        ADMIN_PROVIDER_OAUTH_TIMEOUT_MS
     }
 }
 

@@ -77,6 +77,37 @@ async fn gateway_handles_internal_tunnel_heartbeat_locally_with_loopback() {
 }
 
 #[tokio::test]
+async fn gateway_rejects_internal_tunnel_heartbeat_without_heartbeat_id() {
+    let repository = Arc::new(InMemoryProxyNodeRepository::seed(vec![sample_proxy_node(
+        "node-123",
+    )]));
+
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(GatewayDataState::with_proxy_node_repository_for_tests(
+                Arc::clone(&repository),
+            )),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{gateway_url}/api/internal/tunnel/heartbeat"))
+        .json(&json!({
+            "node_id": "node-123",
+            "heartbeat_interval": 45,
+            "active_connections": 5
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    gateway_handle.abort();
+}
+
+#[tokio::test]
 async fn gateway_handles_internal_tunnel_node_status_locally_with_loopback() {
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);

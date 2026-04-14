@@ -61,12 +61,15 @@ async fn main() -> anyhow::Result<()> {
         std::env::var("AETHER_PROXY_CONFIG").unwrap_or_else(|_| DEFAULT_CONFIG.to_string());
     let config_path = std::path::Path::new(&config_file_path);
     if config_path.exists() {
-        // Migrate legacy 0.1.x config to 0.2.0 format if needed
-        if let Err(e) = config::ConfigFile::migrate_legacy(config_path) {
-            eprintln!("  WARNING: config migration failed: {}", e);
-        }
-        if let Ok(file_cfg) = config::ConfigFile::load(config_path) {
-            file_cfg.inject_env();
+        match config::ConfigFile::load(config_path) {
+            Ok(file_cfg) => file_cfg.inject_env(),
+            Err(error) => {
+                eprintln!(
+                    "  WARNING: failed to load config {}: {}",
+                    config_path.display(),
+                    error
+                );
+            }
         }
     }
 
@@ -148,21 +151,19 @@ async fn run_proxy(config: Config) -> anyhow::Result<()> {
         std::process::exit(1);
     }
 
-    // Resolve server list: prefer [[servers]] from TOML, fall back to CLI/env single server.
+    // Resolve server list: if a config file exists, it must use [[servers]].
+    // Otherwise fall back to CLI/env single-server mode.
     let config_path =
         std::env::var("AETHER_PROXY_CONFIG").unwrap_or_else(|_| DEFAULT_CONFIG.to_string());
     let servers = if std::path::Path::new(&config_path).exists() {
-        config::ConfigFile::load(std::path::Path::new(&config_path))
-            .ok()
-            .map(|f| f.effective_servers())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| {
-                vec![config::ServerEntry {
-                    aether_url: config.aether_url.clone(),
-                    management_token: config.management_token.clone(),
-                    node_name: None,
-                }]
-            })
+        let file_cfg = config::ConfigFile::load(std::path::Path::new(&config_path))?;
+        if file_cfg.servers.is_empty() {
+            anyhow::bail!(
+                "config file {} must contain at least one [[servers]] entry",
+                config_path
+            );
+        }
+        file_cfg.servers.clone()
     } else {
         vec![config::ServerEntry {
             aether_url: config.aether_url.clone(),

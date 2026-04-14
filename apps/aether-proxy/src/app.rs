@@ -1,8 +1,9 @@
 //! Application lifecycle: initialization, task orchestration, and shutdown.
 
-use std::sync::atomic::AtomicU64;
+use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use aether_http::{jittered_delay_for_retry, HttpRetryConfig};
 use aether_runtime::{
@@ -14,7 +15,7 @@ use tokio::sync::{watch, Mutex};
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
-use crate::config::{Config, ServerEntry};
+use crate::config::{Config, ServerEntry, TunnelPoolSizing};
 use crate::net;
 use crate::registration::client::AetherClient;
 use crate::runtime::{self, DynamicConfig};
@@ -23,6 +24,52 @@ use crate::upstream_client;
 use crate::{hardware, target_filter, tunnel};
 
 type TaskHandles = Arc<Mutex<Vec<JoinHandle<()>>>>;
+
+#[derive(Debug, Clone, Copy)]
+struct TunnelPoolPolicy {
+    min_connections: usize,
+    max_connections: usize,
+    max_streams_per_tunnel: usize,
+    scale_check_interval: Duration,
+    scale_up_threshold_percent: u32,
+    scale_down_threshold_percent: u32,
+    scale_down_grace: Duration,
+}
+
+impl TunnelPoolPolicy {
+    fn from_config(config: &Config, sizing: TunnelPoolSizing) -> Self {
+        Self {
+            min_connections: sizing.initial_connections.max(1) as usize,
+            max_connections: sizing
+                .max_connections
+                .max(sizing.initial_connections)
+                .max(1) as usize,
+            max_streams_per_tunnel: config.tunnel_max_streams.unwrap_or(128).max(1) as usize,
+            scale_check_interval: Duration::from_millis(config.tunnel_scale_check_interval_ms),
+            scale_up_threshold_percent: config.tunnel_scale_up_threshold_percent,
+            scale_down_threshold_percent: config.tunnel_scale_down_threshold_percent,
+            scale_down_grace: Duration::from_secs(config.tunnel_scale_down_grace_secs),
+        }
+    }
+
+    fn scale_up_high_water_mark(&self) -> u64 {
+        occupancy_threshold(self.max_streams_per_tunnel, self.scale_up_threshold_percent)
+    }
+
+    fn scale_down_low_water_mark(&self) -> u64 {
+        occupancy_threshold(
+            self.max_streams_per_tunnel,
+            self.scale_down_threshold_percent,
+        )
+    }
+}
+
+struct ManagedTunnel {
+    slot_id: usize,
+    drain_tx: watch::Sender<bool>,
+    handle: JoinHandle<()>,
+    draining: bool,
+}
 
 /// Run the full application lifecycle after config has been parsed.
 pub async fn run(mut config: Config, servers: Vec<ServerEntry>) -> anyhow::Result<()> {
@@ -63,6 +110,19 @@ pub async fn run(mut config: Config, servers: Vec<ServerEntry>) -> anyhow::Resul
             "auto-detected tunnel_max_streams from hardware"
         );
     }
+    let tunnel_pool_sizing = config.resolve_tunnel_pool_sizing(&hw_info)?;
+    let tunnel_pool_policy = TunnelPoolPolicy::from_config(&config, tunnel_pool_sizing);
+    info!(
+        tunnel_connections_initial = tunnel_pool_policy.min_connections,
+        tunnel_connections_max = tunnel_pool_policy.max_connections,
+        tunnel_max_streams = tunnel_pool_policy.max_streams_per_tunnel,
+        scale_check_interval_ms = tunnel_pool_policy.scale_check_interval.as_millis(),
+        scale_up_threshold_percent = tunnel_pool_policy.scale_up_threshold_percent,
+        scale_down_threshold_percent = tunnel_pool_policy.scale_down_threshold_percent,
+        scale_down_grace_secs = tunnel_pool_policy.scale_down_grace.as_secs(),
+        auto_sizing = config.tunnel_connections.is_none(),
+        "resolved tunnel pool policy"
+    );
 
     info!(
         max_concurrency = hw_info.estimated_max_concurrency,
@@ -177,15 +237,14 @@ pub async fn run(mut config: Config, servers: Vec<ServerEntry>) -> anyhow::Resul
         "running in tunnel mode"
     );
 
-    // Spawn tunnel connections per server (pool_size connections each)
-    let pool_size = state.config.tunnel_connections.max(1) as usize;
+    // Spawn tunnel pool manager per server.
     let tunnel_handles: TaskHandles = Arc::new(Mutex::new(Vec::new()));
     let retry_handles: TaskHandles = Arc::new(Mutex::new(Vec::new()));
     for server in server_contexts.lock().await.iter() {
-        spawn_tunnel_pool(
+        spawn_tunnel_pool_manager(
             Arc::clone(&state),
             Arc::clone(server),
-            pool_size,
+            tunnel_pool_policy,
             shutdown_rx.clone(),
             Arc::clone(&tunnel_handles),
         )
@@ -200,7 +259,7 @@ pub async fn run(mut config: Config, servers: Vec<ServerEntry>) -> anyhow::Resul
             failed_entries,
             public_ip.clone(),
             hw_info.clone(),
-            pool_size,
+            tunnel_pool_policy,
             shutdown_rx.clone(),
             Arc::clone(&tunnel_handles),
             Arc::clone(&retry_handles),
@@ -240,7 +299,7 @@ async fn spawn_registration_recovery_tasks(
     failed: Vec<(String, ServerEntry)>,
     public_ip: String,
     hw_info: crate::hardware::HardwareInfo,
-    pool_size: usize,
+    tunnel_pool_policy: TunnelPoolPolicy,
     shutdown: watch::Receiver<bool>,
     tunnel_handles: TaskHandles,
     retry_handles: TaskHandles,
@@ -261,7 +320,7 @@ async fn spawn_registration_recovery_tasks(
                 entry,
                 retry_public_ip,
                 retry_hw_info,
-                pool_size,
+                tunnel_pool_policy,
                 retry_shutdown,
                 retry_tunnels,
             )
@@ -281,7 +340,7 @@ async fn retry_failed_registration(
     entry: ServerEntry,
     public_ip: String,
     hw_info: crate::hardware::HardwareInfo,
-    pool_size: usize,
+    tunnel_pool_policy: TunnelPoolPolicy,
     mut shutdown: watch::Receiver<bool>,
     tunnel_handles: TaskHandles,
 ) {
@@ -329,10 +388,10 @@ async fn retry_failed_registration(
                     node_id,
                 );
                 server_contexts.lock().await.push(Arc::clone(&server));
-                spawn_tunnel_pool(
+                spawn_tunnel_pool_manager(
                     Arc::clone(&state),
                     server,
-                    pool_size,
+                    tunnel_pool_policy,
                     shutdown,
                     tunnel_handles,
                 )
@@ -386,23 +445,239 @@ fn build_server_context(
     })
 }
 
-async fn spawn_tunnel_pool(
+async fn spawn_tunnel_pool_manager(
     state: Arc<AppState>,
     server: Arc<ServerContext>,
-    pool_size: usize,
+    policy: TunnelPoolPolicy,
     shutdown: watch::Receiver<bool>,
     tunnel_handles: TaskHandles,
 ) {
-    let mut handles = Vec::with_capacity(pool_size);
-    for conn_idx in 0..pool_size {
-        let s = Arc::clone(&state);
-        let srv = Arc::clone(&server);
-        let rx = shutdown.clone();
-        handles.push(tokio::spawn(async move {
-            tunnel::run(&s, &srv, conn_idx, rx).await;
-        }));
+    let handle = tokio::spawn(async move {
+        run_tunnel_pool_manager(state, server, policy, shutdown).await;
+    });
+    tunnel_handles.lock().await.push(handle);
+}
+
+async fn run_tunnel_pool_manager(
+    state: Arc<AppState>,
+    server: Arc<ServerContext>,
+    policy: TunnelPoolPolicy,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    let mut tunnels = BTreeMap::<usize, ManagedTunnel>::new();
+    ensure_tunnel_capacity(
+        &mut tunnels,
+        policy.min_connections,
+        &policy,
+        &state,
+        &server,
+        &shutdown,
+    );
+    let mut ticker = tokio::time::interval(policy.scale_check_interval);
+    ticker.tick().await;
+    let mut low_load_since: Option<Instant> = None;
+
+    loop {
+        tokio::select! {
+            _ = shutdown.changed() => {
+                info!(server = %server.server_label, "tunnel pool manager shutting down");
+                break;
+            }
+            _ = ticker.tick() => {
+                reap_finished_tunnels(&mut tunnels).await;
+
+                let available = tunnels.values().filter(|tunnel| !tunnel.draining).count();
+                if available < policy.min_connections {
+                    ensure_tunnel_capacity(
+                        &mut tunnels,
+                        policy.min_connections,
+                        &policy,
+                        &state,
+                        &server,
+                        &shutdown,
+                    );
+                    low_load_since = None;
+                    continue;
+                }
+
+                let active_connections = server.active_connections.load(Ordering::Acquire);
+                let desired_connections = desired_tunnel_connections(active_connections, &policy);
+                if desired_connections > available {
+                    ensure_tunnel_capacity(
+                        &mut tunnels,
+                        desired_connections,
+                        &policy,
+                        &state,
+                        &server,
+                        &shutdown,
+                    );
+                    info!(
+                        server = %server.server_label,
+                        active_connections,
+                        available_connections = available,
+                        target_connections = desired_connections,
+                        "scaled tunnel pool up"
+                    );
+                    low_load_since = None;
+                    continue;
+                }
+
+                if should_scale_down(active_connections, available, &policy) {
+                    match low_load_since {
+                        Some(since) if since.elapsed() >= policy.scale_down_grace => {
+                            if request_tunnel_drain(&mut tunnels, policy.min_connections) {
+                                info!(
+                                    server = %server.server_label,
+                                    active_connections,
+                                    available_connections = available,
+                                    "requested tunnel drain for scale-down"
+                                );
+                            }
+                            low_load_since = None;
+                        }
+                        None => {
+                            low_load_since = Some(Instant::now());
+                        }
+                        Some(_) => {}
+                    }
+                } else {
+                    low_load_since = None;
+                }
+            }
+        }
     }
-    tunnel_handles.lock().await.extend(handles);
+
+    for tunnel in tunnels.values_mut() {
+        let _ = tunnel.drain_tx.send(true);
+        tunnel.draining = true;
+    }
+    while !tunnels.is_empty() {
+        reap_finished_tunnels(&mut tunnels).await;
+        if !tunnels.is_empty() {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+}
+
+fn ensure_tunnel_capacity(
+    tunnels: &mut BTreeMap<usize, ManagedTunnel>,
+    target_connections: usize,
+    policy: &TunnelPoolPolicy,
+    state: &Arc<AppState>,
+    server: &Arc<ServerContext>,
+    shutdown: &watch::Receiver<bool>,
+) {
+    let target_connections = target_connections.min(policy.max_connections);
+    while tunnels.values().filter(|tunnel| !tunnel.draining).count() < target_connections {
+        let Some(slot_id) = next_available_tunnel_slot(tunnels, policy.max_connections) else {
+            break;
+        };
+        tunnels.insert(
+            slot_id,
+            spawn_managed_tunnel(
+                Arc::clone(state),
+                Arc::clone(server),
+                slot_id,
+                shutdown.clone(),
+            ),
+        );
+    }
+}
+
+fn spawn_managed_tunnel(
+    state: Arc<AppState>,
+    server: Arc<ServerContext>,
+    slot_id: usize,
+    shutdown: watch::Receiver<bool>,
+) -> ManagedTunnel {
+    let (drain_tx, drain_rx) = watch::channel(false);
+    let handle = tokio::spawn(async move {
+        tunnel::run(&state, &server, slot_id, shutdown, drain_rx).await;
+    });
+    ManagedTunnel {
+        slot_id,
+        drain_tx,
+        handle,
+        draining: false,
+    }
+}
+
+async fn reap_finished_tunnels(tunnels: &mut BTreeMap<usize, ManagedTunnel>) {
+    let finished_slots = tunnels
+        .iter()
+        .filter_map(|(slot_id, tunnel)| tunnel.handle.is_finished().then_some(*slot_id))
+        .collect::<Vec<_>>();
+
+    for slot_id in finished_slots {
+        if let Some(tunnel) = tunnels.remove(&slot_id) {
+            let _ = tunnel.handle.await;
+        }
+    }
+}
+
+fn next_available_tunnel_slot(
+    tunnels: &BTreeMap<usize, ManagedTunnel>,
+    max_connections: usize,
+) -> Option<usize> {
+    (0..max_connections).find(|slot_id| !tunnels.contains_key(slot_id))
+}
+
+fn request_tunnel_drain(
+    tunnels: &mut BTreeMap<usize, ManagedTunnel>,
+    min_connections: usize,
+) -> bool {
+    let available = tunnels.values().filter(|tunnel| !tunnel.draining).count();
+    if available <= min_connections {
+        return false;
+    }
+
+    let Some((_, tunnel)) = tunnels
+        .iter_mut()
+        .rev()
+        .find(|(_, tunnel)| tunnel.slot_id != 0 && !tunnel.draining)
+    else {
+        return false;
+    };
+
+    if tunnel.drain_tx.send(true).is_ok() {
+        tunnel.draining = true;
+        return true;
+    }
+    false
+}
+
+fn desired_tunnel_connections(active_connections: u64, policy: &TunnelPoolPolicy) -> usize {
+    let required = div_ceil_u64(active_connections.max(1), policy.scale_up_high_water_mark());
+    required.clamp(policy.min_connections as u64, policy.max_connections as u64) as usize
+}
+
+fn should_scale_down(
+    active_connections: u64,
+    available_connections: usize,
+    policy: &TunnelPoolPolicy,
+) -> bool {
+    if available_connections <= policy.min_connections {
+        return false;
+    }
+    active_connections
+        <= (available_connections as u64)
+            .saturating_sub(1)
+            .saturating_mul(policy.scale_down_low_water_mark())
+}
+
+fn occupancy_threshold(max_streams_per_tunnel: usize, percent: u32) -> u64 {
+    div_ceil_u64(
+        (max_streams_per_tunnel as u64).saturating_mul(percent as u64),
+        100,
+    )
+    .max(1)
+}
+
+fn div_ceil_u64(value: u64, divisor: u64) -> u64 {
+    if divisor == 0 {
+        return value;
+    }
+    value.saturating_add(divisor.saturating_sub(1)) / divisor
 }
 
 async fn await_all_handles(handles: &TaskHandles) {
@@ -469,6 +744,8 @@ mod tests {
             },
         )];
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let tunnel_pool_policy =
+            TunnelPoolPolicy::from_config(&state.config, sample_tunnel_pool_sizing());
 
         spawn_registration_recovery_tasks(
             Arc::clone(&state),
@@ -476,7 +753,7 @@ mod tests {
             failed,
             "127.0.0.1".to_string(),
             sample_hardware_info(),
-            1,
+            tunnel_pool_policy,
             shutdown_rx.clone(),
             Arc::clone(&tunnel_handles),
             Arc::clone(&retry_handles),
@@ -506,6 +783,40 @@ mod tests {
         await_all_handles(&retry_handles).await;
         await_all_handles(&tunnel_handles).await;
         gateway_handle.abort();
+    }
+
+    #[test]
+    fn desired_tunnel_connections_expands_when_load_crosses_high_water() {
+        let policy = TunnelPoolPolicy {
+            min_connections: 1,
+            max_connections: 6,
+            max_streams_per_tunnel: 1024,
+            scale_check_interval: Duration::from_secs(1),
+            scale_up_threshold_percent: 70,
+            scale_down_threshold_percent: 35,
+            scale_down_grace: Duration::from_secs(15),
+        };
+
+        assert_eq!(desired_tunnel_connections(1, &policy), 1);
+        assert_eq!(desired_tunnel_connections(2_000, &policy), 3);
+        assert_eq!(desired_tunnel_connections(5_000, &policy), 6);
+    }
+
+    #[test]
+    fn should_scale_down_requires_load_to_fit_remaining_tunnels() {
+        let policy = TunnelPoolPolicy {
+            min_connections: 1,
+            max_connections: 6,
+            max_streams_per_tunnel: 1024,
+            scale_check_interval: Duration::from_secs(1),
+            scale_up_threshold_percent: 70,
+            scale_down_threshold_percent: 35,
+            scale_down_grace: Duration::from_secs(15),
+        };
+
+        assert!(!should_scale_down(800, 3, &policy));
+        assert!(should_scale_down(600, 3, &policy));
+        assert!(!should_scale_down(200, 1, &policy));
     }
 
     async fn wait_for_registered_server(
@@ -595,6 +906,13 @@ mod tests {
         }
     }
 
+    fn sample_tunnel_pool_sizing() -> TunnelPoolSizing {
+        TunnelPoolSizing {
+            initial_connections: 1,
+            max_connections: 1,
+        }
+    }
+
     fn sample_state(config: Config) -> Arc<ProxyAppState> {
         let config = Arc::new(config);
         let dns_cache = Arc::new(DnsCache::new(Duration::from_secs(60), 128));
@@ -656,13 +974,18 @@ mod tests {
             log_max_files: 30,
             tunnel_reconnect_base_ms: 50,
             tunnel_reconnect_max_ms: 250,
-            tunnel_ping_interval_secs: 1,
+            tunnel_ping_interval_ms: 1_000,
             tunnel_max_streams: Some(8),
-            tunnel_connect_timeout_secs: 2,
+            tunnel_connect_timeout_ms: 2_000,
             tunnel_tcp_keepalive_secs: 30,
             tunnel_tcp_nodelay: true,
-            tunnel_stale_timeout_secs: 5,
-            tunnel_connections: 1,
+            tunnel_stale_timeout_ms: 5_000,
+            tunnel_connections: Some(1),
+            tunnel_connections_max: Some(1),
+            tunnel_scale_check_interval_ms: 1_000,
+            tunnel_scale_up_threshold_percent: 70,
+            tunnel_scale_down_threshold_percent: 35,
+            tunnel_scale_down_grace_secs: 15,
         }
     }
 

@@ -82,6 +82,15 @@ impl<'a> AdminAppState<'a> {
             .await
     }
 
+    pub(crate) async fn resolve_transport_proxy_source_with_tunnel_affinity(
+        &self,
+        transport: &AdminGatewayProviderTransportSnapshot,
+    ) -> Option<&'static str> {
+        self.app
+            .resolve_transport_proxy_source_with_tunnel_affinity(transport)
+            .await
+    }
+
     pub(crate) fn fixed_provider_template(
         &self,
         provider_type: &str,
@@ -115,15 +124,14 @@ impl<'a> AdminAppState<'a> {
             return Some(snapshot);
         }
 
-        if explicit_node_id.is_none() {
-            if let Some(snapshot) = self.app.resolve_system_proxy_snapshot().await {
-                return Some(snapshot);
-            }
+        let proxy = connector_config
+            .and_then(|config| config.get("proxy"))
+            .and_then(admin_provider_transport_proxy_snapshot);
+        if proxy.is_some() {
+            return proxy;
         }
 
-        connector_config
-            .and_then(|config| config.get("proxy"))
-            .and_then(admin_provider_transport_legacy_proxy_snapshot)
+        self.app.resolve_system_proxy_snapshot().await
     }
 
     pub(crate) async fn resolve_admin_proxy_node_snapshot(
@@ -256,65 +264,46 @@ impl<'a> AdminAppState<'a> {
     }
 }
 
-fn admin_provider_transport_legacy_proxy_snapshot(value: &Value) -> Option<ProxySnapshot> {
-    match value {
-        Value::String(proxy_url) => {
-            let proxy_url = proxy_url.trim();
-            if proxy_url.is_empty() {
-                return None;
-            }
-            Some(ProxySnapshot {
-                enabled: Some(true),
-                mode: admin_provider_transport_proxy_mode(Some(proxy_url)),
-                node_id: None,
-                label: None,
-                url: Some(proxy_url.to_string()),
-                extra: None,
-            })
-        }
-        Value::Object(object) => {
-            if object.get("enabled").and_then(Value::as_bool) == Some(false) {
-                return None;
-            }
-            let proxy_url = object
-                .get("url")
-                .or_else(|| object.get("proxy_url"))
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())?;
-            let username = object
-                .get("username")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty());
-            let password = object
-                .get("password")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty());
-            Some(ProxySnapshot {
-                enabled: Some(true),
-                mode: object
-                    .get("mode")
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .map(ToOwned::to_owned)
-                    .or_else(|| admin_provider_transport_proxy_mode(Some(proxy_url))),
-                node_id: None,
-                label: object
-                    .get("label")
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .map(ToOwned::to_owned),
-                url: admin_provider_transport_inject_proxy_auth(proxy_url, username, password)
-                    .or_else(|| Some(proxy_url.to_string())),
-                extra: None,
-            })
-        }
-        _ => None,
+fn admin_provider_transport_proxy_snapshot(value: &Value) -> Option<ProxySnapshot> {
+    let object = value.as_object()?;
+    if object.get("enabled").and_then(Value::as_bool) == Some(false) {
+        return None;
     }
+    let proxy_url = object
+        .get("url")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let username = object
+        .get("username")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let password = object
+        .get("password")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    Some(ProxySnapshot {
+        enabled: Some(true),
+        mode: object
+            .get("mode")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+            .or_else(|| admin_provider_transport_proxy_mode(Some(proxy_url))),
+        node_id: None,
+        label: object
+            .get("label")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned),
+        url: admin_provider_transport_inject_proxy_auth(proxy_url, username, password)
+            .or_else(|| Some(proxy_url.to_string())),
+        extra: None,
+    })
 }
 
 fn admin_provider_transport_inject_proxy_auth(
@@ -353,4 +342,51 @@ fn admin_provider_transport_string_field(config: &Map<String, Value>, key: &str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
+}
+
+#[cfg(test)]
+mod tests {
+    use aether_contracts::ProxySnapshot;
+    use serde_json::json;
+
+    use super::admin_provider_transport_proxy_snapshot;
+
+    #[test]
+    fn connector_proxy_snapshot_requires_object_value() {
+        assert_eq!(
+            admin_provider_transport_proxy_snapshot(&json!("http://proxy.example:8080")),
+            None
+        );
+    }
+
+    #[test]
+    fn connector_proxy_snapshot_requires_url_field() {
+        assert_eq!(
+            admin_provider_transport_proxy_snapshot(&json!({
+                "proxy_url": "http://proxy.example:8080"
+            })),
+            None
+        );
+    }
+
+    #[test]
+    fn connector_proxy_snapshot_keeps_current_object_shape() {
+        assert_eq!(
+            admin_provider_transport_proxy_snapshot(&json!({
+                "url": "http://proxy.example:8080",
+                "username": "alice",
+                "password": "secret",
+                "mode": "http",
+                "label": "manual"
+            })),
+            Some(ProxySnapshot {
+                enabled: Some(true),
+                mode: Some("http".to_string()),
+                node_id: None,
+                label: Some("manual".to_string()),
+                url: Some("http://alice:secret@proxy.example:8080/".to_string()),
+                extra: None,
+            })
+        );
+    }
 }

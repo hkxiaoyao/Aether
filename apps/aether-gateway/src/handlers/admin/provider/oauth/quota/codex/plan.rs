@@ -1,9 +1,12 @@
-use super::super::shared::{execute_provider_quota_plan, ProviderQuotaExecutionOutcome};
+use super::super::shared::{
+    default_provider_quota_execution_timeouts, execute_provider_quota_plan,
+    ProviderQuotaExecutionOutcome,
+};
 use super::parse::normalize_codex_plan_type;
 use crate::handlers::admin::provider::shared::payloads::CODEX_WHAM_USAGE_URL;
 use crate::handlers::admin::request::{AdminAppState, AdminGatewayProviderTransportSnapshot};
 use crate::GatewayError;
-use aether_contracts::{ExecutionPlan, ExecutionTimeouts, RequestBody};
+use aether_contracts::{ExecutionPlan, RequestBody};
 use std::collections::BTreeMap;
 
 pub(super) fn build_codex_refresh_headers(
@@ -58,6 +61,14 @@ pub(super) async fn execute_codex_quota_plan(
     transport: &AdminGatewayProviderTransportSnapshot,
     headers: BTreeMap<String, String>,
 ) -> Result<ProviderQuotaExecutionOutcome, GatewayError> {
+    let proxy = state
+        .resolve_transport_proxy_snapshot_with_tunnel_affinity(transport)
+        .await;
+    let timeouts = state
+        .resolve_transport_execution_timeouts(transport)
+        .or(Some(default_provider_quota_execution_timeouts(
+            proxy.as_ref(),
+        )));
     let plan = ExecutionPlan {
         request_id: format!("codex-quota:{}", transport.key.id),
         candidate_id: None,
@@ -79,20 +90,9 @@ pub(super) async fn execute_codex_quota_plan(
         client_api_format: "openai:cli".to_string(),
         provider_api_format: "openai:cli".to_string(),
         model_name: Some("codex-wham-usage".to_string()),
-        proxy: state
-            .resolve_transport_proxy_snapshot_with_tunnel_affinity(transport)
-            .await,
+        proxy,
         tls_profile: state.resolve_transport_tls_profile(transport),
-        timeouts: state
-            .resolve_transport_execution_timeouts(transport)
-            .or(Some(ExecutionTimeouts {
-                connect_ms: Some(30_000),
-                read_ms: Some(30_000),
-                write_ms: Some(30_000),
-                pool_ms: Some(30_000),
-                total_ms: Some(30_000),
-                ..ExecutionTimeouts::default()
-            })),
+        timeouts,
     };
     execute_provider_quota_plan(state, transport, plan, "codex").await
 }

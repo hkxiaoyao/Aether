@@ -6,11 +6,13 @@ use aether_data::repository::proxy_nodes::{
     InMemoryProxyNodeRepository, ProxyNodeHeartbeatMutation, StoredProxyNodeEvent,
 };
 use axum::body::Body;
+use axum::extract::ws::Message;
 use axum::routing::any;
 use axum::{extract::Request, Router};
+use base64::Engine as _;
 use http::StatusCode;
 use serde_json::json;
-use tokio::net::TcpListener;
+use tokio::sync::watch;
 
 use super::super::{
     build_router_with_state, hash_management_token, sample_endpoint, sample_key,
@@ -25,6 +27,7 @@ use crate::maintenance::{
     record_proxy_upgrade_traffic_success, skip_proxy_upgrade_rollout_node,
     start_proxy_upgrade_rollout,
 };
+use crate::tunnel::{tunnel_protocol, TunnelProxyConn};
 
 #[tokio::test]
 async fn gateway_handles_admin_proxy_nodes_locally_with_trusted_admin_principal() {
@@ -105,6 +108,49 @@ async fn gateway_handles_admin_proxy_nodes_locally_with_trusted_admin_principal(
 
     gateway_handle.abort();
     upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_returns_full_manual_proxy_node_detail_locally_with_trusted_admin_principal() {
+    let mut manual_node = sample_proxy_node("proxy-node-manual");
+    manual_node.name = "alpha-manual".to_string();
+    manual_node.status = "online".to_string();
+    manual_node.is_manual = true;
+    manual_node.tunnel_mode = false;
+    manual_node.tunnel_connected = false;
+    manual_node.proxy_url = Some("http://proxy.example:8080".to_string());
+    manual_node.proxy_username = Some("alice".to_string());
+    manual_node.proxy_password = Some("supersecret".to_string());
+
+    let proxy_node_repository = Arc::new(InMemoryProxyNodeRepository::seed(vec![manual_node]));
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(GatewayDataState::with_proxy_node_repository_for_tests(
+                proxy_node_repository,
+            )),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .get(format!(
+            "{gateway_url}/api/admin/proxy-nodes/proxy-node-manual"
+        ))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["node"]["id"], "proxy-node-manual");
+    assert_eq!(payload["node"]["proxy_username"], "alice");
+    assert_eq!(payload["node"]["proxy_password"], "supersecret");
+
+    gateway_handle.abort();
 }
 
 #[tokio::test]
@@ -719,15 +765,28 @@ async fn gateway_registers_and_unregisters_proxy_nodes_locally_with_management_t
 
 #[tokio::test]
 async fn gateway_creates_updates_and_tests_manual_proxy_nodes_locally() {
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("listener should bind");
-    let proxy_port = listener
-        .local_addr()
-        .expect("listener addr should resolve")
-        .port();
-    let accept_handle =
-        tokio::spawn(async move { while let Ok((_stream, _addr)) = listener.accept().await {} });
+    let proxy_auths = Arc::new(Mutex::new(Vec::<Option<String>>::new()));
+    let proxy_auths_clone = Arc::clone(&proxy_auths);
+    let proxy = Router::new().fallback(any(move |request: Request| {
+        let proxy_auths_inner = Arc::clone(&proxy_auths_clone);
+        async move {
+            proxy_auths_inner.lock().expect("mutex should lock").push(
+                request
+                    .headers()
+                    .get("proxy-authorization")
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_string),
+            );
+            (
+                StatusCode::OK,
+                Body::from("fl=1234\nip=203.0.113.10\nwarp=off\n"),
+            )
+        }
+    }));
+    let (proxy_url, proxy_handle) = start_server(proxy).await;
+    let _probe_url_guard = crate::handlers::admin::override_proxy_connectivity_probe_url_for_tests(
+        "http://probe.example/cdn-cgi/trace",
+    );
 
     let proxy_node_repository = Arc::new(InMemoryProxyNodeRepository::default());
     let gateway = build_router_with_state(
@@ -739,7 +798,6 @@ async fn gateway_creates_updates_and_tests_manual_proxy_nodes_locally() {
     );
     let (gateway_url, gateway_handle) = start_server(gateway).await;
     let client = reqwest::Client::new();
-    let proxy_url = format!("http://127.0.0.1:{proxy_port}");
 
     let create_response = client
         .post(format!("{gateway_url}/api/admin/proxy-nodes/manual"))
@@ -749,7 +807,9 @@ async fn gateway_creates_updates_and_tests_manual_proxy_nodes_locally() {
         .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
         .json(&json!({
             "name": "manual-node",
-            "proxy_url": proxy_url,
+            "proxy_url": proxy_url.clone(),
+            "username": "alice",
+            "password": "supersecret",
             "region": "US-West"
         }))
         .send()
@@ -770,6 +830,8 @@ async fn gateway_creates_updates_and_tests_manual_proxy_nodes_locally() {
     assert_eq!(create_payload["node"]["is_manual"], true);
     assert_eq!(create_payload["node"]["status"], "online");
     assert_eq!(create_payload["node"]["proxy_url"], proxy_url);
+    assert_eq!(create_payload["node"]["proxy_username"], "alice");
+    assert_eq!(create_payload["node"]["proxy_password"], "su****et");
 
     let test_url_response = client
         .post(format!("{gateway_url}/api/admin/proxy-nodes/test-url"))
@@ -778,7 +840,9 @@ async fn gateway_creates_updates_and_tests_manual_proxy_nodes_locally() {
         .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
         .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
         .json(&json!({
-            "proxy_url": proxy_url
+            "proxy_url": proxy_url.clone(),
+            "username": "alice",
+            "password": "supersecret"
         }))
         .send()
         .await
@@ -790,6 +854,7 @@ async fn gateway_creates_updates_and_tests_manual_proxy_nodes_locally() {
         .expect("json body should parse");
     assert_eq!(test_url_payload["success"], true);
     assert!(test_url_payload["latency_ms"].is_u64());
+    assert_eq!(test_url_payload["exit_ip"], "203.0.113.10");
 
     let test_node_response = client
         .post(format!(
@@ -808,6 +873,19 @@ async fn gateway_creates_updates_and_tests_manual_proxy_nodes_locally() {
         .await
         .expect("json body should parse");
     assert_eq!(test_node_payload["success"], true);
+    assert_eq!(test_node_payload["exit_ip"], "203.0.113.10");
+
+    let expected_proxy_auth = format!(
+        "Basic {}",
+        base64::engine::general_purpose::STANDARD.encode("alice:supersecret")
+    );
+    assert_eq!(
+        proxy_auths.lock().expect("mutex should lock").as_slice(),
+        [
+            Some(expected_proxy_auth.clone()),
+            Some(expected_proxy_auth.clone()),
+        ]
+    );
 
     let update_response = client
         .patch(format!("{gateway_url}/api/admin/proxy-nodes/{node_id}"))
@@ -832,7 +910,7 @@ async fn gateway_creates_updates_and_tests_manual_proxy_nodes_locally() {
     assert_eq!(update_payload["node"]["proxy_url"], proxy_url);
 
     gateway_handle.abort();
-    accept_handle.abort();
+    proxy_handle.abort();
 }
 
 #[tokio::test]
@@ -865,6 +943,135 @@ async fn gateway_tests_disconnected_tunnel_proxy_nodes_locally() {
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
     assert_eq!(payload["success"], false);
     assert_eq!(payload["error"], "tunnel 未连接");
+
+    gateway_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_tests_connected_tunnel_proxy_nodes_with_active_probe() {
+    let _probe_url_guard = crate::handlers::admin::override_proxy_connectivity_probe_url_for_tests(
+        "https://probe.example/cdn-cgi/trace",
+    );
+
+    let mut node = sample_proxy_node("node-online");
+    node.status = "online".to_string();
+    node.tunnel_connected = true;
+
+    let proxy_node_repository = Arc::new(InMemoryProxyNodeRepository::seed(vec![node]));
+    let state = AppState::new()
+        .expect("gateway should build")
+        .with_data_state_for_tests(GatewayDataState::with_proxy_node_repository_for_tests(
+            proxy_node_repository,
+        ));
+    let tunnel_state = state.tunnel.app_state();
+    let (proxy_tx, mut proxy_rx) = aether_runtime::bounded_queue(8);
+    let (proxy_close_tx, _) = watch::channel(false);
+    tunnel_state
+        .hub
+        .register_proxy(Arc::new(TunnelProxyConn::new(
+            500,
+            "node-online".to_string(),
+            "Node Online".to_string(),
+            proxy_tx,
+            proxy_close_tx,
+            16,
+        )));
+
+    let gateway = build_router_with_state(state);
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let request_task = tokio::spawn({
+        let gateway_url = gateway_url.clone();
+        async move {
+            reqwest::Client::new()
+                .post(format!(
+                    "{gateway_url}/api/admin/proxy-nodes/node-online/test"
+                ))
+                .header(GATEWAY_HEADER, "rust-phase3b")
+                .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+                .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+                .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+                .send()
+                .await
+        }
+    });
+
+    let request_headers = match proxy_rx.recv().await.expect("headers frame should arrive") {
+        Message::Binary(data) => data,
+        other => panic!("unexpected message: {other:?}"),
+    };
+    let request_header =
+        tunnel_protocol::FrameHeader::parse(&request_headers).expect("request header should parse");
+    assert_eq!(request_header.msg_type, tunnel_protocol::REQUEST_HEADERS);
+    let meta_payload = tunnel_protocol::decode_payload(&request_headers, &request_header)
+        .expect("request header payload should decode");
+    let meta: tunnel_protocol::RequestMeta =
+        serde_json::from_slice(&meta_payload).expect("request meta should parse");
+    assert_eq!(meta.method, "GET");
+    assert_eq!(meta.url, "https://probe.example/cdn-cgi/trace");
+    assert_eq!(meta.follow_redirects, Some(false));
+
+    let request_body = match proxy_rx.recv().await.expect("body frame should arrive") {
+        Message::Binary(data) => data,
+        other => panic!("unexpected message: {other:?}"),
+    };
+    let request_body_header =
+        tunnel_protocol::FrameHeader::parse(&request_body).expect("request body should parse");
+    assert_eq!(request_body_header.msg_type, tunnel_protocol::REQUEST_BODY);
+    assert_ne!(
+        request_body_header.flags & tunnel_protocol::FLAG_END_STREAM,
+        0,
+        "probe body frame should close the stream"
+    );
+
+    let response_meta = tunnel_protocol::ResponseMeta {
+        status: 200,
+        headers: vec![("content-type".to_string(), "text/plain".to_string())],
+    };
+    let response_meta_bytes =
+        serde_json::to_vec(&response_meta).expect("response meta should serialize");
+    let mut response_headers_frame = tunnel_protocol::encode_frame(
+        request_header.stream_id,
+        tunnel_protocol::RESPONSE_HEADERS,
+        0,
+        &response_meta_bytes,
+    );
+    tunnel_state
+        .hub
+        .handle_proxy_frame(500, &mut response_headers_frame)
+        .await;
+
+    let mut response_body_frame = tunnel_protocol::encode_frame(
+        request_header.stream_id,
+        tunnel_protocol::RESPONSE_BODY,
+        0,
+        b"fl=1234\nip=203.0.113.10\nwarp=off\n",
+    );
+    tunnel_state
+        .hub
+        .handle_proxy_frame(500, &mut response_body_frame)
+        .await;
+
+    let mut response_end_frame = tunnel_protocol::encode_frame(
+        request_header.stream_id,
+        tunnel_protocol::STREAM_END,
+        0,
+        &[],
+    );
+    tunnel_state
+        .hub
+        .handle_proxy_frame(500, &mut response_end_frame)
+        .await;
+
+    let response = request_task
+        .await
+        .expect("request task should complete")
+        .expect("test-node request should succeed");
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["success"], true);
+    assert!(payload["latency_ms"].is_u64());
+    assert_eq!(payload["exit_ip"], "203.0.113.10");
 
     gateway_handle.abort();
 }
@@ -1164,6 +1371,7 @@ async fn gateway_updates_proxy_node_config_and_batches_upgrade_locally() {
         .post(format!("{gateway_url}/api/internal/tunnel/heartbeat"))
         .json(&json!({
             "node_id": "node-online",
+            "heartbeat_id": 77,
             "heartbeat_interval": 45,
             "active_connections": 3,
             "total_requests": 5,
@@ -1179,6 +1387,7 @@ async fn gateway_updates_proxy_node_config_and_batches_upgrade_locally() {
         .json()
         .await
         .expect("json body should parse");
+    assert_eq!(heartbeat_payload["heartbeat_id"], 77);
     assert_eq!(heartbeat_payload["config_version"], 10);
     assert!(heartbeat_payload.get("upgrade_to").is_none());
     assert_eq!(heartbeat_payload["remote_config"]["allowed_ports"][1], 8443);

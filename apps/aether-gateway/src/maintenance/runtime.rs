@@ -87,9 +87,9 @@ pub(super) fn postgres_error(
 const AUDIT_LOG_CLEANUP_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 const GEMINI_FILE_MAPPING_CLEANUP_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const PENDING_CLEANUP_INTERVAL: Duration = Duration::from_secs(5 * 60);
-const PROXY_NODE_STALE_SWEEP_INTERVAL: Duration = Duration::from_secs(30);
+const PROXY_NODE_STALE_SWEEP_INTERVAL: Duration = Duration::from_secs(5);
 const PROXY_UPGRADE_ROLLOUT_INTERVAL: Duration = Duration::from_secs(15);
-const PROXY_NODE_STALE_MIN_GRACE_SECS: u64 = 90;
+const PROXY_NODE_STALE_MIN_GRACE_SECS: u64 = 15;
 const PROXY_NODE_STALE_MISSED_HEARTBEATS: u64 = 3;
 const POOL_MONITOR_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const PROVIDER_CHECKIN_CONCURRENCY: usize = 3;

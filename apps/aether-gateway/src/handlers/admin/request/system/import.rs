@@ -46,6 +46,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 const ADMIN_SYSTEM_IMPORT_MAX_SIZE_BYTES: usize = 10 * 1024 * 1024;
+const MIN_ADMIN_SYSTEM_IMPORT_VERSION: (u32, u32) = (2, 2);
 
 fn invalid_request(detail: impl Into<String>) -> (http::StatusCode, Value) {
     (
@@ -342,19 +343,33 @@ struct ImportedWalletTarget {
     updated_at_unix_secs: Option<u64>,
 }
 
-fn imported_users_export_is_legacy(version: Option<&Value>) -> bool {
+fn imported_system_export_version(version: Option<&Value>) -> Result<(u32, u32), String> {
     let Some(Value::String(version)) = version else {
-        return true;
+        return Err("version 必须是 x.y 字符串".to_string());
     };
     let version = version.trim();
+    if version.is_empty() {
+        return Err("version 必须是 x.y 字符串".to_string());
+    }
     let mut parts = version.split('.');
     let Some(major) = parts.next().and_then(|value| value.parse::<u32>().ok()) else {
-        return true;
+        return Err("version 必须是 x.y 字符串".to_string());
     };
     let Some(minor) = parts.next().and_then(|value| value.parse::<u32>().ok()) else {
-        return true;
+        return Err("version 必须是 x.y 字符串".to_string());
     };
-    (major, minor) < (1, 3)
+    Ok((major, minor))
+}
+
+fn validate_imported_system_export_version(version: Option<&Value>) -> Result<(), String> {
+    let parsed = imported_system_export_version(version)?;
+    if parsed < MIN_ADMIN_SYSTEM_IMPORT_VERSION {
+        return Err(format!(
+            "version {}.{} 已不再支持；仅支持 2.2+ 导出格式",
+            parsed.0, parsed.1
+        ));
+    }
+    Ok(())
 }
 
 fn imported_object_field<'a>(
@@ -385,11 +400,6 @@ fn imported_optional_bool(value: Option<&Value>) -> Result<Option<bool>, String>
     match value {
         None | Some(Value::Null) => Ok(None),
         Some(Value::Bool(value)) => Ok(Some(*value)),
-        Some(Value::String(raw)) => match raw.trim().to_ascii_lowercase().as_str() {
-            "true" => Ok(Some(true)),
-            "false" => Ok(Some(false)),
-            _ => Err("字段必须是布尔值".to_string()),
-        },
         _ => Err("字段必须是布尔值".to_string()),
     }
 }
@@ -402,11 +412,6 @@ fn imported_optional_i32(value: Option<&Value>, field_name: &str) -> Result<Opti
             .ok_or_else(|| format!("{field_name} 必须是整数"))
             .and_then(|value| i32::try_from(value).map_err(|_| format!("{field_name} 超出范围")))
             .map(Some),
-        Some(Value::String(raw)) => raw
-            .trim()
-            .parse::<i32>()
-            .map(Some)
-            .map_err(|_| format!("{field_name} 必须是整数")),
         _ => Err(format!("{field_name} 必须是整数")),
     }
 }
@@ -418,11 +423,6 @@ fn imported_optional_u64(value: Option<&Value>, field_name: &str) -> Result<Opti
             .as_u64()
             .ok_or_else(|| format!("{field_name} 必须是非负整数"))
             .map(Some),
-        Some(Value::String(raw)) => raw
-            .trim()
-            .parse::<u64>()
-            .map(Some)
-            .map_err(|_| format!("{field_name} 必须是非负整数")),
         _ => Err(format!("{field_name} 必须是非负整数")),
     }
 }
@@ -432,13 +432,6 @@ fn imported_optional_f64(value: Option<&Value>, field_name: &str) -> Result<Opti
         None | Some(Value::Null) => Ok(None),
         Some(Value::Number(number)) => number
             .as_f64()
-            .filter(|value| value.is_finite())
-            .ok_or_else(|| format!("{field_name} 必须是有限数值"))
-            .map(Some),
-        Some(Value::String(raw)) => raw
-            .trim()
-            .parse::<f64>()
-            .ok()
             .filter(|value| value.is_finite())
             .ok_or_else(|| format!("{field_name} 必须是有限数值"))
             .map(Some),
@@ -491,16 +484,6 @@ fn imported_string_list_from_value(
                 .map(ToOwned::to_owned)
                 .collect(),
         )),
-        Value::String(raw) => {
-            let trimmed = raw.trim();
-            if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("null") {
-                return Ok(None);
-            }
-            if let Ok(decoded) = serde_json::from_str::<Value>(trimmed) {
-                return imported_string_list_from_value(Some(&decoded), field_name);
-            }
-            Ok(Some(vec![trimmed.to_string()]))
-        }
         _ => Err(format!("{field_name} 必须是字符串列表")),
     }
 }
@@ -1584,7 +1567,6 @@ impl<'a> AdminAppState<'a> {
                 )))
             }
         };
-        let legacy_export = imported_users_export_is_legacy(root.get("version"));
         let empty = Vec::new();
         let users = match root.get("users") {
             Some(Value::Array(items)) => items,
@@ -1613,6 +1595,8 @@ impl<'a> AdminAppState<'a> {
                 }
             };
         }
+
+        invalid_value!(validate_imported_system_export_version(root.get("version")));
 
         let mut stats = AdminSystemUsersImportStats::default();
 
@@ -1883,7 +1867,7 @@ impl<'a> AdminAppState<'a> {
                     invalid_value!(normalize_imported_user_string_list(key, "allowed_models"));
                 let rate_limit =
                     invalid_value!(imported_optional_i32(key.get("rate_limit"), "rate_limit"))
-                        .unwrap_or(if legacy_export { 0 } else { 0 });
+                        .unwrap_or(0);
                 let concurrent_limit = invalid_value!(imported_optional_i32(
                     key.get("concurrent_limit"),
                     "concurrent_limit"
@@ -2063,7 +2047,7 @@ impl<'a> AdminAppState<'a> {
                 invalid_value!(normalize_imported_user_string_list(key, "allowed_models"));
             let rate_limit =
                 invalid_value!(imported_optional_i32(key.get("rate_limit"), "rate_limit"))
-                    .unwrap_or(if legacy_export { 0 } else { 0 });
+                    .unwrap_or(0);
             let concurrent_limit = invalid_value!(imported_optional_i32(
                 key.get("concurrent_limit"),
                 "concurrent_limit"
@@ -2320,4 +2304,65 @@ impl<'a> AdminAppState<'a> {
 enum WalletOwner<'a> {
     User(&'a str),
     ApiKey(&'a str),
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{
+        imported_optional_bool, imported_optional_f64, imported_optional_i32,
+        imported_optional_u64, imported_string_list_from_value,
+        validate_imported_system_export_version,
+    };
+
+    #[test]
+    fn import_requires_supported_export_version() {
+        assert!(validate_imported_system_export_version(Some(&json!("2.2"))).is_ok());
+        assert_eq!(
+            validate_imported_system_export_version(Some(&json!("2.1"))).unwrap_err(),
+            "version 2.1 已不再支持；仅支持 2.2+ 导出格式"
+        );
+        assert_eq!(
+            validate_imported_system_export_version(Some(&json!(null))).unwrap_err(),
+            "version 必须是 x.y 字符串"
+        );
+    }
+
+    #[test]
+    fn import_rejects_legacy_string_scalars() {
+        assert_eq!(
+            imported_optional_bool(Some(&json!("true"))).unwrap_err(),
+            "字段必须是布尔值"
+        );
+        assert_eq!(
+            imported_optional_i32(Some(&json!("5")), "rate_limit").unwrap_err(),
+            "rate_limit 必须是整数"
+        );
+        assert_eq!(
+            imported_optional_u64(Some(&json!("5")), "total_requests").unwrap_err(),
+            "total_requests 必须是非负整数"
+        );
+        assert_eq!(
+            imported_optional_f64(Some(&json!("1.25")), "total_cost_usd").unwrap_err(),
+            "total_cost_usd 必须是有限数值"
+        );
+    }
+
+    #[test]
+    fn import_rejects_legacy_string_lists() {
+        assert_eq!(
+            imported_string_list_from_value(Some(&json!("openai")), "allowed_providers")
+                .unwrap_err(),
+            "allowed_providers 必须是字符串列表"
+        );
+        assert_eq!(
+            imported_string_list_from_value(
+                Some(&json!("[\"openai:chat\"]")),
+                "allowed_api_formats"
+            )
+            .unwrap_err(),
+            "allowed_api_formats 必须是字符串列表"
+        );
+    }
 }

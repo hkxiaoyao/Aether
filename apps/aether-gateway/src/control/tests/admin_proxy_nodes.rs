@@ -92,6 +92,15 @@ fn classifies_admin_proxy_nodes_manual_update_as_admin_proxy_route() {
 }
 
 #[test]
+fn classifies_admin_proxy_nodes_detail_as_admin_proxy_route() {
+    assert_proxy_nodes_admin_route(
+        http::Method::GET,
+        "/api/admin/proxy-nodes/node-1",
+        "get_node",
+    );
+}
+
+#[test]
 fn classifies_admin_proxy_nodes_delete_as_admin_proxy_route() {
     assert_proxy_nodes_admin_route(
         http::Method::DELETE,

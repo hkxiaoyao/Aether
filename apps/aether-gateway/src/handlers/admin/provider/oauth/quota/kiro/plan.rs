@@ -1,3 +1,4 @@
+use super::super::shared::default_provider_quota_execution_timeouts;
 use super::super::shared::{execute_provider_quota_plan, ProviderQuotaExecutionOutcome};
 use crate::handlers::admin::provider::shared::payloads::{
     KIRO_USAGE_LIMITS_PATH, KIRO_USAGE_SDK_VERSION,
@@ -6,7 +7,7 @@ use crate::handlers::admin::request::{
     AdminAppState, AdminGatewayProviderTransportSnapshot, AdminKiroRequestAuth,
 };
 use crate::GatewayError;
-use aether_contracts::{ExecutionPlan, ExecutionTimeouts, RequestBody};
+use aether_contracts::{ExecutionPlan, RequestBody};
 use std::collections::BTreeMap;
 use url::form_urlencoded;
 use uuid::Uuid;
@@ -66,6 +67,14 @@ pub(super) async fn execute_kiro_quota_plan(
     transport: &AdminGatewayProviderTransportSnapshot,
     auth: &AdminKiroRequestAuth,
 ) -> Result<ProviderQuotaExecutionOutcome, GatewayError> {
+    let proxy = state
+        .resolve_transport_proxy_snapshot_with_tunnel_affinity(transport)
+        .await;
+    let timeouts = state
+        .resolve_transport_execution_timeouts(transport)
+        .or(Some(default_provider_quota_execution_timeouts(
+            proxy.as_ref(),
+        )));
     let plan = ExecutionPlan {
         request_id: format!("kiro-quota:{}", transport.key.id),
         candidate_id: None,
@@ -87,20 +96,9 @@ pub(super) async fn execute_kiro_quota_plan(
         client_api_format: "claude:cli".to_string(),
         provider_api_format: "kiro:usage".to_string(),
         model_name: Some("kiro-usage-limits".to_string()),
-        proxy: state
-            .resolve_transport_proxy_snapshot_with_tunnel_affinity(transport)
-            .await,
+        proxy,
         tls_profile: state.resolve_transport_tls_profile(transport),
-        timeouts: state
-            .resolve_transport_execution_timeouts(transport)
-            .or(Some(ExecutionTimeouts {
-                connect_ms: Some(30_000),
-                read_ms: Some(30_000),
-                write_ms: Some(30_000),
-                pool_ms: Some(30_000),
-                total_ms: Some(30_000),
-                ..ExecutionTimeouts::default()
-            })),
+        timeouts,
     };
 
     execute_provider_quota_plan(state, transport, plan, "kiro").await

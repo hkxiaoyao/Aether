@@ -4,8 +4,7 @@ use std::collections::BTreeMap;
 #[derive(Debug, Deserialize)]
 pub(crate) struct InternalTunnelHeartbeatRequest {
     pub(crate) node_id: String,
-    #[serde(default)]
-    pub(crate) heartbeat_id: Option<u64>,
+    pub(crate) heartbeat_id: u64,
     #[serde(default)]
     pub(crate) heartbeat_interval: Option<i32>,
     #[serde(default)]

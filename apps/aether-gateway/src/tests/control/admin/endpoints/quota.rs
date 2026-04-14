@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use aether_crypto::{encrypt_python_fernet_plaintext, DEVELOPMENT_ENCRYPTION_KEY};
 use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
+use aether_data::repository::proxy_nodes::InMemoryProxyNodeRepository;
 use aether_data_contracts::repository::provider_catalog::{
     ProviderCatalogReadRepository, StoredProviderCatalogKey, StoredProviderCatalogProvider,
 };
@@ -14,7 +15,7 @@ use serde_json::json;
 
 use super::super::super::{
     build_router_with_state, build_state_with_execution_runtime_override, sample_endpoint,
-    sample_key, start_server,
+    sample_key, sample_proxy_node, start_server,
 };
 use crate::constants::{
     GATEWAY_HEADER, TRUSTED_ADMIN_SESSION_ID_HEADER, TRUSTED_ADMIN_USER_ID_HEADER,
@@ -29,6 +30,7 @@ async fn gateway_refreshes_admin_provider_quota_locally_for_codex_with_trusted_a
         url: String,
         authorization: String,
         provider_api_format: String,
+        total_ms: Option<u64>,
     }
 
     let upstream_hits = Arc::new(Mutex::new(0usize));
@@ -67,6 +69,10 @@ async fn gateway_refreshes_admin_provider_quota_locally_for_codex_with_trusted_a
                         .cloned()
                         .unwrap_or_default(),
                     provider_api_format: plan.provider_api_format.clone(),
+                    total_ms: plan
+                        .timeouts
+                        .as_ref()
+                        .and_then(|timeouts| timeouts.total_ms),
                 });
                 let result = aether_contracts::ExecutionResult {
                     request_id: plan.request_id,
@@ -178,6 +184,7 @@ async fn gateway_refreshes_admin_provider_quota_locally_for_codex_with_trusted_a
         seen_execution_runtime_request.provider_api_format,
         "openai:cli"
     );
+    assert_eq!(seen_execution_runtime_request.total_ms, Some(30_000));
 
     let reloaded = provider_catalog_repository
         .list_keys_by_ids(&["key-codex-a".to_string()])
@@ -209,6 +216,143 @@ async fn gateway_refreshes_admin_provider_quota_locally_for_codex_with_trusted_a
             .and_then(|value| value.get("secondary_used_percent")),
         Some(&json!(12.5))
     );
+
+    gateway_handle.abort();
+    execution_runtime_handle.abort();
+    upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_refreshes_admin_provider_quota_for_codex_proxy_with_extended_timeout() {
+    let upstream =
+        Router::new().route(
+            "/api/admin/endpoints/providers/provider-codex/refresh-quota",
+            any(|_request: Request| async move {
+                (StatusCode::OK, Body::from("unexpected upstream hit"))
+            }),
+        );
+
+    let seen_execution_runtime = Arc::new(Mutex::new(None::<aether_contracts::ExecutionPlan>));
+    let seen_execution_runtime_clone = Arc::clone(&seen_execution_runtime);
+    let execution_runtime = Router::new().route(
+        "/v1/execute/sync",
+        any(move |request: Request| {
+            let seen_execution_runtime_inner = Arc::clone(&seen_execution_runtime_clone);
+            async move {
+                let plan: aether_contracts::ExecutionPlan = serde_json::from_slice(
+                    &to_bytes(request.into_body(), usize::MAX)
+                        .await
+                        .expect("body should read"),
+                )
+                .expect("plan should parse");
+                *seen_execution_runtime_inner
+                    .lock()
+                    .expect("mutex should lock") = Some(plan.clone());
+                let result = aether_contracts::ExecutionResult {
+                    request_id: plan.request_id,
+                    candidate_id: None,
+                    status_code: 200,
+                    headers: BTreeMap::new(),
+                    body: Some(aether_contracts::ResponseBody {
+                        json_body: Some(json!({
+                            "plan_type": "plus",
+                            "rate_limit": {
+                                "primary_window": {
+                                    "used_percent": 12.5,
+                                    "reset_after_seconds": 18000,
+                                    "reset_at": 1_900_000_000u64,
+                                    "window_minutes": 300
+                                }
+                            }
+                        })),
+                        body_bytes_b64: None,
+                    }),
+                    telemetry: None,
+                    error: None,
+                };
+                (StatusCode::OK, Json(result))
+            }
+        }),
+    );
+
+    let mut provider = StoredProviderCatalogProvider::new(
+        "provider-codex".to_string(),
+        "codex".to_string(),
+        Some("https://example.com".to_string()),
+        "codex".to_string(),
+    )
+    .expect("provider should build");
+    provider.proxy = Some(json!({
+        "node_id": "proxy-node-codex-quota",
+        "enabled": true
+    }));
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        vec![sample_endpoint(
+            "endpoint-codex-cli",
+            "provider-codex",
+            "openai:cli",
+            "https://chatgpt.com/backend-api",
+        )],
+        vec![sample_key(
+            "key-codex-a",
+            "provider-codex",
+            "openai:cli",
+            "sk-codex-123",
+        )],
+    ));
+    let mut manual_node = sample_proxy_node("proxy-node-codex-quota");
+    manual_node.status = "online".to_string();
+    manual_node.is_manual = true;
+    manual_node.tunnel_mode = false;
+    manual_node.tunnel_connected = false;
+    manual_node.proxy_url = Some("http://proxy.example:8080".to_string());
+    let proxy_node_repository = Arc::new(InMemoryProxyNodeRepository::seed(vec![manual_node]));
+
+    let (_upstream_url, upstream_handle) = start_server(upstream).await;
+    let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
+    let gateway = build_router_with_state(
+        build_state_with_execution_runtime_override(execution_runtime_url.clone())
+            .with_data_state_for_tests(
+                GatewayDataState::with_provider_catalog_repository_for_tests(
+                    provider_catalog_repository,
+                )
+                .attach_proxy_node_repository_for_tests(proxy_node_repository)
+                .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+            ),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .post(format!(
+            "{gateway_url}/api/admin/endpoints/providers/provider-codex/refresh-quota"
+        ))
+        .header(GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let plan = seen_execution_runtime
+        .lock()
+        .expect("mutex should lock")
+        .clone()
+        .expect("execution runtime request should be captured");
+    assert_eq!(
+        plan.proxy
+            .as_ref()
+            .and_then(|proxy| proxy.node_id.as_deref()),
+        Some("proxy-node-codex-quota")
+    );
+    let timeouts = plan.timeouts.expect("timeouts should exist");
+    assert_eq!(timeouts.connect_ms, Some(60_000));
+    assert_eq!(timeouts.read_ms, Some(60_000));
+    assert_eq!(timeouts.write_ms, Some(60_000));
+    assert_eq!(timeouts.pool_ms, Some(60_000));
+    assert_eq!(timeouts.total_ms, Some(60_000));
 
     gateway_handle.abort();
     execution_runtime_handle.abort();

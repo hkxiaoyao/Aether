@@ -172,7 +172,7 @@ impl App {
                     value: DEFAULT_HEARTBEAT_INTERVAL_SECS.to_string(),
                     kind: FieldKind::Text,
                     required: false,
-                    help: "Heartbeat interval in seconds; default is 30",
+                    help: "Heartbeat interval in seconds; default is 5",
                 },
                 Field {
                     label: "Redirect Replay Budget",
@@ -264,22 +264,11 @@ impl App {
         }
 
         // Server tabs
-        let servers = cfg.effective_servers();
+        let servers = cfg.servers.clone();
         if servers.is_empty() {
-            let mut tab = ServerTab::new();
-            // Single-server fallback: use top-level node_name
-            if let Some(ref name) = cfg.node_name {
-                tab.fields[2].value = name.clone();
-            }
-            self.server_tabs = vec![tab];
+            self.server_tabs = vec![ServerTab::new()];
         } else {
             self.server_tabs = servers.iter().map(ServerTab::from_entry).collect();
-            // For single-server mode, node_name might be in top-level only
-            if self.server_tabs.len() == 1 && self.server_tabs[0].fields[2].value.is_empty() {
-                if let Some(ref name) = cfg.node_name {
-                    self.server_tabs[0].fields[2].value = name.clone();
-                }
-            }
         }
         self.active_tab = 0;
         self.selected = 0;
@@ -387,7 +376,7 @@ impl App {
             ..ConfigFile::default()
         };
 
-        // Always write [[servers]] format; old top-level fields are read-only compat
+        // Always write [[servers]] format.
         cfg.servers = self
             .server_tabs
             .iter()

@@ -5,7 +5,7 @@ use super::{classified, ClassifiedRoute};
 pub(super) fn classify_admin_operations_family_route(
     method: &http::Method,
     normalized_path: &str,
-    _normalized_path_no_trailing: &str,
+    normalized_path_no_trailing: &str,
 ) -> Option<ClassifiedRoute> {
     if method == http::Method::GET
         && matches!(
@@ -110,6 +110,24 @@ pub(super) fn classify_admin_operations_family_route(
             "admin_proxy",
             "proxy_nodes_manage",
             "list_nodes",
+            "admin:proxy_nodes",
+            false,
+        ))
+    } else if method == http::Method::GET
+        && normalized_path_no_trailing.starts_with("/api/admin/proxy-nodes/")
+        && normalized_path_no_trailing["/api/admin/proxy-nodes/".len()..]
+            .split('/')
+            .count()
+            == 1
+        && !matches!(
+            &normalized_path_no_trailing["/api/admin/proxy-nodes/".len()..],
+            "register" | "heartbeat" | "unregister" | "manual" | "upgrade" | "test-url"
+        )
+    {
+        Some(classified(
+            "admin_proxy",
+            "proxy_nodes_manage",
+            "get_node",
             "admin:proxy_nodes",
             false,
         ))

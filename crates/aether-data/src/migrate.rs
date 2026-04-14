@@ -11,12 +11,29 @@ static BASELINE_V2_SQL: &str = include_str!("../bootstrap/20260413020000_baselin
 const BASELINE_V2_CUTOFF_VERSION: i64 = 20260413030000;
 const MIGRATIONS_TABLE_EXISTS_SQL: &str =
     "SELECT to_regclass('public._sqlx_migrations') IS NOT NULL";
-const EMPTY_DATABASE_USER_TABLE_COUNT_SQL: &str = r#"
+const PUBLIC_BASE_TABLE_COUNT_SQL: &str = r#"
 SELECT COUNT(*)::BIGINT
 FROM information_schema.tables
 WHERE table_schema = 'public'
   AND table_type = 'BASE TABLE'
   AND table_name <> '_sqlx_migrations'
+"#;
+const AETHER_SCHEMA_FOOTPRINT_TABLE_COUNT_SQL: &str = r#"
+SELECT COUNT(*)::BIGINT
+FROM information_schema.tables
+WHERE table_schema = 'public'
+  AND table_type = 'BASE TABLE'
+  AND table_name IN (
+    'api_key_provider_mappings',
+    'auth_modules',
+    'gemini_file_mappings',
+    'global_models',
+    'oauth_providers',
+    'provider_api_keys',
+    'proxy_nodes',
+    'usage_routing_snapshots',
+    'usage_settlement_snapshots'
+  )
 "#;
 const INSERT_APPLIED_MIGRATION_SQL: &str = r#"
 INSERT INTO _sqlx_migrations (
@@ -248,10 +265,25 @@ async fn should_bootstrap_baseline_v2(conn: &mut PgConnection) -> Result<bool, M
         return Ok(false);
     }
 
-    let user_table_count: i64 = query_scalar(EMPTY_DATABASE_USER_TABLE_COUNT_SQL)
+    let public_table_count: i64 = query_scalar(PUBLIC_BASE_TABLE_COUNT_SQL)
         .fetch_one(&mut *conn)
         .await?;
-    Ok(user_table_count == 0)
+    if public_table_count == 0 {
+        return Ok(true);
+    }
+
+    let aether_footprint_table_count: i64 = query_scalar(AETHER_SCHEMA_FOOTPRINT_TABLE_COUNT_SQL)
+        .fetch_one(&mut *conn)
+        .await?;
+    if aether_footprint_table_count == 0 {
+        info!(
+            public_table_count,
+            "no Aether schema footprint detected; allowing baseline bootstrap despite pre-existing public tables"
+        );
+        return Ok(true);
+    }
+
+    Ok(false)
 }
 
 fn baseline_v2_migrations() -> Result<Vec<&'static sqlx::migrate::Migration>, MigrateError> {
@@ -348,13 +380,173 @@ fn validate_applied_migrations(
 #[cfg(test)]
 mod tests {
     use std::borrow::Cow;
+    use std::path::{Path, PathBuf};
+    use std::process::{Child, Command, Stdio};
+    use std::time::{Duration, Instant};
 
-    use sqlx::migrate::AppliedMigration;
+    use sqlx::{migrate::AppliedMigration, query, query_scalar, Connection, PgConnection, PgPool};
 
     use super::{
         all_up_migrations, baseline_v2_migrations, pending_migrations_from_applied,
-        BASELINE_V2_SQL, MIGRATOR,
+        prepare_database_for_startup, BASELINE_V2_SQL, MIGRATOR,
     };
+
+    #[derive(Debug)]
+    struct ManagedPostgresServer {
+        child: Option<Child>,
+        workdir: PathBuf,
+        database_url: String,
+    }
+
+    impl ManagedPostgresServer {
+        async fn try_start() -> Result<Option<Self>, Box<dyn std::error::Error>> {
+            let initdb_bin = std::env::var("AETHER_INITDB_BIN")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| "initdb".to_string());
+            let postgres_bin = std::env::var("AETHER_POSTGRES_BIN")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| "postgres".to_string());
+
+            if !command_exists(&initdb_bin) || !command_exists(&postgres_bin) {
+                eprintln!(
+                    "skipping postgres integration test because required binaries are unavailable: initdb={}, postgres={}",
+                    initdb_bin, postgres_bin
+                );
+                return Ok(None);
+            }
+
+            Ok(Some(Self::start(initdb_bin, postgres_bin).await?))
+        }
+
+        async fn start(
+            initdb_bin: String,
+            postgres_bin: String,
+        ) -> Result<Self, Box<dyn std::error::Error>> {
+            let port = reserve_local_port()?;
+            let workdir = std::env::temp_dir().join(format!(
+                "aether-migrate-tests-{}-{}",
+                std::process::id(),
+                port
+            ));
+            let data_dir = workdir.join("data");
+            std::fs::create_dir_all(&workdir)?;
+
+            let init_output = Command::new(&initdb_bin)
+                .arg("-D")
+                .arg(&data_dir)
+                .arg("-U")
+                .arg("aether")
+                .arg("--auth=trust")
+                .arg("--encoding=UTF8")
+                .arg("--no-instructions")
+                .output()?;
+            if !init_output.status.success() {
+                return Err(std::io::Error::other(format!(
+                    "initdb failed: {}",
+                    String::from_utf8_lossy(&init_output.stderr)
+                ))
+                .into());
+            }
+
+            let database_url = format!("postgres://aether@127.0.0.1:{port}/postgres");
+            let log_path = workdir.join("postgres.log");
+            let stdout = std::fs::File::create(&log_path)?;
+            let stderr = stdout.try_clone()?;
+            let child = Command::new(&postgres_bin)
+                .arg("-D")
+                .arg(&data_dir)
+                .arg("-h")
+                .arg("127.0.0.1")
+                .arg("-p")
+                .arg(port.to_string())
+                .arg("-F")
+                .arg("-c")
+                .arg("fsync=off")
+                .arg("-c")
+                .arg("synchronous_commit=off")
+                .arg("-c")
+                .arg("full_page_writes=off")
+                .stdout(Stdio::from(stdout))
+                .stderr(Stdio::from(stderr))
+                .spawn()?;
+
+            wait_for_postgres(&database_url).await?;
+
+            Ok(Self {
+                child: Some(child),
+                workdir,
+                database_url,
+            })
+        }
+
+        fn database_url(&self) -> &str {
+            &self.database_url
+        }
+
+        fn stop(&mut self) {
+            if let Some(mut child) = self.child.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+
+    impl Drop for ManagedPostgresServer {
+        fn drop(&mut self) {
+            self.stop();
+            let _ = std::fs::remove_dir_all(&self.workdir);
+        }
+    }
+
+    fn command_exists(bin: &str) -> bool {
+        if bin.contains(std::path::MAIN_SEPARATOR) {
+            return Path::new(bin).exists();
+        }
+
+        let Some(paths) = std::env::var_os("PATH") else {
+            return false;
+        };
+
+        std::env::split_paths(&paths).any(|path| path.join(bin).exists())
+    }
+
+    fn reserve_local_port() -> Result<u16, std::io::Error> {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let port = listener.local_addr()?.port();
+        drop(listener);
+        Ok(port)
+    }
+
+    async fn wait_for_postgres(database_url: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            match PgConnection::connect(database_url).await {
+                Ok(connection) => {
+                    connection.close().await?;
+                    return Ok(());
+                }
+                Err(_) if Instant::now() < deadline => {
+                    tokio::time::sleep(Duration::from_millis(50)).await
+                }
+                Err(err) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        format!("timed out waiting for local postgres: {err}"),
+                    )
+                    .into())
+                }
+            }
+        }
+    }
+
+    async fn table_exists(pool: &PgPool, table_name: &str) -> Result<bool, sqlx::Error> {
+        query_scalar::<_, bool>("SELECT to_regclass($1) IS NOT NULL")
+            .bind(format!("public.{table_name}"))
+            .fetch_one(pool)
+            .await
+    }
 
     #[test]
     fn baseline_migration_restores_search_path_for_sqlx_bookkeeping() {
@@ -516,5 +708,78 @@ mod tests {
             pending.is_empty(),
             "baseline_v2-stamped empty databases should not require a manual migration before first startup"
         );
+    }
+
+    #[tokio::test]
+    async fn prepare_database_for_startup_bootstraps_clean_database() {
+        let Some(server) = ManagedPostgresServer::try_start()
+            .await
+            .expect("postgres bootstrap test should start or skip")
+        else {
+            return;
+        };
+
+        let pool = PgPool::connect(server.database_url())
+            .await
+            .expect("pool should connect");
+        let pending = prepare_database_for_startup(&pool)
+            .await
+            .expect("clean database bootstrap should succeed");
+
+        assert!(
+            pending.is_empty(),
+            "fresh databases should not report pending migrations after startup preparation"
+        );
+        assert!(table_exists(&pool, "users")
+            .await
+            .expect("users lookup should succeed"));
+        assert!(table_exists(&pool, "usage")
+            .await
+            .expect("usage lookup should succeed"));
+
+        let applied_count: i64 =
+            query_scalar("SELECT COUNT(*)::BIGINT FROM public._sqlx_migrations")
+                .fetch_one(&pool)
+                .await
+                .expect("migration count query should succeed");
+        assert_eq!(
+            applied_count,
+            baseline_v2_migrations()
+                .expect("baseline migrations should resolve")
+                .len() as i64
+        );
+    }
+
+    #[tokio::test]
+    async fn prepare_database_for_startup_bootstraps_when_only_unrelated_public_tables_exist() {
+        let Some(server) = ManagedPostgresServer::try_start()
+            .await
+            .expect("postgres bootstrap test should start or skip")
+        else {
+            return;
+        };
+
+        let pool = PgPool::connect(server.database_url())
+            .await
+            .expect("pool should connect");
+        query("CREATE TABLE public.vendor_bootstrap_marker (id integer PRIMARY KEY)")
+            .execute(&pool)
+            .await
+            .expect("fixture table should be created");
+
+        let pending = prepare_database_for_startup(&pool)
+            .await
+            .expect("startup preparation should tolerate unrelated public tables");
+
+        assert!(
+            pending.is_empty(),
+            "unrelated public tables should not block baseline bootstrap on first startup"
+        );
+        assert!(table_exists(&pool, "vendor_bootstrap_marker")
+            .await
+            .expect("fixture table lookup should succeed"));
+        assert!(table_exists(&pool, "oauth_providers")
+            .await
+            .expect("oauth_providers lookup should succeed"));
     }
 }

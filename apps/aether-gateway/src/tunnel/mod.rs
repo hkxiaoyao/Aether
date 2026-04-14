@@ -46,12 +46,13 @@ pub(crate) const TUNNEL_NODE_STATUS_PATH: &str = "/api/internal/tunnel/node-stat
 pub(crate) const TUNNEL_RELAY_PATH_PATTERN: &str = "/api/internal/tunnel/relay/{node_id}";
 pub(crate) const TUNNEL_ROUTE_FAMILY: &str = "tunnel_manage";
 
-const DEFAULT_PROXY_IDLE_TIMEOUT_SECS: u64 = 0;
-const DEFAULT_PING_INTERVAL_SECS: u64 = 15;
+const DEFAULT_PROXY_IDLE_TIMEOUT_MS: u64 = 900;
+const DEFAULT_PING_INTERVAL_MS: u64 = 250;
 const DEFAULT_MAX_STREAMS: usize = 2048;
 const DEFAULT_OUTBOUND_QUEUE_CAPACITY: usize = 128;
 const DEFAULT_ATTACHMENT_TTL_SECS: u64 = 90;
 const DEFAULT_OWNER_RELAY_BODY_LIMIT_BYTES: usize = 5_242_880;
+const DEFAULT_TUNNEL_PROBE_BODY_LIMIT_BYTES: usize = 64 * 1024;
 const TUNNEL_ATTACHMENT_KEY_PREFIX: &str = "tunnel.attachments.";
 const TUNNEL_ATTACHMENT_REDIS_KEY_PREFIX: &str = "tunnel:attachments:";
 const TUNNEL_INSTANCE_ID_ENV: &str = "AETHER_GATEWAY_INSTANCE_ID";
@@ -61,8 +62,7 @@ const TUNNEL_ATTACHMENT_TTL_ENV: &str = "AETHER_TUNNEL_ATTACHMENT_TTL_SECS";
 #[derive(Debug, Deserialize)]
 struct InternalTunnelHeartbeatRequest {
     node_id: String,
-    #[serde(default)]
-    heartbeat_id: Option<u64>,
+    heartbeat_id: u64,
     #[serde(default)]
     heartbeat_interval: Option<i32>,
     #[serde(default)]
@@ -380,6 +380,12 @@ pub(crate) struct TunnelStatsSnapshot {
     pub(crate) active_streams: usize,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct TunnelProbeResponse {
+    pub(crate) status: u16,
+    pub(crate) body: String,
+}
+
 impl EmbeddedTunnelState {
     pub(crate) fn new() -> Self {
         Self::with_data(Arc::new(GatewayDataState::disabled()))
@@ -409,8 +415,8 @@ impl EmbeddedTunnelState {
             inner: TunnelAppState::new(
                 build_embedded_control_plane(Arc::clone(&data), attachment_directory.clone()),
                 ConnConfig {
-                    ping_interval: Duration::from_secs(DEFAULT_PING_INTERVAL_SECS),
-                    idle_timeout: Duration::from_secs(DEFAULT_PROXY_IDLE_TIMEOUT_SECS),
+                    ping_interval: Duration::from_millis(DEFAULT_PING_INTERVAL_MS),
+                    idle_timeout: Duration::from_millis(DEFAULT_PROXY_IDLE_TIMEOUT_MS),
                     outbound_queue_capacity: DEFAULT_OUTBOUND_QUEUE_CAPACITY,
                 },
                 DEFAULT_MAX_STREAMS,
@@ -451,6 +457,18 @@ impl EmbeddedTunnelState {
         url: &str,
         timeout_secs: u64,
     ) -> Result<u16, String> {
+        Ok(self
+            .probe_node_url_with_response(node_id, url, timeout_secs)
+            .await?
+            .status)
+    }
+
+    pub(crate) async fn probe_node_url_with_response(
+        &self,
+        node_id: &str,
+        url: &str,
+        timeout_secs: u64,
+    ) -> Result<TunnelProbeResponse, String> {
         let timeout_secs = timeout_secs.clamp(5, 60);
         let meta = tunnel_protocol::RequestMeta {
             method: "GET".to_string(),
@@ -469,7 +487,35 @@ impl EmbeddedTunnelState {
             let response = stream
                 .wait_headers(Duration::from_secs(timeout_secs))
                 .await?;
-            Ok(response.status)
+            let Some(mut body_rx) = stream.take_body_receiver() else {
+                return Err("missing tunnel probe response body receiver".to_string());
+            };
+            let body = tokio::time::timeout(Duration::from_secs(timeout_secs), async {
+                let mut body_bytes = Vec::new();
+                while let Some(event) = body_rx.recv().await {
+                    match event {
+                        embedded::LocalBodyEvent::Chunk(chunk) => {
+                            let next_len = body_bytes.len().saturating_add(chunk.len());
+                            if next_len > DEFAULT_TUNNEL_PROBE_BODY_LIMIT_BYTES {
+                                return Err(format!(
+                                    "tunnel probe body exceeds {} bytes",
+                                    DEFAULT_TUNNEL_PROBE_BODY_LIMIT_BYTES
+                                ));
+                            }
+                            body_bytes.extend_from_slice(&chunk);
+                        }
+                        embedded::LocalBodyEvent::End => break,
+                        embedded::LocalBodyEvent::Error(error) => return Err(error),
+                    }
+                }
+                Ok::<String, String>(String::from_utf8_lossy(&body_bytes).to_string())
+            })
+            .await
+            .map_err(|_| "timed out waiting for tunnel probe response body".to_string())??;
+            Ok(TunnelProbeResponse {
+                status: response.status,
+                body,
+            })
         }
         .await;
         self.inner
@@ -510,8 +556,8 @@ impl Default for EmbeddedTunnelState {
 impl fmt::Debug for EmbeddedTunnelState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("EmbeddedTunnelState")
-            .field("proxy_idle_timeout_secs", &DEFAULT_PROXY_IDLE_TIMEOUT_SECS)
-            .field("ping_interval_secs", &DEFAULT_PING_INTERVAL_SECS)
+            .field("proxy_idle_timeout_ms", &DEFAULT_PROXY_IDLE_TIMEOUT_MS)
+            .field("ping_interval_ms", &DEFAULT_PING_INTERVAL_MS)
             .field("max_streams", &DEFAULT_MAX_STREAMS)
             .field("outbound_queue_capacity", &DEFAULT_OUTBOUND_QUEUE_CAPACITY)
             .field(
@@ -879,14 +925,9 @@ async fn apply_embedded_tunnel_node_status(
         .map_err(|err| format!("node status sync failed: {err}"))
 }
 
-fn build_embedded_tunnel_heartbeat_ack(
-    node: &StoredProxyNode,
-    heartbeat_id: Option<u64>,
-) -> Vec<u8> {
+fn build_embedded_tunnel_heartbeat_ack(node: &StoredProxyNode, heartbeat_id: u64) -> Vec<u8> {
     let mut payload = serde_json::Map::new();
-    if let Some(heartbeat_id) = heartbeat_id {
-        payload.insert("heartbeat_id".to_string(), json!(heartbeat_id));
-    }
+    payload.insert("heartbeat_id".to_string(), json!(heartbeat_id));
     if let Some(remote_config) = node.remote_config.as_ref() {
         payload.insert("remote_config".to_string(), remote_config.clone());
         payload.insert("config_version".to_string(), json!(node.config_version));
@@ -911,7 +952,7 @@ fn parse_embedded_tunnel_heartbeat_request(
         .map_err(|_| "invalid heartbeat payload".to_string())?;
 
     let node_id = payload.node_id.trim();
-    if node_id.is_empty() || node_id.len() > 36 {
+    if node_id.is_empty() || node_id.len() > 36 || payload.heartbeat_id == 0 {
         return Err("invalid heartbeat payload".to_string());
     }
     if payload
@@ -1040,6 +1081,27 @@ mod tests {
                 .and_then(serde_json::Value::as_str),
             Some("2.0.0")
         );
+    }
+
+    #[tokio::test]
+    async fn embedded_tunnel_heartbeat_rejects_missing_heartbeat_id() {
+        let repository = Arc::new(InMemoryProxyNodeRepository::seed(vec![sample_proxy_node(
+            "node-123",
+        )]));
+        let data = GatewayDataState::with_proxy_node_repository_for_tests(Arc::clone(&repository));
+
+        let error = apply_embedded_tunnel_heartbeat(
+            &data,
+            br#"{
+                "node_id": "node-123",
+                "heartbeat_interval": 45,
+                "active_connections": 5
+            }"#,
+        )
+        .await
+        .expect_err("heartbeat without heartbeat_id should fail");
+
+        assert_eq!(error, "invalid heartbeat payload");
     }
 
     #[tokio::test]

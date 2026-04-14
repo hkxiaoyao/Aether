@@ -31,3 +31,5 @@ pub(crate) use self::request::{
     AdminAppState, AdminRequestContext, AdminRouteRequest, AdminRouteResponse, AdminRouteResult,
 };
 pub(crate) use self::routes::maybe_build_local_admin_response;
+#[cfg(test)]
+pub(crate) use self::system::override_proxy_connectivity_probe_url_for_tests;

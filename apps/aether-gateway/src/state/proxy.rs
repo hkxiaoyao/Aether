@@ -92,26 +92,21 @@ impl AppState {
         &self,
         transport: &GatewayProviderTransportSnapshot,
     ) -> Option<ProxySnapshot> {
-        if let Some(snapshot) = self
-            .resolve_proxy_snapshot_from_config(transport.key.proxy.as_ref())
+        self.resolve_transport_proxy_with_source_with_tunnel_affinity(transport)
             .await
-        {
-            return Some(snapshot);
-        }
-        if let Some(snapshot) = self
-            .resolve_proxy_snapshot_from_config(transport.provider.proxy.as_ref())
-            .await
-        {
-            return Some(snapshot);
-        }
-        if let Some(snapshot) = self.resolve_system_proxy_snapshot().await {
-            return Some(snapshot);
-        }
-        self.resolve_proxy_snapshot_from_config(transport.endpoint.proxy.as_ref())
-            .await
+            .map(|(snapshot, _)| snapshot)
     }
 
-    async fn resolve_proxy_snapshot_from_config(
+    pub(crate) async fn resolve_transport_proxy_source_with_tunnel_affinity(
+        &self,
+        transport: &GatewayProviderTransportSnapshot,
+    ) -> Option<&'static str> {
+        self.resolve_transport_proxy_with_source_with_tunnel_affinity(transport)
+            .await
+            .map(|(_, source)| source)
+    }
+
+    pub(crate) async fn resolve_configured_proxy_snapshot_with_tunnel_affinity(
         &self,
         raw: Option<&Value>,
     ) -> Option<ProxySnapshot> {
@@ -126,6 +121,37 @@ impl AppState {
         }
 
         proxy_snapshot_from_object(object)
+    }
+
+    async fn resolve_transport_proxy_with_source_with_tunnel_affinity(
+        &self,
+        transport: &GatewayProviderTransportSnapshot,
+    ) -> Option<(ProxySnapshot, &'static str)> {
+        if let Some(snapshot) = self
+            .resolve_configured_proxy_snapshot_with_tunnel_affinity(transport.key.proxy.as_ref())
+            .await
+        {
+            return Some((snapshot, "key"));
+        }
+        if let Some(snapshot) = self
+            .resolve_configured_proxy_snapshot_with_tunnel_affinity(
+                transport.endpoint.proxy.as_ref(),
+            )
+            .await
+        {
+            return Some((snapshot, "endpoint"));
+        }
+        if let Some(snapshot) = self
+            .resolve_configured_proxy_snapshot_with_tunnel_affinity(
+                transport.provider.proxy.as_ref(),
+            )
+            .await
+        {
+            return Some((snapshot, "provider"));
+        }
+        self.resolve_system_proxy_snapshot()
+            .await
+            .map(|snapshot| (snapshot, "system"))
     }
 }
 
@@ -206,12 +232,22 @@ fn proxy_url_with_node_auth(
     if parsed.set_username(username).is_err() {
         return None;
     }
-    let password = password
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or_default();
-    if parsed.set_password(Some(password)).is_err() {
+    let password = password.map(str::trim).filter(|value| !value.is_empty());
+    if parsed.set_password(password).is_err() {
         return None;
     }
     Some(parsed.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::proxy_url_with_node_auth;
+
+    #[test]
+    fn proxy_url_with_node_auth_omits_empty_password_separator() {
+        assert_eq!(
+            proxy_url_with_node_auth("socks5://proxy.example:1080", Some("alice"), None).as_deref(),
+            Some("socks5://alice@proxy.example:1080")
+        );
+    }
 }

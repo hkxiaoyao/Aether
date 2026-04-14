@@ -493,7 +493,7 @@ async fn gateway_returns_503_for_admin_system_config_import_when_local_data_is_u
 }
 
 #[tokio::test]
-async fn gateway_accepts_legacy_admin_system_config_import_versions() {
+async fn gateway_rejects_legacy_admin_system_config_import_versions() {
     let gateway = build_router_with_state(
         AppState::new()
             .expect("gateway should build")
@@ -519,10 +519,13 @@ async fn gateway_accepts_legacy_admin_system_config_import_versions() {
             .await
             .expect("request should succeed");
 
-        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let payload: Value = response.json().await.expect("json body should parse");
-        assert_eq!(payload["message"], "配置导入成功");
-        assert_eq!(payload["stats"]["errors"], json!([]));
+        let detail = payload["detail"]
+            .as_str()
+            .expect("detail should be a string");
+        assert!(detail.contains(&format!("不支持的配置版本: {version}")));
+        assert!(detail.contains("支持的版本: 2.2"));
     }
 
     gateway_handle.abort();
@@ -562,7 +565,7 @@ async fn gateway_imports_admin_system_users_locally_and_persists_data() {
         .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
         .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
         .json(&json!({
-            "version": "1.3",
+            "version": "2.2",
             "merge_mode": "overwrite",
             "users": [{
                 "email": "alice@example.com",
@@ -761,8 +764,40 @@ async fn gateway_imports_admin_system_users_locally_and_persists_data() {
 }
 
 #[tokio::test]
-async fn gateway_imports_admin_system_config_fixtures_from_legacy_exports() {
-    for fixture in ["v20", "v21", "v22"] {
+async fn gateway_imports_admin_system_config_fixture_v22() {
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(build_empty_admin_system_data_state()),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{gateway_url}/api/admin/system/config/import"))
+        .header(GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&fixture_system_import_payload("v22"))
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["message"], "配置导入成功");
+
+    gateway_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_rejects_admin_system_config_fixtures_from_removed_legacy_exports() {
+    for fixture in ["v20", "v21"] {
+        let version = match fixture {
+            "v20" => "2.0",
+            "v21" => "2.1",
+            _ => unreachable!("unexpected fixture"),
+        };
         let gateway = build_router_with_state(
             AppState::new()
                 .expect("gateway should build")
@@ -783,14 +818,57 @@ async fn gateway_imports_admin_system_config_fixtures_from_legacy_exports() {
 
         assert_eq!(
             response.status(),
-            StatusCode::OK,
-            "fixture {fixture} should import"
+            StatusCode::BAD_REQUEST,
+            "fixture {fixture} should be rejected"
         );
         let payload: Value = response.json().await.expect("json body should parse");
-        assert_eq!(payload["message"], "配置导入成功");
+        let detail = payload["detail"]
+            .as_str()
+            .expect("detail should be a string");
+        assert!(detail.contains(&format!("不支持的配置版本: {version}")));
+        assert!(detail.contains("支持的版本: 2.2"));
 
         gateway_handle.abort();
     }
+}
+
+#[tokio::test]
+async fn gateway_rejects_legacy_user_import_string_bool_field() {
+    let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::default());
+    let state = AppState::new()
+        .expect("gateway should build")
+        .with_data_state_for_tests(
+            GatewayDataState::with_auth_api_key_repository_for_tests(Arc::clone(&auth_repository))
+                .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+        )
+        .with_auth_users_for_tests([sample_import_admin_user("admin-user-123")])
+        .with_auth_wallets_for_tests(Vec::<StoredWalletSnapshot>::new());
+    let gateway = build_router_with_state(state);
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{gateway_url}/api/admin/system/users/import"))
+        .header(GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "version": "2.2",
+            "merge_mode": "overwrite",
+            "users": [{
+                "email": "legacy@example.com",
+                "email_verified": "true"
+            }]
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let payload: Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["detail"], "字段必须是布尔值");
+
+    gateway_handle.abort();
 }
 
 #[tokio::test]
@@ -835,7 +913,7 @@ async fn gateway_reports_field_path_for_invalid_admin_system_config_import_shape
 }
 
 #[tokio::test]
-async fn gateway_imports_admin_system_config_with_numeric_string_prices() {
+async fn gateway_rejects_admin_system_config_with_numeric_string_prices() {
     let gateway = build_router_with_state(
         AppState::new()
             .expect("gateway should build")
@@ -860,12 +938,11 @@ async fn gateway_imports_admin_system_config_with_numeric_string_prices() {
         .await
         .expect("request should succeed");
 
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body: Value = response.json().await.expect("json body should parse");
-    assert_eq!(body["message"], "配置导入成功");
-    assert_eq!(body["stats"]["global_models"]["created"], json!(1));
-    assert_eq!(body["stats"]["providers"]["created"], json!(1));
-    assert_eq!(body["stats"]["models"]["created"], json!(1));
+    let detail = body["detail"].as_str().expect("detail should be a string");
+    assert!(detail.contains("配置文件格式无效"));
+    assert!(detail.contains("default_price_per_request"));
 
     gateway_handle.abort();
 }

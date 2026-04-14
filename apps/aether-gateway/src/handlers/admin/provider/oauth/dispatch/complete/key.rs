@@ -1,5 +1,6 @@
 use super::super::super::errors::build_internal_control_error_response;
 use super::super::super::quota::codex::refresh_codex_provider_quota_locally;
+use super::super::super::runtime::provider_oauth_runtime_endpoint_for_provider;
 use super::super::super::state::{
     admin_provider_oauth_template, enrich_admin_provider_oauth_auth_config,
     is_fixed_provider_type_for_provider_oauth, json_non_empty_string, json_u64_value,
@@ -123,6 +124,22 @@ pub(super) async fn handle_admin_provider_oauth_complete_key(
             "该 Provider 不支持 OAuth 授权",
         ));
     };
+    let endpoints = state
+        .list_provider_catalog_endpoints_by_provider_ids(std::slice::from_ref(&provider_id))
+        .await?;
+    let runtime_endpoint = provider_oauth_runtime_endpoint_for_provider(&provider_type, &endpoints);
+    let request_proxy = state
+        .resolve_admin_provider_oauth_operation_proxy_snapshot(
+            payload.proxy_node_id.as_deref(),
+            &[
+                key.proxy.as_ref(),
+                runtime_endpoint
+                    .as_ref()
+                    .and_then(|endpoint| endpoint.proxy.as_ref()),
+                provider.proxy.as_ref(),
+            ],
+        )
+        .await;
 
     let token_payload = match state
         .exchange_admin_provider_oauth_code(
@@ -130,7 +147,7 @@ pub(super) async fn handle_admin_provider_oauth_complete_key(
             &callback.code,
             &callback.state_nonce,
             state_data.pkce_verifier.as_deref(),
-            payload.proxy_node_id.as_deref(),
+            request_proxy,
         )
         .await
     {

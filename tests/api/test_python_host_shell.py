@@ -646,6 +646,7 @@ def test_python_host_app_surface_keeps_shell_routes_and_rejects_removed_edges() 
     assert _app_matches_http_route("/api/admin/usage/usage-1", "GET") is False
     assert _app_matches_http_route("/api/admin/usage/usage-1/replay", "POST") is False
     assert _app_matches_http_route("/api/admin/proxy-nodes", "GET") is False
+    assert _app_matches_http_route("/api/admin/proxy-nodes/node-1", "GET") is False
     assert _app_matches_http_route("/api/admin/proxy-nodes/register", "POST") is False
     assert _app_matches_http_route("/api/admin/proxy-nodes/heartbeat", "POST") is False
     assert _app_matches_http_route("/api/admin/proxy-nodes/unregister", "POST") is False

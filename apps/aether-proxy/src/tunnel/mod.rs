@@ -36,9 +36,15 @@ pub async fn run(
     server: &Arc<ServerContext>,
     conn_idx: usize,
     mut shutdown: watch::Receiver<bool>,
+    mut drain: watch::Receiver<bool>,
 ) {
     info!(server = %server.server_label, conn = conn_idx, "starting tunnel");
     let reconnect_salt = compute_connection_salt(server, conn_idx);
+
+    if *drain.borrow() {
+        info!(server = %server.server_label, conn = conn_idx, "tunnel drain requested before startup");
+        return;
+    }
 
     let startup_delay = compute_startup_stagger(conn_idx, reconnect_salt);
     if !startup_delay.is_zero() {
@@ -54,14 +60,24 @@ pub async fn run(
                 info!(server = %server.server_label, conn = conn_idx, "shutdown requested during startup stagger");
                 return;
             }
+            _ = drain.changed() => {
+                if *drain.borrow() {
+                    info!(server = %server.server_label, conn = conn_idx, "tunnel drain requested during startup stagger");
+                    return;
+                }
+            }
         }
     }
 
     let mut consecutive_failures: u32 = 0;
 
     loop {
+        if *drain.borrow() {
+            info!(server = %server.server_label, conn = conn_idx, "tunnel drained, exiting slot");
+            return;
+        }
         let started_at = Instant::now();
-        match client::connect_and_run(state, server, conn_idx, &mut shutdown).await {
+        match client::connect_and_run(state, server, conn_idx, &mut shutdown, drain.clone()).await {
             Ok(client::TunnelOutcome::Shutdown) => {
                 info!(server = %server.server_label, conn = conn_idx, "tunnel shut down gracefully");
                 return;
@@ -76,6 +92,10 @@ pub async fn run(
 
         if *shutdown.borrow() {
             info!(server = %server.server_label, conn = conn_idx, "shutdown requested, not reconnecting");
+            return;
+        }
+        if *drain.borrow() {
+            info!(server = %server.server_label, conn = conn_idx, "tunnel drained after disconnect");
             return;
         }
 
@@ -107,6 +127,12 @@ pub async fn run(
             _ = shutdown.changed() => {
                 info!(server = %server.server_label, conn = conn_idx, "shutdown requested during reconnect wait");
                 return;
+            }
+            _ = drain.changed() => {
+                if *drain.borrow() {
+                    info!(server = %server.server_label, conn = conn_idx, "tunnel drain requested during reconnect wait");
+                    return;
+                }
             }
         }
     }
@@ -266,8 +292,9 @@ mod tests {
         let proxy_task = tokio::spawn({
             let state = Arc::clone(&state);
             let server = Arc::clone(&server);
+            let (_drain_tx, drain_rx) = watch::channel(false);
             async move {
-                run(&state, &server, 0, shutdown_rx).await;
+                run(&state, &server, 0, shutdown_rx, drain_rx).await;
             }
         });
 
@@ -486,13 +513,18 @@ mod tests {
             log_max_files: 30,
             tunnel_reconnect_base_ms: 50,
             tunnel_reconnect_max_ms: 250,
-            tunnel_ping_interval_secs: 1,
+            tunnel_ping_interval_ms: 1_000,
             tunnel_max_streams: Some(8),
-            tunnel_connect_timeout_secs: 2,
+            tunnel_connect_timeout_ms: 2_000,
             tunnel_tcp_keepalive_secs: 30,
             tunnel_tcp_nodelay: true,
-            tunnel_stale_timeout_secs: 5,
-            tunnel_connections: 1,
+            tunnel_stale_timeout_ms: 5_000,
+            tunnel_connections: Some(1),
+            tunnel_connections_max: Some(1),
+            tunnel_scale_check_interval_ms: 1_000,
+            tunnel_scale_up_threshold_percent: 70,
+            tunnel_scale_down_threshold_percent: 35,
+            tunnel_scale_down_grace_secs: 15,
         }
     }
 

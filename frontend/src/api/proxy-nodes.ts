@@ -22,10 +22,10 @@ export interface ProxyNode {
   tunnel_mode: boolean
   tunnel_connected: boolean
   tunnel_connected_at: string | null
-  // 手动节点专用字段
+  // 手动节点专用字段。列表接口返回脱敏密码，详情接口返回明文密码。
   proxy_url?: string
   proxy_username?: string
-  proxy_password?: string  // 脱敏后的密码
+  proxy_password?: string
   // 硬件信息（aether-proxy 节点）
   hardware_info: Record<string, unknown> | null
   estimated_max_concurrency: number | null
@@ -188,6 +188,11 @@ export interface ProxyNodeUpgradeRolloutNodeActionResult {
 export const proxyNodesApi = {
   async listProxyNodes(params?: { status?: string; skip?: number; limit?: number }): Promise<ProxyNodeListResponse> {
     const response = await apiClient.get<ProxyNodeListResponse>('/api/admin/proxy-nodes', { params })
+    return response.data
+  },
+
+  async getNode(nodeId: string): Promise<{ node: ProxyNode }> {
+    const response = await apiClient.get<{ node: ProxyNode }>(`/api/admin/proxy-nodes/${nodeId}`)
     return response.data
   },
 

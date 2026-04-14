@@ -351,12 +351,10 @@ pub(crate) fn gateway_error_message(error: GatewayError) -> String {
 
 pub(crate) fn build_internal_tunnel_heartbeat_ack(
     node: &StoredProxyNode,
-    heartbeat_id: Option<u64>,
+    heartbeat_id: u64,
 ) -> serde_json::Value {
     let mut payload = serde_json::Map::new();
-    if let Some(heartbeat_id) = heartbeat_id {
-        payload.insert("heartbeat_id".to_string(), json!(heartbeat_id));
-    }
+    payload.insert("heartbeat_id".to_string(), json!(heartbeat_id));
     if let Some(remote_config) = node.remote_config.as_ref() {
         payload.insert("remote_config".to_string(), remote_config.clone());
         payload.insert("config_version".to_string(), json!(node.config_version));
@@ -385,7 +383,7 @@ pub(crate) fn parse_internal_tunnel_heartbeat_request(
         })?;
 
     let node_id = payload.node_id.trim();
-    if node_id.is_empty() || node_id.len() > 36 {
+    if node_id.is_empty() || node_id.len() > 36 || payload.heartbeat_id == 0 {
         return Err(build_internal_control_error_response(
             http::StatusCode::BAD_REQUEST,
             "invalid heartbeat payload",
