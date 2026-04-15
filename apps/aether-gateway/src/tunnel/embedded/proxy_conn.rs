@@ -43,6 +43,7 @@ pub async fn handle_proxy_connection(
     hub.register_proxy(conn.clone());
 
     let writer_conn_id = conn_id;
+    let writer_conn = conn.clone();
     let writer = tokio::spawn(async move {
         let mut frames_sent: u64 = 0;
         loop {
@@ -54,14 +55,29 @@ pub async fn handle_proxy_connection(
                             Message::Binary(b) => b.len(),
                             _ => 0,
                         };
-                        if let Err(e) = ws_tx.send(msg).await {
-                            warn!(
-                                conn_id = writer_conn_id,
-                                frames_sent = frames_sent,
-                                error = %e,
-                                "writer ws_tx.send failed"
-                            );
-                            break;
+                        let send_result = tokio::time::timeout(
+                            Duration::from_secs(15),
+                            ws_tx.send(msg),
+                        ).await;
+                        match send_result {
+                            Ok(Ok(())) => {}
+                            Ok(Err(e)) => {
+                                warn!(
+                                    conn_id = writer_conn_id,
+                                    frames_sent = frames_sent,
+                                    error = %e,
+                                    "writer ws_tx.send failed"
+                                );
+                                break;
+                            }
+                            Err(_) => {
+                                warn!(
+                                    conn_id = writer_conn_id,
+                                    frames_sent = frames_sent,
+                                    "writer ws_tx.send timed out"
+                                );
+                                break;
+                            }
                         }
                         frames_sent += 1;
                         if is_binary && msg_len > protocol::HEADER_SIZE {
@@ -87,7 +103,8 @@ pub async fn handle_proxy_connection(
             frames_sent = frames_sent,
             "writer task exiting"
         );
-        let _ = ws_tx.close().await;
+        writer_conn.request_close();
+        let _ = tokio::time::timeout(Duration::from_secs(5), ws_tx.close()).await;
     });
 
     let ping_conn = conn.clone();
