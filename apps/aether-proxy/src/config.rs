@@ -53,13 +53,16 @@ pub const DEFAULT_REDIRECT_REPLAY_BUDGET_BYTES: usize = 5_242_880;
 pub const DEFAULT_REDIRECT_REPLAY_BUDGET_HUMAN: &str = "5M";
 pub const DEFAULT_LOG_RETENTION_DAYS: u64 = 7;
 pub const DEFAULT_LOG_MAX_FILES: usize = 30;
-pub const DEFAULT_TUNNEL_PING_INTERVAL_MS: u64 = 250;
-pub const DEFAULT_TUNNEL_CONNECT_TIMEOUT_MS: u64 = 800;
-pub const DEFAULT_TUNNEL_STALE_TIMEOUT_MS: u64 = 10_000;
+pub const DEFAULT_TUNNEL_RECONNECT_BASE_MS: u64 = 50;
+pub const DEFAULT_TUNNEL_RECONNECT_MAX_MS: u64 = 250;
+pub const DEFAULT_TUNNEL_PING_INTERVAL_MS: u64 = 1_000;
+pub const DEFAULT_TUNNEL_CONNECT_TIMEOUT_MS: u64 = 1_500;
+pub const DEFAULT_TUNNEL_STALE_TIMEOUT_MS: u64 = 5_000;
 pub const DEFAULT_TUNNEL_SCALE_CHECK_INTERVAL_MS: u64 = 1_000;
 pub const DEFAULT_TUNNEL_SCALE_UP_THRESHOLD_PERCENT: u32 = 70;
 pub const DEFAULT_TUNNEL_SCALE_DOWN_THRESHOLD_PERCENT: u32 = 35;
 pub const DEFAULT_TUNNEL_SCALE_DOWN_GRACE_SECS: u64 = 15;
+const AUTO_TUNNEL_CONNECTIONS_REDUNDANT_FLOOR: u64 = 2;
 const AUTO_TUNNEL_CONNECTIONS_BASE_CAP: u64 = 4;
 const AUTO_TUNNEL_CONNECTIONS_MAX_CAP: u64 = 8;
 
@@ -508,7 +511,7 @@ pub struct Config {
     #[arg(
         long,
         env = "AETHER_PROXY_TUNNEL_RECONNECT_BASE_MS",
-        default_value_t = 50
+        default_value_t = DEFAULT_TUNNEL_RECONNECT_BASE_MS
     )]
     pub tunnel_reconnect_base_ms: u64,
 
@@ -516,7 +519,7 @@ pub struct Config {
     #[arg(
         long,
         env = "AETHER_PROXY_TUNNEL_RECONNECT_MAX_MS",
-        default_value_t = 30000
+        default_value_t = DEFAULT_TUNNEL_RECONNECT_MAX_MS
     )]
     pub tunnel_reconnect_max_ms: u64,
 
@@ -557,7 +560,7 @@ pub struct Config {
     pub tunnel_stale_timeout_ms: u64,
 
     /// Minimum number of parallel WebSocket tunnel connections per server.
-    /// If omitted, a device-aware value is auto-detected at startup.
+    /// If omitted, a device-aware redundant value is auto-detected at startup.
     #[arg(long, env = "AETHER_PROXY_TUNNEL_CONNECTIONS")]
     pub tunnel_connections: Option<u32>,
 
@@ -730,9 +733,10 @@ impl Config {
         let per_tunnel_capacity = u64::from(self.tunnel_max_streams.unwrap_or(128).max(1));
         let estimated = hw_info.estimated_max_concurrency.max(per_tunnel_capacity);
         let cpu_cap = u64::from(hw_info.cpu_cores).clamp(1, AUTO_TUNNEL_CONNECTIONS_MAX_CAP);
+        let auto_initial_floor = AUTO_TUNNEL_CONNECTIONS_REDUNDANT_FLOOR.min(cpu_cap);
 
         let auto_initial = div_ceil_u64(estimated, per_tunnel_capacity.saturating_mul(8))
-            .clamp(1, AUTO_TUNNEL_CONNECTIONS_BASE_CAP)
+            .clamp(auto_initial_floor, AUTO_TUNNEL_CONNECTIONS_BASE_CAP)
             .min(cpu_cap);
         let auto_max = div_ceil_u64(estimated, per_tunnel_capacity.saturating_mul(4))
             .clamp(auto_initial, AUTO_TUNNEL_CONNECTIONS_MAX_CAP)
@@ -1287,6 +1291,14 @@ mod tests {
                 .expect("stale timeout should resolve"),
             Duration::from_millis(DEFAULT_TUNNEL_STALE_TIMEOUT_MS)
         );
+        assert_eq!(
+            config.tunnel_reconnect_base_ms,
+            DEFAULT_TUNNEL_RECONNECT_BASE_MS
+        );
+        assert_eq!(
+            config.tunnel_reconnect_max_ms,
+            DEFAULT_TUNNEL_RECONNECT_MAX_MS
+        );
     }
 
     #[test]
@@ -1352,6 +1364,34 @@ mod tests {
             .expect("sizing should resolve");
         assert_eq!(sizing.initial_connections, 3);
         assert_eq!(sizing.max_connections, 6);
+    }
+
+    #[test]
+    fn auto_tunnel_pool_sizing_prefers_redundant_floor_when_hardware_allows() {
+        let config = Config::parse_from([
+            "aether-proxy",
+            "--aether-url",
+            "https://example.com",
+            "--management-token",
+            "ae_test",
+            "--node-name",
+            "proxy-test",
+            "--tunnel-max-streams",
+            "1024",
+        ]);
+        let hw = HardwareInfo {
+            cpu_cores: 4,
+            total_memory_mb: 4_096,
+            os_info: "test".to_string(),
+            fd_limit: 1_048_576,
+            estimated_max_concurrency: 64,
+        };
+
+        let sizing = config
+            .resolve_tunnel_pool_sizing(&hw)
+            .expect("sizing should resolve");
+        assert_eq!(sizing.initial_connections, 2);
+        assert_eq!(sizing.max_connections, 2);
     }
 
     #[test]
