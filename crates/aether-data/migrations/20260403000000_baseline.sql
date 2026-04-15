@@ -172,7 +172,7 @@ CREATE TABLE IF NOT EXISTS public.api_keys (
     allowed_api_formats json,
     allowed_models json,
     rate_limit integer DEFAULT 100,
-    concurrent_limit integer DEFAULT 5,
+    concurrent_limit integer,
     force_capabilities json,
     is_active boolean DEFAULT true NOT NULL,
     last_used_at timestamp with time zone,
