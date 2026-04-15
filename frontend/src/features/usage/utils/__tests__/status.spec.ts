@@ -5,6 +5,7 @@ import {
   isUsageRecordSuccessful,
   mapRequestStatusToTimelineStatus,
   normalizeRequestStatus,
+  resolveDisplayRequestStatus,
   resolveTimelineFinalStatus,
 } from '../status'
 import type { UsageRecord } from '../../types'
@@ -62,6 +63,18 @@ describe('usage status helpers', () => {
     expect(normalizeRequestStatus(' Completed ')).toBe('completed')
     expect(mapRequestStatusToTimelineStatus('completed')).toBe('success')
     expect(mapRequestStatusToTimelineStatus('failed')).toBe('failed')
+  })
+
+  it('shows streaming as pending until first byte is recorded', () => {
+    expect(resolveDisplayRequestStatus(buildUsageRecord({
+      status: 'streaming',
+      first_byte_time_ms: undefined,
+    }))).toBe('pending')
+
+    expect(resolveDisplayRequestStatus(buildUsageRecord({
+      status: 'streaming',
+      first_byte_time_ms: 320,
+    }))).toBe('streaming')
   })
 
   it('treats explicit success status code as authoritative for the timeline', () => {

@@ -212,14 +212,14 @@
               失败
             </Badge>
             <Badge
-              v-else-if="record.status === 'pending'"
+              v-else-if="getDisplayStatus(record) === 'pending'"
               variant="outline"
               class="whitespace-nowrap animate-pulse border-muted-foreground/30 text-muted-foreground text-[10px] px-1.5 h-4 leading-4 inline-flex items-center"
             >
               等待
             </Badge>
             <Badge
-              v-else-if="record.status === 'streaming'"
+              v-else-if="getDisplayStatus(record) === 'streaming'"
               variant="outline"
               class="whitespace-nowrap animate-pulse border-primary/50 text-primary text-[10px] px-1.5 h-4 leading-4 inline-flex items-center"
             >
@@ -256,11 +256,11 @@
           <div class="flex items-center gap-1.5">
             <!-- 耗时 -->
             <span
-              v-if="record.status === 'pending' || record.status === 'streaming'"
+              v-if="getDisplayStatus(record) === 'pending' || getDisplayStatus(record) === 'streaming'"
               class="text-primary tabular-nums"
             ><ElapsedTimeText
               :created-at="record.created_at"
-              :status="record.status"
+              :status="getDisplayStatus(record)"
               :response-time-ms="record.response_time_ms ?? null"
             /></span>
             <span
@@ -507,14 +507,14 @@
           <TableCell class="text-center py-4 w-[70px]">
             <!-- 优先显示请求状态 -->
             <Badge
-              v-if="record.status === 'pending'"
+              v-if="getDisplayStatus(record) === 'pending'"
               variant="outline"
               class="whitespace-nowrap animate-pulse border-muted-foreground/30 text-muted-foreground"
             >
               等待中
             </Badge>
             <Badge
-              v-else-if="record.status === 'streaming'"
+              v-else-if="getDisplayStatus(record) === 'streaming'"
               variant="outline"
               class="whitespace-nowrap animate-pulse border-primary/50 text-primary"
             >
@@ -577,19 +577,19 @@
           <TableCell class="text-right py-4 w-[70px]">
             <!-- pending 状态：只显示增长的总时间 -->
             <div
-              v-if="record.status === 'pending'"
+              v-if="getDisplayStatus(record) === 'pending'"
               class="flex flex-col items-end text-xs gap-0.5"
             >
               <span class="text-muted-foreground">-</span>
               <span class="text-primary tabular-nums"><ElapsedTimeText
                 :created-at="record.created_at"
-                :status="record.status"
+                :status="getDisplayStatus(record)"
                 :response-time-ms="record.response_time_ms ?? null"
               /></span>
             </div>
             <!-- streaming 状态：首字固定 + 总时间增长 -->
             <div
-              v-else-if="record.status === 'streaming'"
+              v-else-if="getDisplayStatus(record) === 'streaming'"
               class="flex flex-col items-end text-xs gap-0.5"
             >
               <span
@@ -602,7 +602,7 @@
               >-</span>
               <span class="text-primary tabular-nums"><ElapsedTimeText
                 :created-at="record.created_at"
-                :status="record.status"
+                :status="getDisplayStatus(record)"
                 :response-time-ms="record.response_time_ms ?? null"
               /></span>
             </div>
@@ -678,7 +678,7 @@ import { RefreshCcw, Search } from 'lucide-vue-next'
 import { formatTokens, formatCurrency } from '@/utils/format'
 import { formatDateTime } from '../composables'
 import { getEffectiveInputTokens } from '../token-normalization'
-import { isUsageRecordFailed } from '../utils/status'
+import { isUsageRecordFailed, resolveDisplayRequestStatus } from '../utils/status'
 import { useRowClick } from '@/composables/useRowClick'
 import { formatApiFormat } from '@/api/endpoints/types/api-format'
 import type { DateRangeParams, UsageRecord } from '../types'
@@ -758,6 +758,10 @@ const localSearch = ref(props.filterSearch)
 const emitSearchDebounced = useDebounceFn((value: string) => {
   emit('update:filterSearch', value)
 }, 300)
+
+function getDisplayStatus(record: UsageRecord) {
+  return resolveDisplayRequestStatus(record)
+}
 
 watch(() => props.filterSearch, (value) => {
   if (value !== localSearch.value) {

@@ -76,6 +76,16 @@ export function normalizeRequestStatus(status: RequestStatusLike): RequestStatus
   }
 }
 
+export function resolveDisplayRequestStatus(
+  record: Pick<UsageRecord, 'status' | 'first_byte_time_ms'>
+): RequestStatus | undefined {
+  const status = normalizeRequestStatus(record.status)
+  if (status === 'streaming' && record.first_byte_time_ms == null) {
+    return 'pending'
+  }
+  return status
+}
+
 export function mapRequestStatusToTimelineStatus(
   status: RequestStatusLike
 ): TimelineFinalStatus | undefined {
