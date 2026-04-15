@@ -486,6 +486,7 @@ async fn dashboard_list_usage_for_range(
             provider_name: None,
             model: None,
             statuses: None,
+            limit: None,
         })
         .await
     {
@@ -1215,6 +1216,7 @@ pub(super) async fn handle_dashboard_provider_status_get(
             provider_name: None,
             model: None,
             statuses: None,
+            limit: None,
         })
         .await
     {

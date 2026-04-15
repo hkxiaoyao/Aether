@@ -1213,6 +1213,9 @@ impl SqlxUsageReadRepository {
         }
 
         builder.push(" ORDER BY \"usage\".created_at ASC, \"usage\".request_id ASC");
+        if let Some(limit) = query.limit {
+            builder.push(" LIMIT ").push_bind(limit as i64);
+        }
         let query = builder.build();
         let mut rows = query.fetch(&self.pool);
         let mut items = Vec::new();

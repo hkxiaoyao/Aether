@@ -17,6 +17,7 @@ pub(in super::super) async fn list_recent_completed_usage_for_cache_affinity(
             provider_name: None,
             model: None,
             statuses: None,
+            limit: None,
         })
         .await?;
     items.retain(|item| item.status == "completed");

@@ -218,6 +218,7 @@ pub(super) async fn handle_wallet_today_cost(
             provider_name: None,
             model: None,
             statuses: None,
+            limit: None,
         })
         .await
     {

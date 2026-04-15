@@ -26,6 +26,7 @@ pub(crate) async fn list_usage_for_range(
             provider_name: filters.provider_name.clone(),
             model: filters.model.clone(),
             statuses: None,
+            limit: None,
         })
         .await
 }
@@ -46,6 +47,7 @@ pub(crate) async fn list_usage_for_optional_range(
                     provider_name: filters.provider_name.clone(),
                     model: filters.model.clone(),
                     statuses: None,
+                    limit: None,
                 })
                 .await
         }

@@ -214,6 +214,9 @@ impl UsageReadRepository for InMemoryUsageReadRepository {
                 .cmp(&right.created_at_unix_ms)
                 .then_with(|| left.request_id.cmp(&right.request_id))
         });
+        if let Some(limit) = query.limit {
+            items.truncate(limit);
+        }
         Ok(items)
     }
 

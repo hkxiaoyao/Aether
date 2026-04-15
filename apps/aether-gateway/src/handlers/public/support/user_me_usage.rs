@@ -690,9 +690,22 @@ pub(super) async fn handle_users_me_usage_get(
         Err(detail) => return admin_stats_bad_request_response(detail),
     };
 
+    // When no time range is specified, default to 7 days to avoid full-table scans.
+    let effective_time_range = time_range.or_else(|| {
+        let today = Utc::now().date_naive();
+        let start_date = today
+            .checked_sub_signed(chrono::Duration::days(6))
+            .unwrap_or(today);
+        Some(AdminStatsTimeRange {
+            start_date,
+            end_date: today,
+            tz_offset_minutes: 0,
+        })
+    });
+
     let usage = match list_usage_for_optional_range(
         &AdminAppState::new(state),
-        time_range.as_ref(),
+        effective_time_range.as_ref(),
         &AdminStatsUsageFilter {
             user_id: Some(auth.user.id.clone()),
             provider_name: None,
@@ -872,14 +885,22 @@ pub(super) async fn handle_users_me_usage_active_get(
         Err(response) => return response,
     };
     let ids = parse_users_me_usage_ids(request_context.request_query_string.as_deref());
+    // When polling for active (pending/streaming) requests without specific ids,
+    // limit to the last 1 hour to avoid scanning all historical records.
+    let created_from = if ids.is_none() {
+        Some(Utc::now().timestamp().saturating_sub(3600) as u64)
+    } else {
+        None
+    };
     let items = match state
         .list_usage_audits(&UsageAuditListQuery {
-            created_from_unix_secs: None,
+            created_from_unix_secs: created_from,
             created_until_unix_secs: None,
             user_id: Some(auth.user.id.clone()),
             provider_name: None,
             model: None,
             statuses: None,
+            limit: None,
         })
         .await
     {
@@ -952,6 +973,7 @@ pub(super) async fn handle_users_me_usage_interval_timeline_get(
             provider_name: None,
             model: None,
             statuses: None,
+            limit: None,
         })
         .await
     {
