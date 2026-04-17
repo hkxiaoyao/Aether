@@ -9,7 +9,8 @@ use serde_json::json;
 use super::super::{
     build_router_with_state, hash_api_key, sample_currently_usable_auth_snapshot,
     sample_expired_auth_snapshot, sample_locked_auth_snapshot, start_server, AppState,
-    GatewayDataState, InMemoryAuthApiKeySnapshotRepository, InMemoryWalletRepository,
+    GatewayDataState, InMemoryAuthApiKeySnapshotRepository, InMemoryProviderCatalogReadRepository,
+    InMemoryWalletRepository, StoredProviderCatalogProvider,
 };
 use crate::constants::{
     CONTROL_ROUTE_CLASS_HEADER, EXECUTION_PATH_HEADER, EXECUTION_PATH_LOCAL_AUTH_DENIED,
@@ -547,11 +548,24 @@ async fn gateway_locally_denies_disallowed_provider_without_hitting_control_or_u
         Some(hash_api_key("sk-claude-provider-123")),
         snapshot,
     )]));
+    let provider_catalog = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![StoredProviderCatalogProvider::new(
+            "provider-openai-1".to_string(),
+            "OpenAI Pool 1".to_string(),
+            None,
+            "openai".to_string(),
+        )
+        .expect("provider should build")],
+        Vec::new(),
+        Vec::new(),
+    ));
+    let data = GatewayDataState::with_auth_api_key_reader_for_tests(repository)
+        .with_provider_catalog_reader(provider_catalog);
     let (upstream_url, upstream_handle) = start_server(upstream).await;
     let gateway = build_router_with_state(
         AppState::new()
             .expect("gateway state should build")
-            .with_auth_api_key_data_reader_for_tests(repository),
+            .with_data_state_for_tests(data),
     );
     let (gateway_url, gateway_handle) = start_server(gateway).await;
 

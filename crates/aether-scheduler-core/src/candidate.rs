@@ -159,6 +159,7 @@ pub fn build_minimal_candidate_selection(
             auth_constraints,
             &row.provider_id,
             &row.provider_name,
+            &row.provider_type,
         ) {
             continue;
         }
@@ -269,6 +270,7 @@ pub fn collect_global_model_names_for_required_capability(
             auth_constraints,
             &row.provider_id,
             &row.provider_name,
+            &row.provider_type,
         ) {
             continue;
         }

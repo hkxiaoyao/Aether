@@ -245,6 +245,7 @@ pub(crate) async fn read_global_model_names_for_api_format(
             auth_constraints.as_ref(),
             &row.provider_id,
             &row.provider_name,
+            &row.provider_type,
         ) {
             continue;
         }

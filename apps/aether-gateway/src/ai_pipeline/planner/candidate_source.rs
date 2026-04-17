@@ -9,12 +9,12 @@ pub(crate) fn auth_snapshot_allows_cross_format_candidate(
 ) -> bool {
     if let Some(allowed_providers) = auth_snapshot.effective_allowed_providers() {
         let provider_allowed = allowed_providers.iter().any(|value| {
-            value
-                .trim()
-                .eq_ignore_ascii_case(candidate.provider_id.trim())
-                || value
-                    .trim()
-                    .eq_ignore_ascii_case(candidate.provider_name.trim())
+            aether_scheduler_core::provider_matches_allowed_value(
+                value,
+                &candidate.provider_id,
+                &candidate.provider_name,
+                &candidate.provider_type,
+            )
         });
         if !provider_allowed {
             return false;

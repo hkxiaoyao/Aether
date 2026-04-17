@@ -50,6 +50,7 @@ fn auth_snapshot_allows_provider_for_models(
     auth_snapshot: Option<&crate::data::auth::GatewayAuthApiKeySnapshot>,
     provider_id: &str,
     provider_name: &str,
+    provider_type: &str,
 ) -> bool {
     let Some(allowed) = auth_snapshot
         .and_then(crate::data::auth::GatewayAuthApiKeySnapshot::effective_allowed_providers)
@@ -58,8 +59,12 @@ fn auth_snapshot_allows_provider_for_models(
     };
 
     allowed.iter().any(|value| {
-        value.trim().eq_ignore_ascii_case(provider_id.trim())
-            || value.trim().eq_ignore_ascii_case(provider_name.trim())
+        aether_scheduler_core::provider_matches_allowed_value(
+            value,
+            provider_id,
+            provider_name,
+            provider_type,
+        )
     })
 }
 
@@ -156,6 +161,7 @@ pub(super) fn filter_rows_for_models(
                 auth_snapshot,
                 &row.provider_id,
                 &row.provider_name,
+                &row.provider_type,
             )
         })
         .filter(|row| auth_snapshot_allows_model_for_models(auth_snapshot, &row.global_model_name))

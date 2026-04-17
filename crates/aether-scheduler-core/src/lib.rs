@@ -12,7 +12,7 @@ pub use affinity::{
 };
 pub use auth::{
     auth_constraints_allow_api_format, auth_constraints_allow_model,
-    auth_constraints_allow_provider, SchedulerAuthConstraints,
+    auth_constraints_allow_provider, provider_matches_allowed_value, SchedulerAuthConstraints,
 };
 pub use candidate::{
     auth_api_key_concurrency_limit_reached, build_minimal_candidate_selection,

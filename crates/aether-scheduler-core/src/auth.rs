@@ -5,10 +5,24 @@ pub struct SchedulerAuthConstraints {
     pub allowed_models: Option<Vec<String>>,
 }
 
+pub fn provider_matches_allowed_value(
+    allowed_value: &str,
+    provider_id: &str,
+    provider_name: &str,
+    provider_type: &str,
+) -> bool {
+    let allowed_value = allowed_value.trim();
+    !allowed_value.is_empty()
+        && (allowed_value.eq_ignore_ascii_case(provider_id.trim())
+            || allowed_value.eq_ignore_ascii_case(provider_name.trim())
+            || allowed_value.eq_ignore_ascii_case(provider_type.trim()))
+}
+
 pub fn auth_constraints_allow_provider(
     constraints: Option<&SchedulerAuthConstraints>,
     provider_id: &str,
     provider_name: &str,
+    provider_type: &str,
 ) -> bool {
     let Some(allowed) =
         constraints.and_then(|constraints| constraints.allowed_providers.as_deref())
@@ -17,8 +31,7 @@ pub fn auth_constraints_allow_provider(
     };
 
     allowed.iter().any(|value| {
-        value.trim().eq_ignore_ascii_case(provider_id.trim())
-            || value.trim().eq_ignore_ascii_case(provider_name.trim())
+        provider_matches_allowed_value(value, provider_id, provider_name, provider_type)
     })
 }
 
@@ -56,7 +69,7 @@ pub fn auth_constraints_allow_model(
 mod tests {
     use super::{
         auth_constraints_allow_api_format, auth_constraints_allow_model,
-        auth_constraints_allow_provider, SchedulerAuthConstraints,
+        auth_constraints_allow_provider, provider_matches_allowed_value, SchedulerAuthConstraints,
     };
 
     fn sample_constraints() -> SchedulerAuthConstraints {
@@ -73,17 +86,42 @@ mod tests {
         assert!(auth_constraints_allow_provider(
             Some(&constraints),
             "provider-1",
-            "other"
+            "other",
+            "other",
         ));
         assert!(auth_constraints_allow_provider(
             Some(&constraints),
             "other",
-            "openai"
+            "openai",
+            "other",
+        ));
+        assert!(auth_constraints_allow_provider(
+            Some(&constraints),
+            "other",
+            "other",
+            "openai",
         ));
         assert!(!auth_constraints_allow_provider(
             Some(&constraints),
             "other",
-            "other"
+            "other",
+            "other",
+        ));
+    }
+
+    #[test]
+    fn provider_allowed_value_matches_type() {
+        assert!(provider_matches_allowed_value(
+            "openai",
+            "provider-1",
+            "OpenAI Pool",
+            "openai",
+        ));
+        assert!(!provider_matches_allowed_value(
+            "claude",
+            "provider-1",
+            "OpenAI Pool",
+            "openai",
         ));
     }
 
