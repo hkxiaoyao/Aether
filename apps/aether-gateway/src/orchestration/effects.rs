@@ -2,7 +2,9 @@ use std::collections::BTreeMap;
 
 use aether_admin::provider::quota as admin_provider_quota_pure;
 use aether_contracts::{ExecutionPlan, ExecutionTelemetry};
-use aether_scheduler_core::build_scheduler_affinity_cache_key_for_api_key_id;
+use aether_scheduler_core::{
+    build_scheduler_affinity_cache_key_for_api_key_id, count_recent_rpm_requests_for_provider_key,
+};
 use aether_usage_runtime::{
     build_stream_terminal_usage_outcome, build_sync_terminal_usage_outcome,
     GatewayStreamReportRequest, GatewaySyncReportRequest, TerminalUsageOutcome,
@@ -11,8 +13,9 @@ use serde_json::Value;
 use tracing::warn;
 
 use super::{
-    local_failover_error_message, project_local_adaptive_rate_limit, project_local_failure_health,
-    project_local_success_health, LocalFailoverClassification,
+    local_failover_error_message, project_local_adaptive_rate_limit,
+    project_local_adaptive_success, project_local_failure_health, project_local_success_health,
+    LocalFailoverClassification,
 };
 use crate::ai_pipeline::extract_pool_sticky_session_token;
 use crate::clock::current_unix_secs;
@@ -60,6 +63,9 @@ pub(crate) struct LocalHealthFailureEffect {
 pub(crate) struct LocalHealthSuccessEffect;
 
 #[derive(Debug, Clone, Copy)]
+pub(crate) struct LocalAdaptiveSuccessEffect;
+
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct LocalOAuthInvalidationEffect<'a> {
     pub(crate) status_code: u16,
     pub(crate) response_text: Option<&'a str>,
@@ -71,6 +77,7 @@ pub(crate) enum LocalExecutionEffect<'a> {
     AdaptiveRateLimit(LocalAdaptiveRateLimitEffect<'a>),
     HealthFailure(LocalHealthFailureEffect),
     HealthSuccess(LocalHealthSuccessEffect),
+    AdaptiveSuccess(LocalAdaptiveSuccessEffect),
     OauthInvalidation(LocalOAuthInvalidationEffect<'a>),
     PoolSuccessSync {
         payload: &'a GatewaySyncReportRequest,
@@ -87,6 +94,8 @@ struct PoolFeedbackContext {
     pool_config: AdminProviderPoolConfig,
     sticky_session_token: Option<String>,
 }
+
+const ADAPTIVE_RPM_RECENT_CANDIDATE_LIMIT: usize = 512;
 
 pub(crate) async fn apply_local_execution_effect(
     state: &AppState,
@@ -105,6 +114,9 @@ pub(crate) async fn apply_local_execution_effect(
         }
         LocalExecutionEffect::HealthSuccess(effect) => {
             record_health_success_effect(state, context, effect).await;
+        }
+        LocalExecutionEffect::AdaptiveSuccess(effect) => {
+            record_adaptive_success_effect(state, context, effect).await;
         }
         LocalExecutionEffect::OauthInvalidation(effect) => {
             record_oauth_invalidation_effect(state, context, effect).await;
@@ -256,6 +268,7 @@ async fn record_adaptive_rate_limit_effect(
     context: LocalExecutionEffectContext<'_>,
     effect: LocalAdaptiveRateLimitEffect<'_>,
 ) {
+    let observed_at_unix_secs = current_unix_secs();
     let Some(current_key) = state
         .read_provider_catalog_keys_by_ids(std::slice::from_ref(&context.plan.key_id))
         .await
@@ -264,26 +277,91 @@ async fn record_adaptive_rate_limit_effect(
     else {
         return;
     };
+    let current_rpm = state
+        .read_recent_request_candidates(ADAPTIVE_RPM_RECENT_CANDIDATE_LIMIT)
+        .await
+        .ok()
+        .map(|recent_candidates| {
+            count_recent_rpm_requests_for_provider_key(
+                &recent_candidates,
+                &context.plan.key_id,
+                observed_at_unix_secs,
+            ) as u32
+        });
     let Some(projection) = project_local_adaptive_rate_limit(
         &current_key,
         effect.classification,
         effect.status_code,
+        current_rpm,
         effect.headers,
-        current_unix_secs(),
+        observed_at_unix_secs,
     ) else {
         return;
     };
 
     let mut updated_key = current_key.clone();
-    updated_key.rpm_429_count = Some(projection.rpm_429_count);
+    updated_key.rpm_429_count = Some(projection.rpm_429_count).filter(|value| *value > 0);
+    updated_key.learned_rpm_limit = projection.learned_rpm_limit;
     updated_key.last_429_at_unix_secs = Some(projection.last_429_at_unix_secs);
     updated_key.last_429_type = Some(projection.last_429_type);
+    updated_key.adjustment_history = projection.adjustment_history;
+    updated_key.utilization_samples = projection.utilization_samples;
+    updated_key.last_probe_increase_at_unix_secs = projection.last_probe_increase_at_unix_secs;
+    updated_key.last_rpm_peak = projection.last_rpm_peak;
     updated_key.status_snapshot = Some(projection.status_snapshot);
-    updated_key.updated_at_unix_secs = Some(current_unix_secs());
+    updated_key.updated_at_unix_secs = Some(observed_at_unix_secs);
 
     if let Err(err) = state.update_provider_catalog_key(&updated_key).await {
         warn!(
             "gateway orchestration effects: failed to persist adaptive rate-limit projection for provider {} endpoint {} key {}: {:?}",
+            context.plan.provider_id, context.plan.endpoint_id, context.plan.key_id, err
+        );
+    }
+}
+
+async fn record_adaptive_success_effect(
+    state: &AppState,
+    context: LocalExecutionEffectContext<'_>,
+    _effect: LocalAdaptiveSuccessEffect,
+) {
+    let observed_at_unix_secs = current_unix_secs();
+    let Some(current_key) = state
+        .read_provider_catalog_keys_by_ids(std::slice::from_ref(&context.plan.key_id))
+        .await
+        .ok()
+        .and_then(|mut keys| keys.drain(..).next())
+    else {
+        return;
+    };
+    let Some(recent_candidates) = state
+        .read_recent_request_candidates(ADAPTIVE_RPM_RECENT_CANDIDATE_LIMIT)
+        .await
+        .ok()
+    else {
+        return;
+    };
+    let current_rpm = count_recent_rpm_requests_for_provider_key(
+        &recent_candidates,
+        &context.plan.key_id,
+        observed_at_unix_secs,
+    ) as u32;
+    let Some(projection) =
+        project_local_adaptive_success(&current_key, current_rpm, observed_at_unix_secs)
+    else {
+        return;
+    };
+
+    let mut updated_key = current_key.clone();
+    updated_key.learned_rpm_limit = projection.learned_rpm_limit;
+    updated_key.adjustment_history = projection.adjustment_history;
+    updated_key.utilization_samples = projection.utilization_samples;
+    updated_key.last_probe_increase_at_unix_secs = projection.last_probe_increase_at_unix_secs;
+    updated_key.status_snapshot = Some(projection.status_snapshot);
+    updated_key.updated_at_unix_secs = Some(observed_at_unix_secs);
+
+    if let Err(err) = state.update_provider_catalog_key(&updated_key).await {
+        warn!(
+            "gateway orchestration effects: failed to persist adaptive success projection for provider {} endpoint {} key {}: {:?}",
             context.plan.provider_id, context.plan.endpoint_id, context.plan.key_id, err
         );
     }
@@ -540,7 +618,11 @@ mod tests {
 
     use aether_contracts::{ExecutionPlan, RequestBody};
     use aether_crypto::{encrypt_python_fernet_plaintext, DEVELOPMENT_ENCRYPTION_KEY};
+    use aether_data::repository::candidates::InMemoryRequestCandidateRepository;
     use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
+    use aether_data_contracts::repository::candidates::{
+        RequestCandidateStatus, StoredRequestCandidate,
+    };
     use aether_data_contracts::repository::provider_catalog::{
         StoredProviderCatalogEndpoint, StoredProviderCatalogKey, StoredProviderCatalogProvider,
     };
@@ -548,9 +630,9 @@ mod tests {
 
     use super::{
         apply_local_execution_effect, local_candidate_failure_should_record_pool_error,
-        LocalAdaptiveRateLimitEffect, LocalAttemptFailureEffect, LocalExecutionEffect,
-        LocalExecutionEffectContext, LocalHealthFailureEffect, LocalHealthSuccessEffect,
-        LocalOAuthInvalidationEffect,
+        LocalAdaptiveRateLimitEffect, LocalAdaptiveSuccessEffect, LocalAttemptFailureEffect,
+        LocalExecutionEffect, LocalExecutionEffectContext, LocalHealthFailureEffect,
+        LocalHealthSuccessEffect, LocalOAuthInvalidationEffect,
     };
     use crate::data::GatewayDataState;
     use crate::orchestration::LocalFailoverClassification;
@@ -787,6 +869,26 @@ mod tests {
             .expect("gateway state should build")
             .with_data_state_for_tests(
                 GatewayDataState::with_provider_catalog_repository_for_tests(repository)
+                    .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+            )
+    }
+
+    fn adaptive_state_with_request_candidates(
+        key: StoredProviderCatalogKey,
+        request_candidates: Vec<StoredRequestCandidate>,
+    ) -> AppState {
+        let provider_catalog = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+            vec![sample_health_provider()],
+            vec![sample_health_endpoint()],
+            vec![key],
+        ));
+        let request_candidates =
+            Arc::new(InMemoryRequestCandidateRepository::seed(request_candidates));
+        AppState::new()
+            .expect("gateway state should build")
+            .with_data_state_for_tests(
+                GatewayDataState::with_provider_catalog_repository_for_tests(provider_catalog)
+                    .with_request_candidate_reader(request_candidates)
                     .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
             )
     }
@@ -1168,7 +1270,7 @@ mod tests {
                 .status_snapshot
                 .as_ref()
                 .and_then(|value| value.get("learning_confidence")),
-            Some(&json!(0.283))
+            Some(&json!(0.3))
         );
         assert_eq!(
             stored_key
@@ -1211,5 +1313,98 @@ mod tests {
         assert_eq!(stored_key.rpm_429_count, None);
         assert_eq!(stored_key.last_429_at_unix_secs, None);
         assert_eq!(stored_key.last_429_type, None);
+    }
+
+    #[tokio::test]
+    async fn adaptive_success_effect_expands_limit_from_recent_rpm_usage() {
+        let now_unix_secs = chrono::Utc::now().timestamp().max(0) as u64;
+        let mut key = sample_adaptive_key();
+        key.learned_rpm_limit = Some(20);
+        key.last_rpm_peak = Some(25);
+        key.last_429_at_unix_secs = Some(now_unix_secs.saturating_sub(600));
+        key.adjustment_history = Some(json!([
+            {
+                "timestamp": "2026-04-19T00:00:00Z",
+                "old_limit": 0,
+                "new_limit": 20,
+                "reason": "rpm_429",
+                "confidence": 0.8
+            }
+        ]));
+        key.utilization_samples = Some(json!([
+            {"ts": now_unix_secs.saturating_sub(40), "util": 0.90},
+            {"ts": now_unix_secs.saturating_sub(30), "util": 0.95},
+            {"ts": now_unix_secs.saturating_sub(20), "util": 0.85},
+            {"ts": now_unix_secs.saturating_sub(10), "util": 0.80}
+        ]));
+        let state = adaptive_state_with_request_candidates(
+            key,
+            vec![StoredRequestCandidate::new(
+                "candidate-1".to_string(),
+                "req-1".to_string(),
+                None,
+                None,
+                None,
+                None,
+                0,
+                0,
+                Some("prov-1".to_string()),
+                Some("ep-1".to_string()),
+                Some("key-1".to_string()),
+                RequestCandidateStatus::Success,
+                None,
+                false,
+                Some(200),
+                None,
+                None,
+                Some(10),
+                Some(19),
+                None,
+                None,
+                i64::try_from(now_unix_secs.saturating_sub(30) * 1000)
+                    .expect("candidate created_at should fit i64"),
+                Some(
+                    i64::try_from(now_unix_secs.saturating_sub(30) * 1000)
+                        .expect("candidate started_at should fit i64"),
+                ),
+                Some(
+                    i64::try_from(now_unix_secs.saturating_sub(29) * 1000)
+                        .expect("candidate finished_at should fit i64"),
+                ),
+            )
+            .expect("request candidate should build")],
+        );
+        let plan = sample_plan();
+
+        apply_local_execution_effect(
+            &state,
+            LocalExecutionEffectContext {
+                plan: &plan,
+                report_context: None,
+            },
+            LocalExecutionEffect::AdaptiveSuccess(LocalAdaptiveSuccessEffect),
+        )
+        .await;
+
+        let stored_key = state
+            .read_provider_catalog_keys_by_ids(std::slice::from_ref(&plan.key_id))
+            .await
+            .expect("provider catalog keys should load")
+            .into_iter()
+            .next()
+            .expect("stored key should exist");
+        assert_eq!(stored_key.learned_rpm_limit, Some(25));
+        assert_eq!(stored_key.utilization_samples, Some(json!([])));
+        assert_eq!(
+            stored_key
+                .adjustment_history
+                .as_ref()
+                .and_then(Value::as_array)
+                .and_then(|items| items.last())
+                .and_then(Value::as_object)
+                .and_then(|record| record.get("reason"))
+                .and_then(Value::as_str),
+            Some("high_utilization")
+        );
     }
 }

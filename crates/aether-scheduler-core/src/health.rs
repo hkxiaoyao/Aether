@@ -16,6 +16,10 @@ const COOLDOWN_HOURS_FOR_FULL_CONFIDENCE: f64 = 24.0;
 const LOW_LOAD_THRESHOLD: f64 = 0.5;
 const HIGH_LOAD_THRESHOLD: f64 = 0.8;
 const ENFORCEMENT_CONFIDENCE_THRESHOLD: f64 = 0.6;
+const CONFIDENCE_DECAY_PER_MINUTE: f64 = 0.005;
+const MIN_CONSISTENT_OBSERVATIONS: usize = 3;
+const MIN_HEADER_CONFIRMATIONS: usize = 2;
+const OBSERVATION_CONSISTENCY_THRESHOLD: f64 = 0.3;
 const HEALTH_DEGRADED_THRESHOLD: f64 = 0.8;
 const HEALTH_LOW_THRESHOLD: f64 = 0.5;
 
@@ -120,7 +124,9 @@ pub fn effective_provider_key_rpm_limit(
         .learned_rpm_limit
         .filter(|limit| *limit > 0)
         .and_then(|limit| usize::try_from(limit).ok())?;
-    if provider_key_reservation_confidence(key, now_unix_secs) < ENFORCEMENT_CONFIDENCE_THRESHOLD {
+    if provider_key_adaptive_learning_confidence(key, now_unix_secs)
+        < ENFORCEMENT_CONFIDENCE_THRESHOLD
+    {
         return None;
     }
 
@@ -307,6 +313,145 @@ fn provider_key_dynamic_reservation_ratio(
 
     STABLE_MIN_RESERVATION_RATIO
         + confidence * (STABLE_MAX_RESERVATION_RATIO - STABLE_MIN_RESERVATION_RATIO)
+}
+
+fn provider_key_adaptive_learning_confidence(
+    key: &StoredProviderCatalogKey,
+    now_unix_secs: u64,
+) -> f64 {
+    if key.learned_rpm_limit.is_none() {
+        return 0.0;
+    }
+
+    let base_confidence = provider_key_adaptive_base_confidence(key);
+    if base_confidence <= 0.0 {
+        return 0.0;
+    }
+
+    let time_decay = match key.last_429_at_unix_secs {
+        Some(last_429_at_unix_secs) => {
+            now_unix_secs.saturating_sub(last_429_at_unix_secs) as f64 / 60.0
+                * CONFIDENCE_DECAY_PER_MINUTE
+        }
+        None => 1.0,
+    };
+
+    (base_confidence - time_decay).clamp(0.0, 1.0)
+}
+
+fn provider_key_adaptive_base_confidence(key: &StoredProviderCatalogKey) -> f64 {
+    let history = provider_key_adjustment_history(key);
+    for record in history.iter().rev() {
+        if record.get("type").and_then(serde_json::Value::as_str) == Some("429_observation") {
+            continue;
+        }
+        if let Some(confidence) = record.get("confidence").and_then(json_value_as_f64) {
+            return confidence.clamp(0.0, 1.0);
+        }
+    }
+
+    let (_, confidence) = evaluate_provider_key_observations(&history);
+    if confidence > 0.0 {
+        return confidence;
+    }
+
+    if key.learned_rpm_limit.is_some() {
+        return 0.3;
+    }
+
+    0.0
+}
+
+fn evaluate_provider_key_observations(
+    history: &[serde_json::Map<String, serde_json::Value>],
+) -> (Option<u32>, f64) {
+    let observations = history
+        .iter()
+        .filter(|record| {
+            record.get("type").and_then(serde_json::Value::as_str) == Some("429_observation")
+        })
+        .collect::<Vec<_>>();
+    if observations.is_empty() {
+        return (None, 0.0);
+    }
+
+    let header_values = observations
+        .iter()
+        .filter_map(|record| provider_key_observation_u32(record, "upstream_limit"))
+        .collect::<Vec<_>>();
+    if header_values.len() >= MIN_HEADER_CONFIRMATIONS {
+        let recent = provider_key_recent_tail(&header_values, MIN_HEADER_CONFIRMATIONS * 2);
+        let last_n = provider_key_recent_tail(recent, MIN_HEADER_CONFIRMATIONS);
+        if provider_key_observations_consistent(last_n) {
+            return (None, 0.8);
+        }
+    }
+
+    let local_values = observations
+        .iter()
+        .filter_map(|record| provider_key_observation_u32(record, "current_rpm"))
+        .collect::<Vec<_>>();
+    if local_values.len() >= MIN_CONSISTENT_OBSERVATIONS {
+        let recent = provider_key_recent_tail(&local_values, MIN_CONSISTENT_OBSERVATIONS * 2);
+        let last_n = provider_key_recent_tail(recent, MIN_CONSISTENT_OBSERVATIONS);
+        if provider_key_observations_consistent(last_n) {
+            return (None, 0.6);
+        }
+    }
+
+    (None, 0.0)
+}
+
+fn provider_key_adjustment_history(
+    key: &StoredProviderCatalogKey,
+) -> Vec<serde_json::Map<String, serde_json::Value>> {
+    key.adjustment_history
+        .as_ref()
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_object)
+        .cloned()
+        .collect()
+}
+
+fn provider_key_observation_u32(
+    record: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) -> Option<u32> {
+    record
+        .get(field)
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .filter(|value| *value > 0)
+}
+
+fn provider_key_observations_consistent(values: &[u32]) -> bool {
+    let median = provider_key_median(values);
+    median > 0.0
+        && values.iter().all(|value| {
+            (*value as f64 - median).abs() / median <= OBSERVATION_CONSISTENCY_THRESHOLD
+        })
+}
+
+fn provider_key_median(values: &[u32]) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+
+    let mut sorted = values.iter().map(|value| *value as f64).collect::<Vec<_>>();
+    sorted.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
+    let midpoint = sorted.len() / 2;
+    if sorted.len() % 2 == 0 {
+        (sorted[midpoint - 1] + sorted[midpoint]) / 2.0
+    } else {
+        sorted[midpoint]
+    }
+}
+
+fn provider_key_recent_tail<T>(values: &[T], limit: usize) -> &[T] {
+    let keep_from = values.len().saturating_sub(limit);
+    &values[keep_from..]
 }
 
 fn is_recently_active(candidate: &StoredRequestCandidate, now_unix_secs: u64) -> bool {
@@ -667,24 +812,58 @@ mod tests {
         );
         assert_eq!(effective_provider_key_rpm_limit(&low_confidence, 100), None);
 
-        let high_confidence = provider_catalog_key("key-a").with_rate_limit_fields(
+        let mut high_confidence = provider_catalog_key("key-a").with_rate_limit_fields(
             None,
             Some(80),
             Some(0),
             Some(0),
-            None,
+            Some(99),
             Some(serde_json::json!([
-                {"new_limit": 80},
-                {"new_limit": 81},
-                {"new_limit": 80},
+                {
+                    "timestamp": "2026-04-19T00:00:00Z",
+                    "old_limit": 0,
+                    "new_limit": 80,
+                    "reason": "rpm_429",
+                    "confidence": 0.8
+                },
             ])),
             Some(120),
             Some(118),
         );
+        high_confidence.last_429_type = Some("rpm".to_string());
         assert_eq!(
             effective_provider_key_rpm_limit(&high_confidence, 100),
             Some(80)
         );
+    }
+
+    #[test]
+    fn learned_provider_key_rpm_limit_uses_confirmed_observations_as_fallback_confidence() {
+        let key = provider_catalog_key("key-a").with_rate_limit_fields(
+            None,
+            Some(80),
+            Some(0),
+            Some(2),
+            Some(99),
+            Some(serde_json::json!([
+                {
+                    "type": "429_observation",
+                    "timestamp": "2026-04-19T00:00:00Z",
+                    "current_rpm": 90,
+                    "upstream_limit": 84
+                },
+                {
+                    "type": "429_observation",
+                    "timestamp": "2026-04-19T00:01:00Z",
+                    "current_rpm": 88,
+                    "upstream_limit": 85
+                }
+            ])),
+            Some(20),
+            Some(18),
+        );
+
+        assert_eq!(effective_provider_key_rpm_limit(&key, 100), Some(80));
     }
 
     #[test]

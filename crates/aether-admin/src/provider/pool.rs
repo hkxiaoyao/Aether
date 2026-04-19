@@ -309,8 +309,6 @@ fn admin_pool_scheduling_payload(
     key: &StoredProviderCatalogKey,
     cooldown_reason: Option<&str>,
     cooldown_ttl_seconds: Option<u64>,
-    health_score: f64,
-    circuit_breaker_open: bool,
 ) -> (String, String, String, Vec<Value>) {
     if !key.is_active {
         return (
@@ -339,36 +337,6 @@ fn admin_pool_scheduling_payload(
                 "source": "pool",
                 "ttl_seconds": cooldown_ttl_seconds,
                 "detail": reason,
-            })],
-        );
-    }
-    if circuit_breaker_open {
-        return (
-            "degraded".to_string(),
-            "circuit_breaker".to_string(),
-            "熔断中".to_string(),
-            vec![json!({
-                "code": "circuit_breaker",
-                "label": "熔断中",
-                "blocking": true,
-                "source": "health",
-                "ttl_seconds": Value::Null,
-                "detail": Value::Null,
-            })],
-        );
-    }
-    if health_score < 0.5 {
-        return (
-            "degraded".to_string(),
-            "health_low".to_string(),
-            "健康度较低".to_string(),
-            vec![json!({
-                "code": "health_low",
-                "label": "健康度较低",
-                "blocking": false,
-                "source": "health",
-                "ttl_seconds": Value::Null,
-                "detail": Value::Null,
             })],
         );
     }
@@ -644,7 +612,10 @@ pub fn build_admin_pool_selection_payload(keys: &[StoredProviderCatalogKey]) -> 
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
 mod tests {
-    use super::{admin_pool_key_account_quota_exhausted, admin_pool_key_is_known_banned};
+    use super::{
+        admin_pool_key_account_quota_exhausted, admin_pool_key_is_known_banned,
+        build_admin_pool_key_payload, AdminPoolKeyPayloadContext,
+    };
     use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey;
     use serde_json::json;
 
@@ -781,6 +752,29 @@ mod tests {
 
         assert!(admin_pool_key_is_known_banned(&key));
     }
+
+    #[test]
+    fn build_admin_pool_key_payload_ignores_health_for_scheduling() {
+        let mut key = sample_key(None);
+        key.health_by_format = Some(json!({
+            "openai:chat": {
+                "health_score": 0.2
+            }
+        }));
+        key.circuit_breaker_by_format = Some(json!({
+            "openai:chat": {
+                "open": true
+            }
+        }));
+
+        let payload = build_admin_pool_key_payload(&key, &AdminPoolKeyPayloadContext::default());
+
+        assert_eq!(payload["health_score"], json!(0.2));
+        assert_eq!(payload["circuit_breaker_open"], json!(true));
+        assert_eq!(payload["scheduling_status"], json!("available"));
+        assert_eq!(payload["scheduling_reason"], json!("available"));
+        assert_eq!(payload["scheduling_label"], json!("可用"));
+    }
 }
 
 pub fn build_admin_pool_key_payload(
@@ -794,8 +788,6 @@ pub fn build_admin_pool_key_payload(
             key,
             context.cooldown_reason.as_deref(),
             context.cooldown_ttl_seconds,
-            health_score,
-            circuit_breaker_open,
         );
 
     json!({

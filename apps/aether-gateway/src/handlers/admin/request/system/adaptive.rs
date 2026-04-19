@@ -139,6 +139,9 @@ impl<'a> AdminAppState<'a> {
         key.last_429_at_unix_secs = None;
         key.last_429_type = None;
         key.adjustment_history = None;
+        key.utilization_samples = None;
+        key.last_probe_increase_at_unix_secs = None;
+        key.last_rpm_peak = None;
         let Some(updated) = self.update_provider_catalog_key(&key).await? else {
             return Ok(admin_adaptive_key_not_found_response(key_id));
         };

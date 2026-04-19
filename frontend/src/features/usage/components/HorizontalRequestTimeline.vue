@@ -498,6 +498,13 @@ import { log } from '@/utils/logger'
 import { parseApiError } from '@/utils/errorParser'
 import { formatApiFormat } from '@/api/endpoints/types/api-format'
 import { resolveTimelineFinalStatus } from '../utils/status'
+import {
+  buildPoolAttemptCandidatesFromAudit,
+  extractPoolGroupId,
+  isPoolAttemptedCandidate,
+  makeAttemptKey,
+  TIMELINE_STATUS,
+} from '../utils/poolTrace'
 
 // 节点组类型
 interface NodeGroup {
@@ -691,18 +698,6 @@ const proxyTimingBreakdown = (proxy: Record<string, unknown>): string => {
   return parts.join(' / ')
 }
 
-const TIMELINE_STATUS: CandidateRecord['status'][] = [
-  'success',
-  'failed',
-  'skipped',
-  'cancelled',
-  'pending',
-  'streaming',
-  'available',
-  'unused',
-  'stream_interrupted',
-]
-
 const STATUS_PRIORITY: Record<string, number> = {
   available: 0,
   unused: 0,
@@ -713,47 +708,6 @@ const STATUS_PRIORITY: Record<string, number> = {
   pending: 3,
   streaming: 3,
   success: 4,
-}
-
-const toInt = (value: unknown, defaultValue = 0): number => {
-  const num = Number(value)
-  return Number.isFinite(num) ? Math.trunc(num) : defaultValue
-}
-
-const makeAttemptKey = (candidateIndex: number, retryIndex: number): string => {
-  return `${candidateIndex}:${retryIndex}`
-}
-
-const POOL_UNATTEMPTED_STATUS = new Set<CandidateRecord['status']>([
-  'available',
-  'unused',
-  'skipped',
-])
-
-const isPoolAttemptedCandidate = (candidate: CandidateRecord): boolean => {
-  if (POOL_UNATTEMPTED_STATUS.has(candidate.status)) return false
-  // pending 只有开始执行后才算真正进入号池内部尝试
-  if (candidate.status === 'pending' && !candidate.started_at) return false
-  return true
-}
-
-const normalizeTimelineStatus = (value: unknown): CandidateRecord['status'] => {
-  if (typeof value !== 'string') return 'failed'
-  const normalized = value.trim().toLowerCase()
-  if ((TIMELINE_STATUS as string[]).includes(normalized)) {
-    return normalized as CandidateRecord['status']
-  }
-  // 兜底：内部调度轨迹里非标准状态统一按失败展示
-  return 'failed'
-}
-
-const extractPoolGroupId = (candidate: CandidateRecord): string | null => {
-  const extra = candidate.extra_data
-  if (!extra || typeof extra !== 'object' || Array.isArray(extra)) return null
-  const value = (extra as Record<string, unknown>).pool_group_id
-  if (typeof value !== 'string') return null
-  const text = value.trim()
-  return text || null
 }
 
 // 候选时间线（按实际执行顺序排序）
@@ -794,97 +748,11 @@ const poolAttemptCandidates = computed<CandidateRecord[]>(() => {
   // 兼容旧链路：回退到 request_metadata.scheduling_audit.attempts。
   const audit = schedulingAudit.value
   if (!audit) return []
-  const attempts = audit.attempts
-  if (!Array.isArray(attempts) || attempts.length === 0) return []
-
-  const providerNameById = new Map<string, string>()
-  for (const candidate of rawTimeline.value) {
-    const providerId = String(candidate.provider_id || '').trim()
-    const providerName = String(candidate.provider_name || '').trim()
-    if (!providerId || !providerName) continue
-    if (!providerNameById.has(providerId)) {
-      providerNameById.set(providerId, providerName)
-    }
-  }
-  const providerTypeLikeNames = new Set<string>([
-    'codex',
-    'kiro',
-    'antigravity',
-    'claude_code',
-    'claude code',
-    'gemini_cli',
-    'gemini cli',
-    'oauth',
-    'api_key',
-    'api key',
-  ])
-
-  const traceMap = new Map<string, CandidateRecord>()
-  for (const candidate of rawTimeline.value) {
-    traceMap.set(makeAttemptKey(candidate.candidate_index, candidate.retry_index), candidate)
-  }
-
-  return attempts
-    .map((item, index) => {
-      if (!item || typeof item !== 'object' || Array.isArray(item)) return null
-      const raw = item as Record<string, unknown>
-      const candidateIndex = toInt(raw.candidate_index, index)
-      const retryIndex = toInt(raw.retry_index, 0)
-      const key = makeAttemptKey(candidateIndex, retryIndex)
-      const fromTrace = traceMap.get(key)
-
-      const merged: CandidateRecord = fromTrace
-        ? { ...fromTrace }
-        : {
-            id: `pool-${props.requestId}-${candidateIndex}-${retryIndex}-${index}`,
-            request_id: props.requestId,
-            candidate_index: candidateIndex,
-            retry_index: retryIndex,
-            provider_id: undefined,
-            provider_name: undefined,
-            endpoint_id: undefined,
-            key_id: undefined,
-            key_name: undefined,
-            status: 'failed',
-            is_cached: false,
-            created_at: new Date(0).toISOString(),
-          }
-
-      merged.status = normalizeTimelineStatus(raw.status ?? merged.status)
-      if (typeof raw.provider_id === 'string') merged.provider_id = raw.provider_id
-      if (typeof raw.provider_name === 'string') merged.provider_name = raw.provider_name
-      if (typeof raw.endpoint_id === 'string') merged.endpoint_id = raw.endpoint_id
-      if (typeof raw.key_id === 'string') merged.key_id = raw.key_id
-      if (typeof raw.key_name === 'string') merged.key_name = raw.key_name
-      if (typeof raw.status_code === 'number') merged.status_code = raw.status_code
-      if (typeof raw.error_type === 'string') merged.error_type = raw.error_type
-      const rawPoolGroupId = typeof raw.pool_group_id === 'string' ? raw.pool_group_id.trim() : ''
-      const fallbackPoolGroupId = typeof raw.provider_id === 'string' ? raw.provider_id.trim() : ''
-      const finalPoolGroupId = rawPoolGroupId || fallbackPoolGroupId
-      if (finalPoolGroupId) {
-        merged.extra_data = {
-          ...(merged.extra_data || {}),
-          pool_group_id: finalPoolGroupId,
-        }
-      }
-
-      const mergedProviderId = String(merged.provider_id || '').trim()
-      if (mergedProviderId) {
-        const inferredProviderName = providerNameById.get(mergedProviderId)
-        const currentProviderName = String(merged.provider_name || '').trim()
-        if (
-          inferredProviderName
-          && (
-            !currentProviderName
-            || providerTypeLikeNames.has(currentProviderName.toLowerCase())
-          )
-        ) {
-          merged.provider_name = inferredProviderName
-        }
-      }
-      return merged
-    })
-    .filter((item): item is CandidateRecord => item !== null)
+  return buildPoolAttemptCandidatesFromAudit(
+    rawTimeline.value,
+    audit.attempts,
+    props.requestId,
+  )
 })
 
 const poolAttemptsByGroup = computed<Map<string, CandidateRecord[]>>(() => {

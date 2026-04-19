@@ -67,9 +67,10 @@ use crate::execution_runtime::{
 use crate::execution_runtime::{MAX_STREAM_PREFETCH_BYTES, MAX_STREAM_PREFETCH_FRAMES};
 use crate::log_ids::short_request_id;
 use crate::orchestration::{
-    apply_local_execution_effect, LocalAdaptiveRateLimitEffect, LocalAttemptFailureEffect,
-    LocalExecutionEffect, LocalExecutionEffectContext, LocalHealthFailureEffect,
-    LocalHealthSuccessEffect, LocalOAuthInvalidationEffect, LocalPoolErrorEffect,
+    apply_local_execution_effect, LocalAdaptiveRateLimitEffect, LocalAdaptiveSuccessEffect,
+    LocalAttemptFailureEffect, LocalExecutionEffect, LocalExecutionEffectContext,
+    LocalHealthFailureEffect, LocalHealthSuccessEffect, LocalOAuthInvalidationEffect,
+    LocalPoolErrorEffect,
 };
 use crate::request_candidate_runtime::{
     ensure_execution_request_candidate_slot, record_local_request_candidate_status,
@@ -1666,6 +1667,15 @@ async fn execute_stream_from_frame_stream(
                 report_context: report_context_owned.as_ref(),
             },
             LocalExecutionEffect::HealthSuccess(LocalHealthSuccessEffect),
+        )
+        .await;
+        apply_local_execution_effect(
+            &state_for_report,
+            LocalExecutionEffectContext {
+                plan: &plan_for_report,
+                report_context: report_context_owned.as_ref(),
+            },
+            LocalExecutionEffect::AdaptiveSuccess(LocalAdaptiveSuccessEffect),
         )
         .await;
         apply_local_execution_effect(

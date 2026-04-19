@@ -605,20 +605,6 @@
                       <RefreshCw class="w-3.5 h-3.5" />
                     </Button>
                     <Button
-                      v-if="key.circuit_breaker_open || (key.health_score ?? 1) < 0.5"
-                      variant="ghost"
-                      size="icon"
-                      class="h-7 w-7 text-green-600"
-                      :disabled="recoveringHealthKeyId === key.key_id"
-                      title="刷新健康状态"
-                      @click="handleRecoverKey(key)"
-                    >
-                      <RefreshCw
-                        class="w-3.5 h-3.5"
-                        :class="{ 'animate-spin': recoveringHealthKeyId === key.key_id }"
-                      />
-                    </Button>
-                    <Button
                       variant="ghost"
                       size="icon"
                       class="h-7 w-7"
@@ -897,20 +883,6 @@
                     <RefreshCw class="w-3.5 h-3.5" />
                   </Button>
                   <Button
-                    v-else-if="actionId === 'recover_health'"
-                    variant="ghost"
-                    size="icon"
-                    class="h-7 w-7 shrink-0 text-green-600"
-                    :disabled="recoveringHealthKeyId === key.key_id"
-                    title="刷新健康状态"
-                    @click="handleRecoverKey(key)"
-                  >
-                    <RefreshCw
-                      class="w-3.5 h-3.5"
-                      :class="{ 'animate-spin': recoveringHealthKeyId === key.key_id }"
-                    />
-                  </Button>
-                  <Button
                     v-else-if="actionId === 'permissions'"
                     variant="ghost"
                     size="icon"
@@ -1167,7 +1139,6 @@ import {
   refreshProviderQuota,
 } from '@/api/endpoints/keys'
 import { refreshProviderOAuth } from '@/api/endpoints/provider_oauth'
-import { recoverKeyHealth } from '@/api/endpoints/health'
 import type {
   PoolOverviewItem,
   PoolKeyDetail,
@@ -1565,7 +1536,6 @@ const currentPage = ref(restoredViewState.page)
 const pageSize = ref(restoredViewState.pageSize)
 const MANUAL_QUOTA_REFRESH_COOLDOWN_SECONDS = 5 * 60
 const refreshingOAuthKeyId = ref<string | null>(null)
-const recoveringHealthKeyId = ref<string | null>(null)
 const savingProxyKeyId = ref<string | null>(null)
 const proxyDesktopPopoverOpenKeyId = ref<string | null>(null)
 const proxyMobilePopoverOpenKeyId = ref<string | null>(null)
@@ -2075,20 +2045,6 @@ async function clearKeyProxy(key: PoolKeyDetail) {
   }
 }
 
-async function handleRecoverKey(key: PoolKeyDetail) {
-  if (recoveringHealthKeyId.value) return
-  recoveringHealthKeyId.value = key.key_id
-  try {
-    const result = await recoverKeyHealth(key.key_id)
-    success(result.message || 'Key 已恢复')
-    await loadKeys()
-  } catch (err) {
-    showError(parseApiError(err, 'Key恢复失败'))
-  } finally {
-    recoveringHealthKeyId.value = null
-  }
-}
-
 async function handleDeleteKey(key: PoolKeyDetail) {
   const confirmed = await confirm({
     title: '删除账号',
@@ -2399,19 +2355,54 @@ function formatCooldownReason(reason: string): string {
 
 type PoolStatusVariant = 'default' | 'secondary' | 'destructive' | 'outline' | 'success' | 'warning' | 'dark'
 
+function isHealthDerivedSchedulingReason(reason: string | null | undefined): boolean {
+  const normalized = String(reason || '').trim().toLowerCase()
+  return normalized === 'health_low'
+    || normalized === 'health_degraded'
+    || normalized === 'health'
+    || normalized === 'circuit_open'
+    || normalized === 'circuit_breaker'
+}
+
+function isHealthDerivedSchedulingLabel(label: string | null | undefined): boolean {
+  const normalized = String(label || '').trim()
+  return normalized === '健康低'
+    || normalized === '健康度较低'
+    || normalized === '降级'
+    || normalized === '熔断'
+    || normalized === '熔断中'
+}
+
+function getVisibleSchedulingReason(key: PoolKeyDetail): string | null {
+  const reason = String(key.scheduling_reason || '').trim()
+  if (!reason || isHealthDerivedSchedulingReason(reason)) return null
+  return reason
+}
+
+function getVisibleSchedulingReasons(key: PoolKeyDetail) {
+  return (key.scheduling_reasons ?? []).filter((item) => {
+    const source = String(item.source || '').trim().toLowerCase()
+    return source !== 'health'
+      && !isHealthDerivedSchedulingReason(item.code)
+      && !isHealthDerivedSchedulingLabel(item.label)
+  })
+}
+
 function getSchedulingStatus(key: PoolKeyDetail): 'available' | 'degraded' | 'blocked' {
   if (getAccountAlertLabel(key)) return 'blocked'
 
   const status = key.scheduling_status
-  if (status === 'available' || status === 'degraded' || status === 'blocked') {
+  if (
+    (status === 'available' || status === 'degraded' || status === 'blocked')
+    && !isHealthDerivedSchedulingReason(key.scheduling_reason)
+    && !isHealthDerivedSchedulingLabel(key.scheduling_label)
+  ) {
     return status
   }
 
   if (!key.is_active) return 'blocked'
-  if (key.cooldown_reason) return 'blocked'
-  if (key.circuit_breaker_open) return 'blocked'
+  if (key.cooldown_reason) return 'degraded'
   if (key.cost_limit != null && key.cost_limit > 0 && key.cost_window_usage >= key.cost_limit) return 'blocked'
-  if ((key.health_score ?? 1) < 0.8) return 'degraded'
   return 'available'
 }
 
@@ -2420,29 +2411,31 @@ function getSchedulingBadgeLabel(key: PoolKeyDetail): string {
   if (accountAlert) return accountAlert
 
   const rawLabel = String(key.scheduling_label || '').trim()
-  if (rawLabel) {
+  if (
+    rawLabel
+    && !isHealthDerivedSchedulingReason(key.scheduling_reason)
+    && !isHealthDerivedSchedulingLabel(rawLabel)
+  ) {
     if (rawLabel === '禁用' || rawLabel === '停用') return '禁用'
     return rawLabel
   }
 
   if (!key.is_active) return '禁用'
-  if (key.cooldown_reason) return '冷却'
-  if (key.circuit_breaker_open) return '熔断'
+  if (key.cooldown_reason) return '冷却中'
   if (key.cost_limit != null && key.cost_limit > 0 && key.cost_window_usage >= key.cost_limit) return '超限'
-  if ((key.health_score ?? 1) < 0.5) return '健康低'
-  if ((key.health_score ?? 1) < 0.8) return '降级'
   return '可用'
 }
 
 function getSchedulingBadgeVariant(key: PoolKeyDetail): PoolStatusVariant {
   if (getAccountAlertLabel(key)) return 'destructive'
 
-  const reason = key.scheduling_reason
-  if (reason === 'manual_disabled') return 'secondary'
-  if (reason === 'cooldown' || reason === 'circuit_open' || reason === 'cost_exhausted') return 'destructive'
+  const reason = getVisibleSchedulingReason(key)
+  if (reason === 'manual_disabled' || reason === 'inactive') return 'secondary'
+  if (reason === 'account_blocked' || reason === 'account_quota_exhausted' || reason === 'cost_exhausted') return 'destructive'
+  if (reason === 'cooldown') return 'warning'
   if (reason === 'cost_soft' || reason === 'cost') return 'warning'
-  if (reason === 'health_low' || reason === 'health_degraded' || reason === 'health') return 'warning'
   if (reason === 'available') return 'default'
+  if (!reason && !key.is_active) return 'secondary'
 
   const status = getSchedulingStatus(key)
   if (status === 'blocked') return 'destructive'
@@ -2454,7 +2447,7 @@ function getSchedulingTitle(key: PoolKeyDetail): string {
   const accountAlertTitle = getAccountAlertTitle(key)
   if (accountAlertTitle) return accountAlertTitle
 
-  const reasons = key.scheduling_reasons ?? []
+  const reasons = getVisibleSchedulingReasons(key)
   if (reasons.length > 0) {
     return reasons.map((item) => {
       const ttl = item.ttl_seconds && item.ttl_seconds > 0 ? ` (${formatTTL(item.ttl_seconds)})` : ''
@@ -2518,7 +2511,6 @@ function getMobileActionIds(key: PoolKeyDetail): PoolMobileActionId[] {
     canDownloadOrCopy: true,
     canRefreshToken: canRefreshOAuthCredential(key),
     canClearCooldown: Boolean(key.cooldown_reason),
-    canRecoverHealth: key.circuit_breaker_open || (key.health_score ?? 1) < 0.5,
     hasProxy: true,
   }).primary
 }
@@ -2669,7 +2661,7 @@ function getQuotaProgressCountdown(item: QuotaProgressItem) {
 function getQuotaProgressCountdownText(item: QuotaProgressItem): string {
   const status = getQuotaProgressCountdown(item)
   if (!status) return ''
-  return status.isExpired ? status.text : `${status.text} 后重置`
+  return status.isExpired ? '' : `${status.text} 后重置`
 }
 
 function formatCompactQuotaCountdownText(text: string): string {
@@ -2681,10 +2673,15 @@ function formatCompactQuotaCountdownText(text: string): string {
   return normalized.replace(/\s+后重置$/, '')
 }
 
+function shouldHideQuotaProgressDetailText(text: string | null | undefined): boolean {
+  return (text ?? '').trim().includes('已重置')
+}
+
 function getQuotaProgressDisplayText(item: QuotaProgressItem): string {
   const countdownText = getQuotaProgressCountdownText(item)
   if (countdownText) return formatCompactQuotaCountdownText(countdownText)
-  return item.detail?.trim() || ''
+  const detail = item.detail?.trim() || ''
+  return shouldHideQuotaProgressDetailText(detail) ? '' : detail
 }
 
 function getQuotaFallbackText(key: PoolKeyDetail): string | null {

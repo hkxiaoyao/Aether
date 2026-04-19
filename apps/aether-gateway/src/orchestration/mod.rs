@@ -12,7 +12,8 @@ mod recovery;
 mod report_effects;
 
 pub(crate) use self::adaptive::{
-    project_local_adaptive_rate_limit, LocalAdaptiveRateLimitProjection,
+    project_local_adaptive_rate_limit, project_local_adaptive_success,
+    LocalAdaptiveRateLimitProjection, LocalAdaptiveSuccessProjection,
 };
 pub(crate) use self::attempt::{
     attempt_identity_from_report_context, build_local_attempt_identities,
@@ -24,9 +25,10 @@ pub(crate) use self::classifier::{
     LocalFailoverInput,
 };
 pub(crate) use self::effects::{
-    apply_local_execution_effect, LocalAdaptiveRateLimitEffect, LocalAttemptFailureEffect,
-    LocalExecutionEffect, LocalExecutionEffectContext, LocalHealthFailureEffect,
-    LocalHealthSuccessEffect, LocalOAuthInvalidationEffect, LocalPoolErrorEffect,
+    apply_local_execution_effect, LocalAdaptiveRateLimitEffect, LocalAdaptiveSuccessEffect,
+    LocalAttemptFailureEffect, LocalExecutionEffect, LocalExecutionEffectContext,
+    LocalHealthFailureEffect, LocalHealthSuccessEffect, LocalOAuthInvalidationEffect,
+    LocalPoolErrorEffect,
 };
 pub(crate) use self::health::{project_local_failure_health, project_local_success_health};
 pub(crate) use self::policy::{

@@ -161,6 +161,7 @@ SELECT
   adjustment_history,
   utilization_samples,
   EXTRACT(EPOCH FROM last_probe_increase_at)::bigint AS last_probe_increase_at_unix_secs,
+  last_rpm_peak,
   request_count,
   total_tokens,
   CAST(total_cost_usd AS DOUBLE PRECISION) AS total_cost_usd,
@@ -216,6 +217,7 @@ SELECT
   adjustment_history,
   utilization_samples,
   EXTRACT(EPOCH FROM last_probe_increase_at)::bigint AS last_probe_increase_at_unix_secs,
+  last_rpm_peak,
   request_count,
   total_tokens,
   CAST(total_cost_usd AS DOUBLE PRECISION) AS total_cost_usd,
@@ -271,6 +273,7 @@ SELECT
   NULL::jsonb AS adjustment_history,
   NULL::jsonb AS utilization_samples,
   NULL::bigint AS last_probe_increase_at_unix_secs,
+  NULL::integer AS last_rpm_peak,
   request_count,
   0::bigint AS total_tokens,
   0::double precision AS total_cost_usd,
@@ -607,6 +610,7 @@ SELECT
   adjustment_history,
   utilization_samples,
   EXTRACT(EPOCH FROM last_probe_increase_at)::bigint AS last_probe_increase_at_unix_secs,
+  last_rpm_peak,
   request_count,
   total_tokens,
   CAST(total_cost_usd AS DOUBLE PRECISION) AS total_cost_usd,
@@ -1208,6 +1212,7 @@ INSERT INTO provider_api_keys (
   adjustment_history,
   utilization_samples,
   last_probe_increase_at,
+  last_rpm_peak,
   request_count,
   total_tokens,
   total_cost_usd,
@@ -1270,31 +1275,32 @@ INSERT INTO provider_api_keys (
     WHEN $35::double precision IS NULL THEN NULL
     ELSE TO_TIMESTAMP($35::double precision)
   END,
-  COALESCE($36, 0),
+  $36,
   COALESCE($37, 0),
   COALESCE($38, 0),
   COALESCE($39, 0),
   COALESCE($40, 0),
   COALESCE($41, 0),
-  CASE
-    WHEN $42::double precision IS NULL THEN NULL
-    ELSE TO_TIMESTAMP($42::double precision)
-  END,
+  COALESCE($42, 0),
   CASE
     WHEN $43::double precision IS NULL THEN NULL
     ELSE TO_TIMESTAMP($43::double precision)
   END,
-  $44,
+  CASE
+    WHEN $44::double precision IS NULL THEN NULL
+    ELSE TO_TIMESTAMP($44::double precision)
+  END,
   $45,
   $46,
   $47,
-  CASE
-    WHEN $48::double precision IS NULL THEN NOW()
-    ELSE TO_TIMESTAMP($48::double precision)
-  END,
+  $48,
   CASE
     WHEN $49::double precision IS NULL THEN NOW()
     ELSE TO_TIMESTAMP($49::double precision)
+  END,
+  CASE
+    WHEN $50::double precision IS NULL THEN NOW()
+    ELSE TO_TIMESTAMP($50::double precision)
   END
 )
 "#,
@@ -1337,6 +1343,7 @@ INSERT INTO provider_api_keys (
             key.last_probe_increase_at_unix_secs
                 .map(|value| value as f64),
         )
+        .bind(key.last_rpm_peak.map(|value| value as i32))
         .bind(key.request_count.map(|value| value as i32))
         .bind(Some(i64::try_from(key.total_tokens).map_err(|_| {
             DataLayerError::InvalidInput(format!(
@@ -1731,10 +1738,24 @@ SET
   END,
   oauth_invalid_reason = $26,
   status_snapshot = $27,
-  is_active = $28,
+  concurrent_429_count = $28,
+  rpm_429_count = $29,
+  last_429_at = CASE
+    WHEN $30::double precision IS NULL THEN NULL
+    ELSE TO_TIMESTAMP($30::double precision)
+  END,
+  last_429_type = $31,
+  adjustment_history = $32,
+  utilization_samples = $33,
+  last_probe_increase_at = CASE
+    WHEN $34::double precision IS NULL THEN NULL
+    ELSE TO_TIMESTAMP($34::double precision)
+  END,
+  last_rpm_peak = $35,
+  is_active = $36,
   updated_at = CASE
-    WHEN $29::double precision IS NULL THEN NOW()
-    ELSE TO_TIMESTAMP($29::double precision)
+    WHEN $37::double precision IS NULL THEN NOW()
+    ELSE TO_TIMESTAMP($37::double precision)
   END
 WHERE id = $1
 "#,
@@ -1766,6 +1787,17 @@ WHERE id = $1
         .bind(key.oauth_invalid_at_unix_secs.map(|value| value as f64))
         .bind(&key.oauth_invalid_reason)
         .bind(&key.status_snapshot)
+        .bind(key.concurrent_429_count.map(|value| value as i32))
+        .bind(key.rpm_429_count.map(|value| value as i32))
+        .bind(key.last_429_at_unix_secs.map(|value| value as f64))
+        .bind(&key.last_429_type)
+        .bind(&key.adjustment_history)
+        .bind(&key.utilization_samples)
+        .bind(
+            key.last_probe_increase_at_unix_secs
+                .map(|value| value as f64),
+        )
+        .bind(key.last_rpm_peak.map(|value| value as i32))
         .bind(key.is_active)
         .bind(key.updated_at_unix_secs.map(|value| value as f64))
         .execute(&self.pool)
@@ -2330,6 +2362,15 @@ fn map_key_row(row: &PgRow) -> Result<StoredProviderCatalogKey, DataLayerError> 
                 })
             })
             .transpose()?;
+    let last_rpm_peak = row_get::<Option<i32>>(row, "last_rpm_peak")?
+        .map(|value| {
+            u32::try_from(value).map_err(|_| {
+                DataLayerError::UnexpectedValue(format!(
+                    "invalid provider_api_keys.last_rpm_peak: {value}"
+                ))
+            })
+        })
+        .transpose()?;
     let last_models_fetch_at_unix_secs =
         row_get::<Option<i64>>(row, "last_models_fetch_at_unix_secs")?
             .map(|value| {
@@ -2425,6 +2466,7 @@ fn map_key_row(row: &PgRow) -> Result<StoredProviderCatalogKey, DataLayerError> 
         key.last_429_type = row.try_get("last_429_type").ok();
         key.utilization_samples = row.try_get("utilization_samples").ok();
         key.last_probe_increase_at_unix_secs = last_probe_increase_at_unix_secs;
+        key.last_rpm_peak = last_rpm_peak;
         key.last_used_at_unix_secs = last_used_at_unix_secs;
         key.auto_fetch_models = row.try_get("auto_fetch_models").unwrap_or(false);
         key.last_models_fetch_at_unix_secs = last_models_fetch_at_unix_secs;

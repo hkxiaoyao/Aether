@@ -672,8 +672,6 @@ fn admin_pool_scheduling_payload(
     key: &StoredProviderCatalogKey,
     cooldown_reason: Option<&str>,
     cooldown_ttl_seconds: Option<u64>,
-    health_score: f64,
-    circuit_breaker_open: bool,
     account_blocked: bool,
     account_status_code: Option<&str>,
     account_status_label: Option<&str>,
@@ -738,36 +736,6 @@ fn admin_pool_scheduling_payload(
                 "source": "pool",
                 "ttl_seconds": cooldown_ttl_seconds,
                 "detail": reason,
-            })],
-        );
-    }
-    if circuit_breaker_open {
-        return (
-            "degraded".to_string(),
-            "circuit_breaker".to_string(),
-            "熔断中".to_string(),
-            vec![json!({
-                "code": "circuit_breaker",
-                "label": "熔断中",
-                "blocking": true,
-                "source": "health",
-                "ttl_seconds": serde_json::Value::Null,
-                "detail": serde_json::Value::Null,
-            })],
-        );
-    }
-    if health_score < 0.5 {
-        return (
-            "degraded".to_string(),
-            "health_low".to_string(),
-            "健康度较低".to_string(),
-            vec![json!({
-                "code": "health_low",
-                "label": "健康度较低",
-                "blocking": false,
-                "source": "health",
-                "ttl_seconds": serde_json::Value::Null,
-                "detail": serde_json::Value::Null,
             })],
         );
     }
@@ -857,8 +825,6 @@ pub(super) fn build_admin_pool_key_payload(
             key,
             cooldown_reason.as_deref(),
             cooldown_ttl_seconds,
-            health_score,
-            circuit_breaker_open,
             account_status_blocked,
             account_status_code.as_deref(),
             account_status_label.as_deref(),
