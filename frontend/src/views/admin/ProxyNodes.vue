@@ -191,13 +191,6 @@
                   >
                     {{ nodeSchedulingBadge(node)!.label }}
                   </Badge>
-                  <Badge
-                    v-if="nodeRolloutBadge(node)"
-                    :variant="nodeRolloutBadge(node)!.variant"
-                    class="text-[10px] px-1.5 py-0"
-                  >
-                    {{ nodeRolloutBadge(node)!.label }}
-                  </Badge>
                   <HardwareTooltip :node="node" />
                 </div>
               </TableCell>
@@ -347,17 +340,6 @@
                 class="text-[11px] text-muted-foreground mt-1"
               >
                 版本: {{ nodeProxyVersion(node) }}
-              </div>
-              <div
-                v-if="nodeRolloutBadge(node)"
-                class="mt-1"
-              >
-                <Badge
-                  :variant="nodeRolloutBadge(node)!.variant"
-                  class="text-[10px] px-1.5 py-0"
-                >
-                  {{ nodeRolloutBadge(node)!.label }}
-                </Badge>
               </div>
             </div>
             <Badge
@@ -1243,24 +1225,6 @@ function nodeProxyVersion(node: ProxyNode) {
 }
 
 type BadgeVariant = 'default' | 'secondary' | 'destructive' | 'outline' | 'success' | 'warning' | 'dark'
-
-function normalizeVersion(value: string | null | undefined) {
-  const trimmed = (value || '').trim().toLowerCase()
-  return trimmed.startsWith('proxy-v') ? trimmed.slice('proxy-v'.length) : trimmed
-}
-
-function nodeRolloutBadge(node: ProxyNode): { label: string; variant: BadgeVariant } | null {
-  if (node.is_manual || !node.tunnel_mode) return null
-  const rawTarget = node.remote_config?.upgrade_to?.trim()
-  if (!rawTarget) return null
-
-  const targetVersion = normalizeVersion(rawTarget)
-  const currentVersion = normalizeVersion(nodeProxyVersion(node))
-  if (targetVersion && currentVersion && targetVersion === currentVersion) {
-    return { label: `目标版本 ${rawTarget}`, variant: 'success' }
-  }
-  return { label: `待升级 ${rawTarget}`, variant: 'warning' }
-}
 
 function nodeSchedulingBadge(node: ProxyNode): { label: string; variant: BadgeVariant } | null {
   switch (node.remote_config?.scheduling_state) {
