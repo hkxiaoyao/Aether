@@ -2541,12 +2541,14 @@ intervals AS (
     model,
     CAST(EXTRACT(EPOCH FROM created_at) AS BIGINT) AS created_at_unix_secs,
     usage_id,
-    EXTRACT(EPOCH FROM (
-      created_at - LAG(created_at) OVER (
-        PARTITION BY group_id
-        ORDER BY created_at ASC, usage_id ASC
-      )
-    )) / 60.0 AS interval_minutes
+    CAST((
+      EXTRACT(EPOCH FROM (
+        created_at - LAG(created_at) OVER (
+          PARTITION BY group_id
+          ORDER BY created_at ASC, usage_id ASC
+        )
+      )) / 60.0
+    ) AS DOUBLE PRECISION) AS interval_minutes
   FROM filtered_usage
 )
 SELECT
@@ -6191,6 +6193,11 @@ mod tests {
     #[test]
     fn usage_sql_cache_affinity_interval_query_coalesces_nullable_model_values() {
         assert!(include_str!("sql.rs").contains("COALESCE(\"usage\".model, '') AS model"));
+    }
+
+    #[test]
+    fn usage_sql_cache_affinity_interval_query_casts_interval_minutes_to_double_precision() {
+        assert!(include_str!("sql.rs").contains("AS DOUBLE PRECISION) AS interval_minutes"));
     }
 
     #[test]
