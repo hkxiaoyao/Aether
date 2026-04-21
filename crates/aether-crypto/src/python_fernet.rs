@@ -1,8 +1,9 @@
-use std::collections::HashMap;
-use std::sync::{LazyLock, Mutex};
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, LazyLock, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use aes::cipher::{block_padding::Pkcs7, BlockDecryptMut, BlockEncryptMut, KeyIvInit};
+use base64::decoded_len_estimate;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE, URL_SAFE_NO_PAD};
 use base64::Engine as _;
 use cbc::{Decryptor, Encryptor};
@@ -16,7 +17,8 @@ const HMAC_SIZE: usize = 32;
 const IV_SIZE: usize = 16;
 const SIGNING_KEY_SIZE: usize = 16;
 const ENCRYPTION_KEY_SIZE: usize = 16;
-const MIN_TOKEN_SIZE: usize = 1 + 8 + IV_SIZE + HMAC_SIZE;
+const MIN_CIPHERTEXT_SIZE: usize = 16;
+const MIN_TOKEN_SIZE: usize = 1 + 8 + IV_SIZE + MIN_CIPHERTEXT_SIZE + HMAC_SIZE;
 const PBKDF2_ITERATIONS: u32 = 100_000;
 const MAX_CACHED_DERIVED_KEYS: usize = 16;
 
@@ -24,12 +26,62 @@ pub const APP_SALT_SEED: &[u8] = b"aether-v1";
 pub const APP_SALT_HEX: &str = "8797080a7a4b45b4810e934d1af36261";
 pub const DEVELOPMENT_ENCRYPTION_KEY: &str = "dev-encryption-key-do-not-use-in-production";
 
-static RAW_FERNET_KEY_CACHE: LazyLock<Mutex<HashMap<Box<str>, [u8; 32]>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+static RAW_FERNET_KEY_CACHE: LazyLock<RwLock<RawFernetKeyCache>> =
+    LazyLock::new(|| RwLock::new(RawFernetKeyCache::default()));
+static APP_SALT: LazyLock<[u8; 16]> = LazyLock::new(|| {
+    let mut salt = [0u8; 16];
+    salt.copy_from_slice(&Sha256::digest(APP_SALT_SEED)[..16]);
+    salt
+});
 
 type Aes128CbcDec = Decryptor<aes::Aes128>;
 type Aes128CbcEnc = Encryptor<aes::Aes128>;
 type HmacSha256 = Hmac<Sha256>;
+
+fn base64_encoded_len(input_len: usize) -> usize {
+    input_len.div_ceil(3) * 4
+}
+
+fn base64_unpadded_len(input_len: usize) -> usize {
+    let full_chunks = (input_len / 3) * 4;
+    match input_len % 3 {
+        0 => full_chunks,
+        1 => full_chunks + 2,
+        _ => full_chunks + 3,
+    }
+}
+
+fn minimum_wrapped_token_len() -> usize {
+    base64_unpadded_len(base64_unpadded_len(MIN_TOKEN_SIZE))
+}
+
+#[derive(Debug, Default)]
+struct RawFernetKeyCache {
+    entries: HashMap<Arc<str>, [u8; 32]>,
+    insertion_order: VecDeque<Arc<str>>,
+}
+
+impl RawFernetKeyCache {
+    fn get(&self, secret: &str) -> Option<[u8; 32]> {
+        self.entries.get(secret).copied()
+    }
+
+    fn insert(&mut self, secret: &str, raw_key: [u8; 32]) {
+        if self.entries.contains_key(secret) {
+            return;
+        }
+
+        if self.entries.len() >= MAX_CACHED_DERIVED_KEYS {
+            if let Some(oldest) = self.insertion_order.pop_front() {
+                self.entries.remove(oldest.as_ref());
+            }
+        }
+
+        let secret: Arc<str> = Arc::from(secret);
+        self.insertion_order.push_back(secret.clone());
+        self.entries.insert(secret, raw_key);
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum PythonFernetError {
@@ -68,9 +120,9 @@ impl PythonFernetCompat {
 
         let outer =
             decode_urlsafe(ciphertext).map_err(|_| PythonFernetError::InvalidOuterBase64)?;
-        let inner =
+        let token =
             decode_urlsafe_bytes(&outer).map_err(|_| PythonFernetError::InvalidInnerBase64)?;
-        let plaintext = self.decrypt_token_bytes(&inner)?;
+        let plaintext = self.decrypt_token_bytes(token)?;
         String::from_utf8(plaintext).map_err(PythonFernetError::InvalidUtf8)
     }
 
@@ -93,7 +145,7 @@ impl PythonFernetCompat {
         }
     }
 
-    fn decrypt_token_bytes(&self, token: &[u8]) -> Result<Vec<u8>, PythonFernetError> {
+    fn decrypt_token_bytes(&self, mut token: Vec<u8>) -> Result<Vec<u8>, PythonFernetError> {
         if token.len() < MIN_TOKEN_SIZE {
             return Err(PythonFernetError::InvalidTokenStructure);
         }
@@ -102,22 +154,30 @@ impl PythonFernetCompat {
         }
 
         let signed_len = token.len() - HMAC_SIZE;
-        let (signed, signature) = token.split_at(signed_len);
-
-        let mut mac = HmacSha256::new_from_slice(&self.signing_key)
-            .map_err(|_| PythonFernetError::InvalidTokenSignature)?;
-        mac.update(signed);
-        mac.verify_slice(signature)
-            .map_err(|_| PythonFernetError::InvalidTokenSignature)?;
+        {
+            let (signed, signature) = token.split_at(signed_len);
+            let mut mac = HmacSha256::new_from_slice(&self.signing_key)
+                .map_err(|_| PythonFernetError::InvalidTokenSignature)?;
+            mac.update(signed);
+            mac.verify_slice(signature)
+                .map_err(|_| PythonFernetError::InvalidTokenSignature)?;
+        }
 
         let iv_offset = 1 + 8;
         let ciphertext_offset = iv_offset + IV_SIZE;
-        let iv = &token[iv_offset..ciphertext_offset];
-        let mut ciphertext = token[ciphertext_offset..signed_len].to_vec();
-        let plaintext = Aes128CbcDec::new((&self.encryption_key).into(), iv.into())
-            .decrypt_padded_mut::<Pkcs7>(&mut ciphertext)
-            .map_err(|_| PythonFernetError::InvalidPadding)?;
-        Ok(plaintext.to_vec())
+        let plaintext_len = {
+            let (_, payload) = token.split_at_mut(iv_offset);
+            let (iv, ciphertext_and_signature) = payload.split_at_mut(IV_SIZE);
+            let ciphertext = &mut ciphertext_and_signature[..signed_len - ciphertext_offset];
+            Aes128CbcDec::new((&self.encryption_key).into(), (&iv[..]).into())
+                .decrypt_padded_mut::<Pkcs7>(ciphertext)
+                .map_err(|_| PythonFernetError::InvalidPadding)?
+                .len()
+        };
+
+        token.copy_within(ciphertext_offset..ciphertext_offset + plaintext_len, 0);
+        token.truncate(plaintext_len);
+        Ok(token)
     }
 
     fn encrypt_token(
@@ -131,14 +191,13 @@ impl PythonFernetCompat {
         padded[..plaintext.len()].copy_from_slice(plaintext);
         let ciphertext = Aes128CbcEnc::new((&self.encryption_key).into(), (&iv).into())
             .encrypt_padded_mut::<Pkcs7>(&mut padded, plaintext.len())
-            .map_err(|_| PythonFernetError::InvalidPadding)?
-            .to_vec();
+            .map_err(|_| PythonFernetError::InvalidPadding)?;
 
         let mut signed = Vec::with_capacity(1 + 8 + IV_SIZE + ciphertext.len() + HMAC_SIZE);
         signed.push(FERNET_VERSION);
         signed.extend_from_slice(&timestamp.to_be_bytes());
         signed.extend_from_slice(&iv);
-        signed.extend_from_slice(&ciphertext);
+        signed.extend_from_slice(ciphertext);
 
         let mut mac = HmacSha256::new_from_slice(&self.signing_key)
             .map_err(|_| PythonFernetError::InvalidTokenSignature)?;
@@ -146,8 +205,12 @@ impl PythonFernetCompat {
         let signature = mac.finalize().into_bytes();
         signed.extend_from_slice(&signature);
 
-        let inner = URL_SAFE.encode(signed);
-        Ok(URL_SAFE.encode(inner.as_bytes()))
+        let mut inner = String::with_capacity(base64_encoded_len(signed.len()));
+        URL_SAFE.encode_string(&signed, &mut inner);
+
+        let mut outer = String::with_capacity(base64_encoded_len(inner.len()));
+        URL_SAFE.encode_string(inner.as_bytes(), &mut outer);
+        Ok(outer)
     }
 }
 
@@ -164,7 +227,7 @@ pub fn decrypt_python_fernet_ciphertext(
 
 pub fn looks_like_python_fernet_ciphertext(ciphertext: &str) -> bool {
     let ciphertext = ciphertext.trim();
-    if ciphertext.is_empty() {
+    if ciphertext.is_empty() || ciphertext.len() < minimum_wrapped_token_len() {
         return false;
     }
 
@@ -190,32 +253,36 @@ pub fn warm_python_fernet_secret(secret: &str) {
 }
 
 fn raw_fernet_key(secret: &str) -> [u8; 32] {
-    if let Ok(raw_key) = decode_direct_fernet_key(secret) {
-        return raw_key;
-    }
-
     if let Some(raw_key) = RAW_FERNET_KEY_CACHE
-        .lock()
+        .read()
         .expect("raw fernet key cache should lock")
         .get(secret)
-        .copied()
     {
         return raw_key;
     }
 
-    let mut salt = [0u8; 16];
-    salt.copy_from_slice(&Sha256::digest(APP_SALT_SEED)[..16]);
-
-    let mut raw_key = [0u8; 32];
-    pbkdf2_hmac::<Sha256>(secret.as_bytes(), &salt, PBKDF2_ITERATIONS, &mut raw_key);
-
     let mut cache = RAW_FERNET_KEY_CACHE
-        .lock()
+        .write()
         .expect("raw fernet key cache should lock");
-    if cache.len() >= MAX_CACHED_DERIVED_KEYS && !cache.contains_key(secret) {
-        cache.clear();
+    if let Some(raw_key) = cache.get(secret) {
+        return raw_key;
     }
-    cache.insert(secret.into(), raw_key);
+
+    let raw_key = match decode_direct_fernet_key(secret) {
+        Ok(raw_key) => raw_key,
+        Err(_) => {
+            let mut raw_key = [0u8; 32];
+            pbkdf2_hmac::<Sha256>(
+                secret.as_bytes(),
+                &*APP_SALT,
+                PBKDF2_ITERATIONS,
+                &mut raw_key,
+            );
+            raw_key
+        }
+    };
+
+    cache.insert(secret, raw_key);
     raw_key
 }
 
@@ -232,15 +299,23 @@ fn decode_direct_fernet_key(secret: &str) -> Result<[u8; 32], PythonFernetError>
 }
 
 fn decode_urlsafe(value: &str) -> Result<Vec<u8>, base64::DecodeError> {
-    URL_SAFE
-        .decode(value)
-        .or_else(|_| URL_SAFE_NO_PAD.decode(value))
+    decode_with_engine_fallback(value.as_bytes())
 }
 
 fn decode_urlsafe_bytes(value: &[u8]) -> Result<Vec<u8>, base64::DecodeError> {
-    URL_SAFE
-        .decode(value)
-        .or_else(|_| URL_SAFE_NO_PAD.decode(value))
+    decode_with_engine_fallback(value)
+}
+
+fn decode_with_engine_fallback(value: &[u8]) -> Result<Vec<u8>, base64::DecodeError> {
+    let mut decoded = Vec::with_capacity(decoded_len_estimate(value.len()));
+    match URL_SAFE.decode_vec(value, &mut decoded) {
+        Ok(()) => Ok(decoded),
+        Err(_) => {
+            decoded.clear();
+            URL_SAFE_NO_PAD.decode_vec(value, &mut decoded)?;
+            Ok(decoded)
+        }
+    }
 }
 
 #[cfg(test)]

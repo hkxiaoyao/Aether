@@ -21,6 +21,19 @@ use crate::clock::current_unix_ms;
 use crate::log_ids::short_request_id;
 use crate::GatewayError;
 
+#[derive(Debug, Clone)]
+pub(crate) struct LocalRequestCandidateStatusSnapshot {
+    candidate_id: String,
+    request_id: String,
+    user_id: Option<String>,
+    api_key_id: Option<String>,
+    candidate_index: u32,
+    retry_index: u32,
+    provider_id: String,
+    endpoint_id: String,
+    key_id: String,
+}
+
 #[async_trait]
 pub(crate) trait RequestCandidateRuntimeReader {
     async fn read_request_candidates_by_request_id(
@@ -149,23 +162,37 @@ fn request_candidate_status_label(status: RequestCandidateStatus) -> &'static st
     }
 }
 
-pub(crate) async fn record_local_request_candidate_status(
-    state: &(impl RequestCandidateRuntimeWriter + ?Sized),
+pub(crate) fn snapshot_local_request_candidate_status(
     plan: &ExecutionPlan,
     report_context: Option<&Value>,
-    status_update: SchedulerRequestCandidateStatusUpdate,
+) -> Option<LocalRequestCandidateStatusSnapshot> {
+    let candidate_id = plan
+        .candidate_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let metadata = parse_request_candidate_report_context(report_context)?;
+    let candidate_index = metadata.candidate_index?;
+
+    Some(LocalRequestCandidateStatusSnapshot {
+        candidate_id: candidate_id.to_string(),
+        request_id: plan.request_id.clone(),
+        user_id: metadata.user_id,
+        api_key_id: metadata.api_key_id,
+        candidate_index,
+        retry_index: metadata.retry_index,
+        provider_id: plan.provider_id.clone(),
+        endpoint_id: plan.endpoint_id.clone(),
+        key_id: plan.key_id.clone(),
+    })
+}
+
+async fn persist_local_request_candidate_status_record(
+    state: &(impl RequestCandidateRuntimeWriter + ?Sized),
+    record: UpsertRequestCandidateRecord,
 ) {
-    let Some(record) =
-        build_local_request_candidate_status_record(LocalRequestCandidateStatusRecordInput {
-            plan,
-            report_context,
-            status_update,
-        })
-    else {
-        return;
-    };
     let candidate_id = record.id.clone();
-    let request_id = short_request_id(plan.request_id.as_str());
+    let request_id = short_request_id(record.request_id.as_str());
     let candidate_index = record.candidate_index;
     let retry_index = record.retry_index;
     let status = record.status;
@@ -208,6 +235,67 @@ pub(crate) async fn record_local_request_candidate_status(
             );
         }
     }
+}
+
+pub(crate) async fn record_local_request_candidate_status(
+    state: &(impl RequestCandidateRuntimeWriter + ?Sized),
+    plan: &ExecutionPlan,
+    report_context: Option<&Value>,
+    status_update: SchedulerRequestCandidateStatusUpdate,
+) {
+    let Some(record) =
+        build_local_request_candidate_status_record(LocalRequestCandidateStatusRecordInput {
+            plan,
+            report_context,
+            status_update,
+        })
+    else {
+        return;
+    };
+    persist_local_request_candidate_status_record(state, record).await;
+}
+
+pub(crate) async fn record_local_request_candidate_status_snapshot(
+    state: &(impl RequestCandidateRuntimeWriter + ?Sized),
+    snapshot: &LocalRequestCandidateStatusSnapshot,
+    status_update: SchedulerRequestCandidateStatusUpdate,
+) {
+    let SchedulerRequestCandidateStatusUpdate {
+        status,
+        status_code,
+        error_type,
+        error_message,
+        latency_ms,
+        started_at_unix_ms,
+        finished_at_unix_ms,
+    } = status_update;
+    let record = UpsertRequestCandidateRecord {
+        id: snapshot.candidate_id.clone(),
+        request_id: snapshot.request_id.clone(),
+        user_id: snapshot.user_id.clone(),
+        api_key_id: snapshot.api_key_id.clone(),
+        username: None,
+        api_key_name: None,
+        candidate_index: snapshot.candidate_index,
+        retry_index: snapshot.retry_index,
+        provider_id: Some(snapshot.provider_id.clone()),
+        endpoint_id: Some(snapshot.endpoint_id.clone()),
+        key_id: Some(snapshot.key_id.clone()),
+        status,
+        skip_reason: None,
+        is_cached: None,
+        status_code,
+        error_type,
+        error_message,
+        latency_ms,
+        concurrent_requests: None,
+        extra_data: None,
+        required_capabilities: None,
+        created_at_unix_ms: None,
+        started_at_unix_ms,
+        finished_at_unix_ms,
+    };
+    persist_local_request_candidate_status_record(state, record).await;
 }
 
 pub(crate) async fn record_report_request_candidate_status(

@@ -12,15 +12,15 @@ enum RewriteMode {
     KiroToClaudeCli(KiroToClaudeCliStreamState),
 }
 
-pub(crate) struct LocalStreamRewriter {
-    report_context: Value,
+pub(crate) struct LocalStreamRewriter<'a> {
+    report_context: &'a Value,
     buffered: Vec<u8>,
     mode: RewriteMode,
 }
 
-pub(crate) fn maybe_build_local_stream_rewriter(
-    report_context: Option<&Value>,
-) -> Option<LocalStreamRewriter> {
+pub(crate) fn maybe_build_local_stream_rewriter<'a>(
+    report_context: Option<&'a Value>,
+) -> Option<LocalStreamRewriter<'a>> {
     let report_context = report_context?;
     let mode = match resolve_finalize_stream_rewrite_mode(report_context)? {
         FinalizeStreamRewriteMode::EnvelopeUnwrap => RewriteMode::EnvelopeUnwrap,
@@ -33,16 +33,16 @@ pub(crate) fn maybe_build_local_stream_rewriter(
     };
 
     Some(LocalStreamRewriter {
-        report_context: report_context.clone(),
+        report_context,
         buffered: Vec::new(),
         mode,
     })
 }
 
-impl LocalStreamRewriter {
+impl LocalStreamRewriter<'_> {
     pub(crate) fn push_chunk(&mut self, chunk: &[u8]) -> Result<Vec<u8>, GatewayError> {
         if let RewriteMode::KiroToClaudeCli(state) = &mut self.mode {
-            return state.push_chunk(&self.report_context, chunk);
+            return state.push_chunk(self.report_context, chunk);
         }
         self.buffered.extend_from_slice(chunk);
         let mut output = Vec::new();
@@ -55,11 +55,11 @@ impl LocalStreamRewriter {
 
     pub(crate) fn finish(&mut self) -> Result<Vec<u8>, GatewayError> {
         if let RewriteMode::KiroToClaudeCli(state) = &mut self.mode {
-            return state.finish(&self.report_context);
+            return state.finish(self.report_context);
         }
         if self.buffered.is_empty() {
             match &mut self.mode {
-                RewriteMode::Standard(state) => return state.finish(&self.report_context),
+                RewriteMode::Standard(state) => return state.finish(self.report_context),
                 RewriteMode::KiroToClaudeCli(_) => {}
                 RewriteMode::EnvelopeUnwrap => {}
             }
@@ -69,7 +69,7 @@ impl LocalStreamRewriter {
         let mut output = self.transform_line(line)?;
         match &mut self.mode {
             RewriteMode::Standard(state) => {
-                output.extend(state.finish(&self.report_context)?);
+                output.extend(state.finish(self.report_context)?);
             }
             RewriteMode::KiroToClaudeCli(_) => {}
             RewriteMode::EnvelopeUnwrap => {}
@@ -79,9 +79,9 @@ impl LocalStreamRewriter {
 
     fn transform_line(&mut self, line: Vec<u8>) -> Result<Vec<u8>, GatewayError> {
         match &mut self.mode {
-            RewriteMode::EnvelopeUnwrap => transform_envelope_line(&self.report_context, line)
+            RewriteMode::EnvelopeUnwrap => transform_envelope_line(self.report_context, line)
                 .map_err(|err| GatewayError::Internal(err.to_string())),
-            RewriteMode::Standard(state) => state.transform_line(&self.report_context, line),
+            RewriteMode::Standard(state) => state.transform_line(self.report_context, line),
             RewriteMode::KiroToClaudeCli(_) => Ok(Vec::new()),
         }
     }

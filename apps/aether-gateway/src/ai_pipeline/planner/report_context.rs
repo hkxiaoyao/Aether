@@ -24,7 +24,8 @@ pub(crate) struct LocalExecutionReportContextParts<'a> {
     pub(crate) provider_request_method: Option<Value>,
     pub(crate) provider_request_headers: Option<&'a BTreeMap<String, String>>,
     pub(crate) original_headers: &'a http::HeaderMap,
-    pub(crate) original_request_body: &'a Value,
+    pub(crate) original_request_body_json: Option<&'a Value>,
+    pub(crate) original_request_body_base64: Option<&'a str>,
     pub(crate) has_envelope: bool,
     pub(crate) needs_conversion: bool,
     pub(crate) extra_fields: Map<String, Value>,
@@ -110,8 +111,11 @@ pub(crate) fn build_local_execution_report_context(
     );
     object.insert(
         "original_request_body".to_string(),
-        crate::ai_pipeline::build_report_context_original_request_echo(parts.original_request_body)
-            .unwrap_or(Value::Null),
+        crate::ai_pipeline::build_report_context_original_request_echo(
+            parts.original_request_body_json,
+            parts.original_request_body_base64,
+        )
+        .unwrap_or(Value::Null),
     );
     object.insert("has_envelope".to_string(), Value::Bool(parts.has_envelope));
     object.insert(

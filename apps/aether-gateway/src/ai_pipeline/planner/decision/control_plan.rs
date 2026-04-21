@@ -81,9 +81,9 @@ fn build_sync_plan_payload_from_decision(
     parts: &http::request::Parts,
     body_json: &serde_json::Value,
     plan_kind: &str,
-    payload: GatewayControlSyncDecisionResponse,
+    mut payload: GatewayControlSyncDecisionResponse,
 ) -> Result<Option<GatewayControlPlanResponse>, GatewayError> {
-    let auth_context = payload.auth_context.clone();
+    let auth_context = payload.auth_context.take();
     let plan_and_report = match plan_kind {
         OPENAI_CHAT_SYNC_PLAN_KIND => {
             build_openai_chat_sync_plan_from_decision(parts, body_json, payload)?
@@ -121,9 +121,9 @@ fn build_stream_plan_payload_from_decision(
     parts: &http::request::Parts,
     body_json: &serde_json::Value,
     plan_kind: &str,
-    payload: GatewayControlSyncDecisionResponse,
+    mut payload: GatewayControlSyncDecisionResponse,
 ) -> Result<Option<GatewayControlPlanResponse>, GatewayError> {
-    let auth_context = payload.auth_context.clone();
+    let auth_context = payload.auth_context.take();
     let plan_and_report = match plan_kind {
         OPENAI_CHAT_STREAM_PLAN_KIND => {
             build_openai_chat_stream_plan_from_decision(parts, body_json, payload)?

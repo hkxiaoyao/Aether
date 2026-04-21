@@ -84,6 +84,27 @@ pub(crate) fn build_client_response_from_parts(
     trace_id: &str,
     control_decision: Option<&GatewayControlDecision>,
 ) -> Result<Response<Body>, GatewayError> {
+    build_client_response_from_parts_with_mutator(
+        status_code,
+        upstream_headers,
+        body,
+        trace_id,
+        control_decision,
+        |_| Ok(()),
+    )
+}
+
+pub(crate) fn build_client_response_from_parts_with_mutator<F>(
+    status_code: u16,
+    upstream_headers: &BTreeMap<String, String>,
+    body: Body,
+    trace_id: &str,
+    control_decision: Option<&GatewayControlDecision>,
+    mutate_headers: F,
+) -> Result<Response<Body>, GatewayError>
+where
+    F: FnOnce(&mut http::HeaderMap) -> Result<(), GatewayError>,
+{
     let mut response = Response::builder()
         .status(status_code)
         .body(body)
@@ -99,6 +120,7 @@ pub(crate) fn build_client_response_from_parts(
             HeaderValue::from_str(value).map_err(|err| GatewayError::Internal(err.to_string()))?;
         response.headers_mut().insert(header_name, header_value);
     }
+    mutate_headers(response.headers_mut())?;
     apply_streaming_response_headers(response.headers_mut());
     insert_header_if_missing(response.headers_mut(), TRACE_ID_HEADER, trace_id)?;
     insert_header_if_missing(response.headers_mut(), GATEWAY_HEADER, "rust-phase3b")?;

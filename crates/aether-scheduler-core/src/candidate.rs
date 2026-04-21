@@ -45,6 +45,20 @@ pub struct BuildMinimalCandidateSelectionInput<'a> {
     pub priority_mode: SchedulerPriorityMode,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct RequiredCapabilityDescriptor<'a> {
+    name: &'a str,
+    compatible: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CandidateOrderingState {
+    capability_priority: (u32, u32),
+    affinity_hash: Option<u64>,
+    health_bucket: Option<crate::ProviderKeyHealthBucket>,
+    health_score: f64,
+}
+
 pub fn candidate_supports_required_capability(
     candidate: &SchedulerMinimalCandidateSelectionCandidate,
     required_capability: &str,
@@ -91,23 +105,17 @@ pub fn requested_capability_priority_for_candidate(
         return (0, 0);
     };
 
-    let mut exclusive_misses = 0u32;
-    let mut compatible_misses = 0u32;
-    for (capability, value) in required_capabilities {
-        if !requested_capability_is_enabled(value) {
-            continue;
-        }
-        if candidate_supports_required_capability(candidate, capability) {
-            continue;
-        }
-        if requested_capability_is_compatible(capability) {
-            compatible_misses += 1;
-        } else {
-            exclusive_misses += 1;
-        }
-    }
-
-    (exclusive_misses, compatible_misses)
+    requested_capability_priority_for_candidate_descriptors(
+        required_capabilities
+            .iter()
+            .filter_map(|(capability, value)| {
+                requested_capability_is_enabled(value).then_some(RequiredCapabilityDescriptor {
+                    name: capability.as_str(),
+                    compatible: requested_capability_is_compatible(capability),
+                })
+            }),
+        candidate,
+    )
 }
 
 pub fn auth_api_key_concurrency_limit_reached(
@@ -153,7 +161,8 @@ pub fn build_minimal_candidate_selection(
         return Ok(Vec::new());
     }
 
-    let mut candidates = Vec::new();
+    let required_capabilities = enabled_required_capabilities(required_capabilities);
+    let mut candidates = Vec::with_capacity(rows.len());
     for row in rows {
         if !crate::auth_constraints_allow_provider(
             auth_constraints,
@@ -196,16 +205,9 @@ pub fn build_minimal_candidate_selection(
         });
     }
 
-    candidates.sort_by(|left, right| {
-        requested_capability_priority_for_candidate(required_capabilities, left)
-            .cmp(&requested_capability_priority_for_candidate(
-                required_capabilities,
-                right,
-            ))
-            .then_with(|| {
-                compare_candidates_by_priority_mode(left, right, priority_mode, affinity_key)
-            })
-    });
+    let ordering_states =
+        build_candidate_ordering_states(&candidates, &required_capabilities, affinity_key, None);
+    sort_candidates_by_ordering_state(&mut candidates, &ordering_states, priority_mode, false);
 
     Ok(candidates)
 }
@@ -298,28 +300,27 @@ pub fn collect_selectable_candidates_from_keys(
     selectable_keys: &BTreeSet<(String, String, String)>,
     cached_affinity_target: Option<&crate::SchedulerAffinityTarget>,
 ) -> Vec<SchedulerMinimalCandidateSelectionCandidate> {
-    let mut selected = Vec::new();
+    let mut promoted = None;
+    let mut selected = Vec::with_capacity(candidates.len());
     let mut emitted_keys = BTreeSet::new();
-
-    if let Some(target) = cached_affinity_target {
-        if let Some(candidate) = candidates
-            .iter()
-            .find(|candidate| crate::matches_affinity_target(candidate, target))
-            .cloned()
-        {
-            let key = crate::candidate_key(&candidate);
-            if selectable_keys.contains(&key) && emitted_keys.insert(key) {
-                selected.push(candidate);
-            }
-        }
-    }
 
     for candidate in candidates {
         let key = crate::candidate_key(&candidate);
         if !selectable_keys.contains(&key) || !emitted_keys.insert(key) {
             continue;
         }
-        selected.push(candidate);
+        if promoted.is_none()
+            && cached_affinity_target
+                .is_some_and(|target| crate::matches_affinity_target(&candidate, target))
+        {
+            promoted = Some(candidate);
+        } else {
+            selected.push(candidate);
+        }
+    }
+
+    if let Some(candidate) = promoted {
+        selected.insert(0, candidate);
     }
 
     selected
@@ -332,35 +333,14 @@ pub fn reorder_candidates_by_scheduler_health(
     affinity_key: Option<&str>,
     priority_mode: SchedulerPriorityMode,
 ) {
-    candidates.sort_by(|left, right| {
-        requested_capability_priority_for_candidate(required_capabilities, left)
-            .cmp(&requested_capability_priority_for_candidate(
-                required_capabilities,
-                right,
-            ))
-            .then_with(|| match priority_mode {
-                SchedulerPriorityMode::Provider => left
-                    .provider_priority
-                    .cmp(&right.provider_priority)
-                    .then(left.key_internal_priority.cmp(&right.key_internal_priority))
-                    .then_with(|| {
-                        compare_provider_key_health_order(left, right, provider_key_rpm_states)
-                    })
-                    .then_with(|| crate::compare_affinity_order(left, right, affinity_key))
-                    .then_with(|| compare_candidate_identity(left, right)),
-                SchedulerPriorityMode::GlobalKey => left
-                    .key_global_priority_for_format
-                    .unwrap_or(i32::MAX)
-                    .cmp(&right.key_global_priority_for_format.unwrap_or(i32::MAX))
-                    .then_with(|| {
-                        compare_provider_key_health_order(left, right, provider_key_rpm_states)
-                    })
-                    .then_with(|| crate::compare_affinity_order(left, right, affinity_key))
-                    .then(left.provider_priority.cmp(&right.provider_priority))
-                    .then(left.key_internal_priority.cmp(&right.key_internal_priority))
-                    .then_with(|| compare_candidate_identity(left, right)),
-            })
-    });
+    let required_capabilities = enabled_required_capabilities(required_capabilities);
+    let ordering_states = build_candidate_ordering_states(
+        candidates,
+        &required_capabilities,
+        affinity_key,
+        Some(provider_key_rpm_states),
+    );
+    sort_candidates_by_ordering_state(candidates, &ordering_states, priority_mode, true);
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -456,33 +436,6 @@ pub fn candidate_runtime_skip_reason_with_state(
     None
 }
 
-fn compare_provider_key_health_order(
-    left: &SchedulerMinimalCandidateSelectionCandidate,
-    right: &SchedulerMinimalCandidateSelectionCandidate,
-    provider_key_rpm_states: &BTreeMap<String, StoredProviderCatalogKey>,
-) -> std::cmp::Ordering {
-    let left_bucket = candidate_provider_key_health_bucket(left, provider_key_rpm_states);
-    let right_bucket = candidate_provider_key_health_bucket(right, provider_key_rpm_states);
-    right_bucket.cmp(&left_bucket).then_with(|| {
-        let left_score = candidate_provider_key_health_score(left, provider_key_rpm_states);
-        let right_score = candidate_provider_key_health_score(right, provider_key_rpm_states);
-        right_score
-            .partial_cmp(&left_score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    })
-}
-
-fn candidate_provider_key_health_bucket(
-    candidate: &SchedulerMinimalCandidateSelectionCandidate,
-    provider_key_rpm_states: &BTreeMap<String, StoredProviderCatalogKey>,
-) -> Option<crate::ProviderKeyHealthBucket> {
-    provider_key_rpm_states
-        .get(&candidate.key_id)
-        .and_then(|key| {
-            crate::provider_key_health_bucket(key, candidate.endpoint_api_format.as_str())
-        })
-}
-
 fn compare_candidate_identity(
     left: &SchedulerMinimalCandidateSelectionCandidate,
     right: &SchedulerMinimalCandidateSelectionCandidate,
@@ -497,12 +450,190 @@ fn compare_candidate_identity(
         )
 }
 
+fn enabled_required_capabilities(
+    required_capabilities: Option<&serde_json::Value>,
+) -> Vec<RequiredCapabilityDescriptor<'_>> {
+    let Some(required_capabilities) = required_capabilities.and_then(serde_json::Value::as_object)
+    else {
+        return Vec::new();
+    };
+
+    required_capabilities
+        .iter()
+        .filter_map(|(capability, value)| {
+            requested_capability_is_enabled(value).then_some(RequiredCapabilityDescriptor {
+                name: capability.as_str(),
+                compatible: requested_capability_is_compatible(capability),
+            })
+        })
+        .collect()
+}
+
+fn requested_capability_priority_for_candidate_descriptors<'a, I>(
+    required_capabilities: I,
+    candidate: &SchedulerMinimalCandidateSelectionCandidate,
+) -> (u32, u32)
+where
+    I: IntoIterator<Item = RequiredCapabilityDescriptor<'a>>,
+{
+    let mut exclusive_misses = 0u32;
+    let mut compatible_misses = 0u32;
+    for capability in required_capabilities {
+        if candidate_supports_required_capability(candidate, capability.name) {
+            continue;
+        }
+        if capability.compatible {
+            compatible_misses += 1;
+        } else {
+            exclusive_misses += 1;
+        }
+    }
+
+    (exclusive_misses, compatible_misses)
+}
+
+fn build_candidate_ordering_states(
+    candidates: &[SchedulerMinimalCandidateSelectionCandidate],
+    required_capabilities: &[RequiredCapabilityDescriptor<'_>],
+    affinity_key: Option<&str>,
+    provider_key_rpm_states: Option<&BTreeMap<String, StoredProviderCatalogKey>>,
+) -> Vec<CandidateOrderingState> {
+    candidates
+        .iter()
+        .map(|candidate| CandidateOrderingState {
+            capability_priority: requested_capability_priority_for_candidate_descriptors(
+                required_capabilities.iter().copied(),
+                candidate,
+            ),
+            affinity_hash: affinity_key.map(|key| crate::candidate_affinity_hash(key, candidate)),
+            health_bucket: provider_key_rpm_states.and_then(|states| {
+                states.get(&candidate.key_id).and_then(|key| {
+                    crate::provider_key_health_bucket(key, candidate.endpoint_api_format.as_str())
+                })
+            }),
+            health_score: candidate_provider_key_health_score(candidate, provider_key_rpm_states),
+        })
+        .collect()
+}
+
+fn sort_candidates_by_ordering_state(
+    candidates: &mut [SchedulerMinimalCandidateSelectionCandidate],
+    ordering_states: &[CandidateOrderingState],
+    priority_mode: SchedulerPriorityMode,
+    include_health: bool,
+) {
+    if candidates.len() < 2 {
+        return;
+    }
+
+    let mut order = (0..candidates.len()).collect::<Vec<_>>();
+    order.sort_by(|left, right| {
+        compare_candidates_with_ordering_state(
+            &ordering_states[*left],
+            &candidates[*left],
+            &ordering_states[*right],
+            &candidates[*right],
+            priority_mode,
+            include_health,
+        )
+    });
+    apply_candidate_order(candidates, order);
+}
+
+fn compare_candidates_with_ordering_state(
+    left_state: &CandidateOrderingState,
+    left_candidate: &SchedulerMinimalCandidateSelectionCandidate,
+    right_state: &CandidateOrderingState,
+    right_candidate: &SchedulerMinimalCandidateSelectionCandidate,
+    priority_mode: SchedulerPriorityMode,
+    include_health: bool,
+) -> std::cmp::Ordering {
+    left_state
+        .capability_priority
+        .cmp(&right_state.capability_priority)
+        .then_with(|| {
+            compare_priority_before_health(left_candidate, right_candidate, priority_mode)
+        })
+        .then_with(|| {
+            if include_health {
+                compare_provider_key_health_state(left_state, right_state)
+            } else {
+                std::cmp::Ordering::Equal
+            }
+        })
+        .then_with(|| left_state.affinity_hash.cmp(&right_state.affinity_hash))
+        .then_with(|| {
+            compare_priority_after_affinity(left_candidate, right_candidate, priority_mode)
+        })
+        .then_with(|| compare_candidate_identity(left_candidate, right_candidate))
+}
+
+fn compare_priority_before_health(
+    left: &SchedulerMinimalCandidateSelectionCandidate,
+    right: &SchedulerMinimalCandidateSelectionCandidate,
+    priority_mode: SchedulerPriorityMode,
+) -> std::cmp::Ordering {
+    match priority_mode {
+        SchedulerPriorityMode::Provider => left
+            .provider_priority
+            .cmp(&right.provider_priority)
+            .then(left.key_internal_priority.cmp(&right.key_internal_priority)),
+        SchedulerPriorityMode::GlobalKey => left
+            .key_global_priority_for_format
+            .unwrap_or(i32::MAX)
+            .cmp(&right.key_global_priority_for_format.unwrap_or(i32::MAX)),
+    }
+}
+
+fn compare_priority_after_affinity(
+    left: &SchedulerMinimalCandidateSelectionCandidate,
+    right: &SchedulerMinimalCandidateSelectionCandidate,
+    priority_mode: SchedulerPriorityMode,
+) -> std::cmp::Ordering {
+    match priority_mode {
+        SchedulerPriorityMode::Provider => std::cmp::Ordering::Equal,
+        SchedulerPriorityMode::GlobalKey => left
+            .provider_priority
+            .cmp(&right.provider_priority)
+            .then(left.key_internal_priority.cmp(&right.key_internal_priority)),
+    }
+}
+
+fn compare_provider_key_health_state(
+    left: &CandidateOrderingState,
+    right: &CandidateOrderingState,
+) -> std::cmp::Ordering {
+    right
+        .health_bucket
+        .cmp(&left.health_bucket)
+        .then_with(|| right.health_score.total_cmp(&left.health_score))
+}
+
+fn apply_candidate_order(
+    candidates: &mut [SchedulerMinimalCandidateSelectionCandidate],
+    sorted_old_indices: Vec<usize>,
+) {
+    let mut target_positions = vec![0usize; sorted_old_indices.len()];
+    for (new_position, old_position) in sorted_old_indices.into_iter().enumerate() {
+        target_positions[old_position] = new_position;
+    }
+
+    for index in 0..candidates.len() {
+        let current = index;
+        while target_positions[current] != current {
+            let target = target_positions[current];
+            candidates.swap(current, target);
+            target_positions.swap(current, target);
+        }
+    }
+}
+
 fn candidate_provider_key_health_score(
     candidate: &SchedulerMinimalCandidateSelectionCandidate,
-    provider_key_rpm_states: &BTreeMap<String, StoredProviderCatalogKey>,
+    provider_key_rpm_states: Option<&BTreeMap<String, StoredProviderCatalogKey>>,
 ) -> f64 {
     provider_key_rpm_states
-        .get(&candidate.key_id)
+        .and_then(|states| states.get(&candidate.key_id))
         .and_then(|key| {
             crate::effective_provider_key_health_score(key, candidate.endpoint_api_format.as_str())
         })

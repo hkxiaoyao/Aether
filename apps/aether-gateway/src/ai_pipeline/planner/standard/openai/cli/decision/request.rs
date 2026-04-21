@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use serde_json::Value;
 use tracing::debug;
@@ -48,7 +49,7 @@ pub(crate) struct LocalOpenAiCliCandidatePayloadParts {
     pub(super) conversion_mode: ConversionMode,
     pub(super) is_antigravity: bool,
     pub(super) upstream_is_stream: bool,
-    pub(super) transport: GatewayProviderTransportSnapshot,
+    pub(super) transport: Arc<GatewayProviderTransportSnapshot>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -379,6 +380,6 @@ pub(crate) async fn resolve_local_openai_cli_candidate_payload_parts(
         is_antigravity: is_antigravity
             || antigravity_auth.is_some() && ANTIGRAVITY_ENVELOPE_NAME == "antigravity:v1internal",
         upstream_is_stream,
-        transport: transport.clone(),
+        transport: Arc::clone(transport),
     })
 }

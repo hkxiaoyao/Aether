@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use serde_json::json;
 
@@ -20,13 +21,12 @@ use super::support::{
 use super::LocalGeminiFilesSpec;
 
 pub(super) struct LocalGeminiFilesCandidatePayloadParts {
-    pub(super) transport: GatewayProviderTransportSnapshot,
+    pub(super) transport: Arc<GatewayProviderTransportSnapshot>,
     pub(super) auth_header: String,
     pub(super) auth_value: String,
     pub(super) provider_request_headers: BTreeMap<String, String>,
     pub(super) provider_request_body: Option<serde_json::Value>,
     pub(super) provider_request_body_base64: Option<String>,
-    pub(super) original_request_body: serde_json::Value,
     pub(super) upstream_url: String,
     pub(super) file_name: String,
 }
@@ -119,13 +119,6 @@ pub(super) async fn resolve_local_gemini_files_candidate_payload_parts(
         } else {
             None
         };
-    let original_request_body = if let Some(body_bytes_b64) = provider_request_body_base64.clone() {
-        json!({"body_bytes_b64": body_bytes_b64})
-    } else if !body_is_empty {
-        body_json.clone()
-    } else {
-        serde_json::Value::Null
-    };
     if provider_request_body_base64.is_some() && transport.endpoint.body_rules.is_some() {
         mark_skipped_local_gemini_files_candidate(
             state,
@@ -165,14 +158,22 @@ pub(super) async fn resolve_local_gemini_files_candidate_payload_parts(
         &auth_value,
         &BTreeMap::new(),
     );
+    let null_original_request_body = serde_json::Value::Null;
+    let base64_original_request_body = provider_request_body_base64
+        .as_ref()
+        .map(|body_bytes_b64| json!({ "body_bytes_b64": body_bytes_b64 }));
+    let original_request_body = base64_original_request_body
+        .as_ref()
+        .or_else(|| (!body_is_empty).then_some(body_json))
+        .unwrap_or(&null_original_request_body);
     if !apply_local_header_rules(
         &mut provider_request_headers,
         transport.endpoint.header_rules.as_ref(),
         &[&auth_header, "content-type"],
         provider_request_body
             .as_ref()
-            .unwrap_or(&original_request_body),
-        Some(&original_request_body),
+            .unwrap_or(original_request_body),
+        Some(original_request_body),
     ) {
         mark_skipped_local_gemini_files_candidate(
             state,
@@ -195,13 +196,12 @@ pub(super) async fn resolve_local_gemini_files_candidate_payload_parts(
         .to_string();
 
     Some(LocalGeminiFilesCandidatePayloadParts {
-        transport: transport.clone(),
+        transport: Arc::clone(transport),
         auth_header,
         auth_value,
         provider_request_headers,
         provider_request_body,
         provider_request_body_base64,
-        original_request_body,
         upstream_url,
         file_name,
     })

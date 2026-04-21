@@ -143,36 +143,69 @@ async fn maybe_build_local_video_task_follow_up_sync_decision_payload(
         return Ok(None);
     };
 
-    let auth_pair = extract_auth_header_pair(&follow_up.plan.headers);
-    let execution_strategy =
-        if follow_up.plan.provider_api_format == follow_up.plan.client_api_format {
-            ExecutionStrategy::LocalSameFormat
-        } else {
-            ExecutionStrategy::LocalCrossFormat
-        };
-    let conversion_mode = if follow_up.plan.provider_api_format == follow_up.plan.client_api_format
-    {
+    let aether_video_tasks_core::LocalVideoTaskFollowUpPlan {
+        plan,
+        report_kind,
+        report_context,
+    } = follow_up;
+    let aether_contracts::ExecutionPlan {
+        request_id: _request_id,
+        candidate_id,
+        provider_name,
+        provider_id,
+        endpoint_id,
+        key_id,
+        method,
+        url,
+        headers,
+        content_type,
+        content_encoding: _content_encoding,
+        body,
+        stream: _stream,
+        client_api_format,
+        provider_api_format,
+        model_name,
+        proxy,
+        tls_profile,
+        timeouts,
+    } = plan;
+    let auth_pair = extract_auth_header_pair(&headers);
+    let execution_strategy = if provider_api_format == client_api_format {
+        ExecutionStrategy::LocalSameFormat
+    } else {
+        ExecutionStrategy::LocalCrossFormat
+    };
+    let conversion_mode = if provider_api_format == client_api_format {
         ConversionMode::None
     } else {
         ConversionMode::Bidirectional
     };
-    let upstream_base_url = infer_upstream_base_url(&follow_up.plan.url);
+    let upstream_base_url = infer_upstream_base_url(&url);
+    let provider_contract = provider_api_format.clone();
+    let client_contract = client_api_format.clone();
+    let auth_header = auth_pair.map(|(name, _)| name.to_string());
+    let auth_value = auth_pair.map(|(_, value)| value.to_string());
+    let aether_contracts::RequestBody {
+        json_body,
+        body_bytes_b64,
+        body_ref: _body_ref,
+    } = body;
 
     debug!(
         event_name = "local_video_follow_up_sync_decision_payload_built",
         log_type = "debug",
         trace_id = %trace_id,
         request_id = %trace_id,
-        candidate_id = ?follow_up.plan.candidate_id,
-        provider_id = %follow_up.plan.provider_id,
-        endpoint_id = %follow_up.plan.endpoint_id,
-        key_id = %follow_up.plan.key_id,
+        candidate_id = ?candidate_id,
+        provider_id = %provider_id,
+        endpoint_id = %endpoint_id,
+        key_id = %key_id,
         plan_kind,
         downstream_path = %parts.uri.path(),
-        provider_api_format = %follow_up.plan.provider_api_format,
-        client_api_format = %follow_up.plan.client_api_format,
+        provider_api_format = %provider_api_format,
+        client_api_format = %client_api_format,
         upstream_base_url = ?upstream_base_url,
-        upstream_url = %follow_up.plan.url,
+        upstream_url = %url,
         "gateway built local video follow-up sync decision payload"
     );
 
@@ -182,39 +215,41 @@ async fn maybe_build_local_video_task_follow_up_sync_decision_payload(
         execution_strategy: Some(execution_strategy.as_str().to_string()),
         conversion_mode: Some(conversion_mode.as_str().to_string()),
         request_id: Some(trace_id.to_string()),
-        candidate_id: follow_up.plan.candidate_id.clone(),
-        provider_name: follow_up.plan.provider_name.clone(),
-        provider_id: Some(follow_up.plan.provider_id.clone()),
-        endpoint_id: Some(follow_up.plan.endpoint_id.clone()),
-        key_id: Some(follow_up.plan.key_id.clone()),
+        candidate_id,
+        provider_name,
+        provider_id: Some(provider_id),
+        endpoint_id: Some(endpoint_id),
+        key_id: Some(key_id),
         upstream_base_url,
-        upstream_url: Some(follow_up.plan.url.clone()),
-        provider_request_method: Some(follow_up.plan.method.clone()),
-        auth_header: auth_pair.as_ref().map(|(name, _)| name.clone()),
-        auth_value: auth_pair.as_ref().map(|(_, value)| value.clone()),
-        provider_api_format: Some(follow_up.plan.provider_api_format.clone()),
-        client_api_format: Some(follow_up.plan.client_api_format.clone()),
-        provider_contract: Some(follow_up.plan.provider_api_format.clone()),
-        client_contract: Some(follow_up.plan.client_api_format.clone()),
-        model_name: follow_up.plan.model_name.clone(),
+        upstream_url: Some(url),
+        provider_request_method: Some(method),
+        auth_header,
+        auth_value,
+        provider_api_format: Some(provider_api_format),
+        client_api_format: Some(client_api_format),
+        provider_contract: Some(provider_contract),
+        client_contract: Some(client_contract),
+        model_name,
         mapped_model: None,
         prompt_cache_key: None,
         extra_headers: BTreeMap::new(),
-        provider_request_headers: follow_up.plan.headers.clone(),
-        provider_request_body: follow_up.plan.body.json_body.clone(),
-        provider_request_body_base64: follow_up.plan.body.body_bytes_b64.clone(),
-        content_type: follow_up.plan.content_type.clone(),
-        proxy: follow_up.plan.proxy.clone(),
-        tls_profile: follow_up.plan.tls_profile.clone(),
-        timeouts: follow_up.plan.timeouts.clone(),
+        provider_request_headers: headers,
+        provider_request_body: json_body,
+        provider_request_body_base64: body_bytes_b64,
+        content_type,
+        proxy,
+        tls_profile,
+        timeouts,
         upstream_is_stream: false,
-        report_kind: follow_up.report_kind,
-        report_context: follow_up.report_context,
+        report_kind,
+        report_context,
         auth_context: Some(build_execution_runtime_auth_context(&auth_context)),
     }))
 }
 
-fn extract_auth_header_pair(headers: &BTreeMap<String, String>) -> Option<(String, String)> {
+fn extract_auth_header_pair<'a>(
+    headers: &'a BTreeMap<String, String>,
+) -> Option<(&'a str, &'a str)> {
     [
         "authorization",
         "x-api-key",
@@ -227,7 +262,7 @@ fn extract_auth_header_pair(headers: &BTreeMap<String, String>) -> Option<(Strin
         headers
             .iter()
             .find(|(header_name, _)| header_name.eq_ignore_ascii_case(name))
-            .map(|(header_name, value)| (header_name.clone(), value.clone()))
+            .map(|(header_name, value)| (header_name.as_str(), value.as_str()))
     })
 }
 

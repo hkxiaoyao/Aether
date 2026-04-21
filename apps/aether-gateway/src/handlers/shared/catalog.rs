@@ -8,6 +8,7 @@ use aether_crypto::DEVELOPMENT_ENCRYPTION_KEY;
 use aether_crypto::{decrypt_python_fernet_ciphertext, encrypt_python_fernet_plaintext};
 use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey;
 use serde_json::{json, Map, Value};
+use std::borrow::Cow;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const OAUTH_ACCOUNT_BLOCK_PREFIX: &str = "[ACCOUNT_BLOCK] ";
@@ -63,23 +64,27 @@ pub(crate) fn decrypt_catalog_secret_with_fallbacks(
     None
 }
 
-pub(crate) fn effective_catalog_encryption_key(state: &AppState) -> Option<String> {
+pub(crate) fn effective_catalog_encryption_key(state: &AppState) -> Option<Cow<'_, str>> {
     let encryption_key = state.encryption_key().map(str::trim).unwrap_or("");
     if !encryption_key.is_empty() {
-        return Some(encryption_key.to_string());
+        return Some(Cow::Borrowed(encryption_key));
     }
     for env_key in ["AETHER_GATEWAY_DATA_ENCRYPTION_KEY", "ENCRYPTION_KEY"] {
         let Ok(candidate) = std::env::var(env_key) else {
             continue;
         };
-        let candidate = candidate.trim();
-        if !candidate.is_empty() {
-            return Some(candidate.to_string());
+        let trimmed = candidate.trim();
+        if !trimmed.is_empty() {
+            return Some(if trimmed.len() == candidate.len() {
+                Cow::Owned(candidate)
+            } else {
+                Cow::Owned(trimmed.to_string())
+            });
         }
     }
     #[cfg(test)]
     {
-        return Some(DEVELOPMENT_ENCRYPTION_KEY.to_string());
+        return Some(Cow::Borrowed(DEVELOPMENT_ENCRYPTION_KEY));
     }
     #[allow(unreachable_code)]
     None
@@ -90,7 +95,7 @@ pub(crate) fn encrypt_catalog_secret_with_fallbacks(
     plaintext: &str,
 ) -> Option<String> {
     let encryption_key = effective_catalog_encryption_key(state)?;
-    encrypt_python_fernet_plaintext(&encryption_key, plaintext).ok()
+    encrypt_python_fernet_plaintext(encryption_key.as_ref(), plaintext).ok()
 }
 
 pub(crate) fn masked_catalog_api_key(state: &AppState, key: &StoredProviderCatalogKey) -> String {

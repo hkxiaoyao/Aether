@@ -34,6 +34,6 @@ pub(crate) fn maybe_compile_sync_finalize_response(
 
 pub(crate) fn maybe_build_stream_response_rewriter(
     report_context: Option<&Value>,
-) -> Option<LocalStreamRewriter> {
+) -> Option<LocalStreamRewriter<'_>> {
     stream::maybe_build_local_stream_rewriter(report_context)
 }

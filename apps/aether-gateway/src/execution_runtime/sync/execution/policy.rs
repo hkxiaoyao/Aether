@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use aether_contracts::ExecutionResult;
+use aether_contracts::ResponseBody;
 use base64::Engine as _;
 
 use crate::GatewayError;
@@ -8,14 +8,14 @@ use crate::GatewayError;
 type DecodedBody = (Vec<u8>, Option<serde_json::Value>, Option<String>);
 
 pub(super) fn decode_execution_result_body(
-    result: &ExecutionResult,
+    body: Option<ResponseBody>,
     headers: &mut BTreeMap<String, String>,
 ) -> Result<DecodedBody, GatewayError> {
-    let Some(body) = result.body.as_ref() else {
+    let Some(body) = body else {
         return Ok((Vec::new(), None, None));
     };
 
-    if let Some(json_body) = body.json_body.clone() {
+    if let Some(json_body) = body.json_body {
         headers
             .entry("content-type".to_string())
             .or_insert_with(|| "application/json".to_string());
@@ -25,7 +25,7 @@ pub(super) fn decode_execution_result_body(
         return Ok((bytes, Some(json_body), None));
     }
 
-    if let Some(body_bytes_b64) = body.body_bytes_b64.clone() {
+    if let Some(body_bytes_b64) = body.body_bytes_b64 {
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(&body_bytes_b64)
             .map_err(|err| GatewayError::Internal(err.to_string()))?;

@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use serde_json::Value;
 
@@ -27,7 +28,7 @@ pub(crate) struct LocalStandardCandidatePayloadParts {
     pub(super) provider_request_headers: BTreeMap<String, String>,
     pub(super) upstream_url: String,
     pub(super) upstream_is_stream: bool,
-    pub(super) transport: GatewayProviderTransportSnapshot,
+    pub(super) transport: Arc<GatewayProviderTransportSnapshot>,
 }
 
 pub(crate) async fn resolve_local_standard_candidate_payload_parts(
@@ -220,6 +221,6 @@ pub(crate) async fn resolve_local_standard_candidate_payload_parts(
         provider_request_headers,
         upstream_url,
         upstream_is_stream,
-        transport: transport.clone(),
+        transport: Arc::clone(transport),
     })
 }

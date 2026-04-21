@@ -34,7 +34,6 @@ pub(super) async fn maybe_build_local_video_create_decision_payload_for_candidat
     .await?;
     let LocalVideoCreateCandidateAttempt {
         eligible,
-        candidate_group_id,
         candidate_id,
         ..
     } = attempt;
@@ -49,6 +48,40 @@ pub(super) async fn maybe_build_local_video_create_decision_payload_for_candidat
     if let Some(proxy_value) = build_request_trace_proxy_value(Some(&transport), proxy.as_ref()) {
         extra_fields.insert("proxy".to_string(), proxy_value);
     }
+    let report_context = build_local_execution_report_context(LocalExecutionReportContextParts {
+        auth_context: &input.auth_context,
+        request_id: trace_id,
+        candidate_id: &candidate_id,
+        attempt_identity,
+        model: &input.requested_model,
+        provider_name: &transport.provider.name,
+        provider_id: &candidate.provider_id,
+        endpoint_id: &candidate.endpoint_id,
+        key_id: &candidate.key_id,
+        key_name: None,
+        provider_api_format: spec_metadata.api_format,
+        client_api_format: spec_metadata.api_format,
+        mapped_model: Some(&resolved.mapped_model),
+        candidate_group_id: eligible.orchestration.candidate_group_id.as_deref(),
+        upstream_url: None,
+        provider_request_method: None,
+        provider_request_headers: None,
+        original_headers: &parts.headers,
+        original_request_body_json: Some(body_json),
+        original_request_body_base64: None,
+        has_envelope: false,
+        needs_conversion: false,
+        extra_fields,
+    });
+    let super::request::LocalVideoCreateCandidatePayloadParts {
+        transport: _,
+        auth_header,
+        auth_value,
+        mapped_model,
+        provider_request_headers,
+        provider_request_body,
+        upstream_url,
+    } = resolved;
 
     Some(build_local_execution_decision_response(
         LocalExecutionDecisionResponseParts {
@@ -63,17 +96,17 @@ pub(super) async fn maybe_build_local_video_create_decision_payload_for_candidat
             endpoint_id: candidate.endpoint_id.clone(),
             key_id: candidate.key_id.clone(),
             upstream_base_url: transport.endpoint.base_url.clone(),
-            upstream_url: resolved.upstream_url,
+            upstream_url,
             provider_request_method: Some(parts.method.to_string()),
-            auth_header: Some(resolved.auth_header),
-            auth_value: Some(resolved.auth_value),
+            auth_header: Some(auth_header),
+            auth_value: Some(auth_value),
             provider_api_format: spec_metadata.api_format.to_string(),
             client_api_format: spec_metadata.api_format.to_string(),
             model_name: input.requested_model.clone(),
-            mapped_model: resolved.mapped_model.clone(),
+            mapped_model,
             prompt_cache_key: None,
-            provider_request_headers: resolved.provider_request_headers,
-            provider_request_body: Some(resolved.provider_request_body),
+            provider_request_headers,
+            provider_request_body: Some(provider_request_body),
             provider_request_body_base64: None,
             content_type: parts
                 .headers
@@ -87,32 +120,7 @@ pub(super) async fn maybe_build_local_video_create_decision_payload_for_candidat
             timeouts: resolve_transport_execution_timeouts(&transport),
             upstream_is_stream: false,
             report_kind: spec_metadata.report_kind.map(ToOwned::to_owned),
-            report_context: Some(build_local_execution_report_context(
-                LocalExecutionReportContextParts {
-                    auth_context: &input.auth_context,
-                    request_id: trace_id,
-                    candidate_id: &candidate_id,
-                    attempt_identity,
-                    model: &input.requested_model,
-                    provider_name: &transport.provider.name,
-                    provider_id: &candidate.provider_id,
-                    endpoint_id: &candidate.endpoint_id,
-                    key_id: &candidate.key_id,
-                    key_name: None,
-                    provider_api_format: spec_metadata.api_format,
-                    client_api_format: spec_metadata.api_format,
-                    mapped_model: Some(&resolved.mapped_model),
-                    candidate_group_id: candidate_group_id.as_deref(),
-                    upstream_url: None,
-                    provider_request_method: None,
-                    provider_request_headers: None,
-                    original_headers: &parts.headers,
-                    original_request_body: body_json,
-                    has_envelope: false,
-                    needs_conversion: false,
-                    extra_fields,
-                },
-            )),
+            report_context: Some(report_context),
             auth_context: input.auth_context.clone(),
         },
     ))

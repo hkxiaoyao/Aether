@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use serde_json::Value;
 
@@ -72,7 +73,7 @@ pub(crate) fn resolve_same_format_provider_transport_unsupported_reason_for_trac
 }
 
 pub(crate) struct LocalSameFormatProviderCandidatePayloadParts {
-    pub(super) transport: GatewayProviderTransportSnapshot,
+    pub(super) transport: Arc<GatewayProviderTransportSnapshot>,
     pub(super) is_antigravity: bool,
     pub(super) is_kiro: bool,
     pub(super) auth_header: Option<String>,

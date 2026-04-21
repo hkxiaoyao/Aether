@@ -42,7 +42,8 @@ pub(crate) use sync::{
     execute_execution_runtime_sync, maybe_build_local_sync_finalize_response,
     maybe_build_local_video_error_response, maybe_build_local_video_success_outcome,
     resolve_local_sync_error_background_report_kind,
-    resolve_local_sync_success_background_report_kind, LocalVideoSyncSuccessOutcome,
+    resolve_local_sync_success_background_report_kind, LocalVideoSyncSuccessBuild,
+    LocalVideoSyncSuccessOutcome,
 };
 pub(crate) use transport::{
     execute_sync_plan as execute_execution_runtime_sync_plan, DirectSyncExecutionRuntime,

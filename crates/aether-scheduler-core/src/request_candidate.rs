@@ -2,7 +2,7 @@ use aether_contracts::{ExecutionError, ExecutionPlan};
 use aether_data_contracts::repository::candidates::{
     RequestCandidateStatus, StoredRequestCandidate, UpsertRequestCandidateRecord,
 };
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SchedulerRequestCandidateReportContext {
@@ -91,20 +91,13 @@ pub fn parse_request_candidate_report_context(
     report_context: Option<&Value>,
 ) -> Option<SchedulerRequestCandidateReportContext> {
     let report_context = report_context?;
-    let retry_index = report_context
-        .get("retry_index")
-        .and_then(Value::as_u64)
-        .unwrap_or_default();
     Some(SchedulerRequestCandidateReportContext {
         request_id: string_field(report_context, "request_id"),
         candidate_id: string_field(report_context, "candidate_id"),
         user_id: string_field(report_context, "user_id"),
         api_key_id: string_field(report_context, "api_key_id"),
-        candidate_index: report_context
-            .get("candidate_index")
-            .and_then(Value::as_u64)
-            .and_then(|value| u32::try_from(value).ok()),
-        retry_index: u32::try_from(retry_index).unwrap_or(u32::MAX),
+        candidate_index: u32_field(report_context, "candidate_index"),
+        retry_index: u32_field(report_context, "retry_index").unwrap_or_default(),
         provider_id: string_field(report_context, "provider_id"),
         endpoint_id: string_field(report_context, "endpoint_id"),
         key_id: string_field(report_context, "key_id"),
@@ -123,9 +116,24 @@ pub fn resolve_report_request_candidate_slot(
     now_unix_ms: u64,
     generated_candidate_id: String,
 ) -> Option<SchedulerResolvedReportRequestCandidateSlot> {
-    let request_id = metadata.request_id.clone()?;
     let matched_candidate = match_existing_report_candidate(existing_candidates, &metadata);
-    let synthesized_extra_data = build_report_candidate_extra_data(&metadata);
+    let SchedulerRequestCandidateReportContext {
+        request_id,
+        candidate_id,
+        user_id,
+        api_key_id,
+        candidate_index: metadata_candidate_index,
+        retry_index,
+        provider_id,
+        endpoint_id,
+        key_id,
+        client_api_format,
+        provider_api_format,
+        proxy,
+    } = metadata;
+    let request_id = request_id?;
+    let synthesized_extra_data =
+        build_report_candidate_extra_data(client_api_format, provider_api_format, proxy);
     let created_at_unix_ms = matched_candidate
         .as_ref()
         .map(|candidate| candidate.created_at_unix_ms)
@@ -133,42 +141,42 @@ pub fn resolve_report_request_candidate_slot(
     let candidate_index = matched_candidate
         .as_ref()
         .map(|candidate| candidate.candidate_index)
-        .or(metadata.candidate_index)
+        .or(metadata_candidate_index)
         .unwrap_or_else(|| next_candidate_index(existing_candidates));
     let retry_index = matched_candidate
         .as_ref()
         .map(|candidate| candidate.retry_index)
-        .unwrap_or(metadata.retry_index);
+        .unwrap_or(retry_index);
 
     Some(SchedulerResolvedReportRequestCandidateSlot {
         id: matched_candidate
             .as_ref()
             .map(|candidate| candidate.id.clone())
-            .or(metadata.candidate_id)
+            .or(candidate_id)
             .unwrap_or(generated_candidate_id),
         request_id,
         user_id: matched_candidate
             .as_ref()
             .and_then(|candidate| candidate.user_id.clone())
-            .or(metadata.user_id),
+            .or(user_id),
         api_key_id: matched_candidate
             .as_ref()
             .and_then(|candidate| candidate.api_key_id.clone())
-            .or(metadata.api_key_id),
+            .or(api_key_id),
         candidate_index,
         retry_index,
         provider_id: matched_candidate
             .as_ref()
             .and_then(|candidate| candidate.provider_id.clone())
-            .or(metadata.provider_id),
+            .or(provider_id),
         endpoint_id: matched_candidate
             .as_ref()
             .and_then(|candidate| candidate.endpoint_id.clone())
-            .or(metadata.endpoint_id),
+            .or(endpoint_id),
         key_id: matched_candidate
             .as_ref()
             .and_then(|candidate| candidate.key_id.clone())
-            .or(metadata.key_id),
+            .or(key_id),
         extra_data: merge_request_candidate_extra_data(
             matched_candidate
                 .as_ref()
@@ -195,22 +203,14 @@ pub fn build_execution_request_candidate_seed(
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
-    let request_id = string_field(&Value::Object(context.clone()), "request_id")
-        .unwrap_or_else(|| plan.request_id.clone());
-    let candidate_index = context
-        .get("candidate_index")
-        .and_then(Value::as_u64)
-        .and_then(|value| u32::try_from(value).ok())
-        .unwrap_or(0);
-    let retry_index = context
-        .get("retry_index")
-        .and_then(Value::as_u64)
-        .and_then(|value| u32::try_from(value).ok())
-        .unwrap_or(0);
-    let candidate_id = string_field(&Value::Object(context.clone()), "candidate_id")
-        .unwrap_or(generated_candidate_id);
-    let user_id = string_field(&Value::Object(context.clone()), "user_id");
-    let api_key_id = string_field(&Value::Object(context.clone()), "api_key_id");
+    let request_id =
+        string_field_from_object(&context, "request_id").unwrap_or_else(|| plan.request_id.clone());
+    let candidate_index = u32_field_from_object(&context, "candidate_index").unwrap_or(0);
+    let retry_index = u32_field_from_object(&context, "retry_index").unwrap_or(0);
+    let candidate_id =
+        string_field_from_object(&context, "candidate_id").unwrap_or(generated_candidate_id);
+    let user_id = string_field_from_object(&context, "user_id");
+    let api_key_id = string_field_from_object(&context, "api_key_id");
 
     context.insert("request_id".to_string(), Value::String(request_id.clone()));
     context.insert(
@@ -374,7 +374,10 @@ pub fn finalize_execution_request_candidate_report_context(
     report_context: Value,
     candidate_id: &str,
 ) -> Value {
-    let mut context = report_context.as_object().cloned().unwrap_or_default();
+    let mut context = match report_context {
+        Value::Object(context) => context,
+        _ => Map::new(),
+    };
     let candidate_id = candidate_id.trim();
     if !candidate_id.is_empty() {
         context.insert(
@@ -410,11 +413,30 @@ fn extract_error_message(body_json: &Value) -> Option<&str> {
 
 fn string_field(value: &Value, key: &str) -> Option<String> {
     value
+        .as_object()
+        .and_then(|object| string_field_from_object(object, key))
+}
+
+fn string_field_from_object(object: &Map<String, Value>, key: &str) -> Option<String> {
+    object
         .get(key)
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
+}
+
+fn u32_field(value: &Value, key: &str) -> Option<u32> {
+    value
+        .as_object()
+        .and_then(|object| u32_field_from_object(object, key))
+}
+
+fn u32_field_from_object(object: &Map<String, Value>, key: &str) -> Option<u32> {
+    object
+        .get(key)
+        .and_then(Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
 }
 
 fn match_existing_report_candidate<'a>(
@@ -465,24 +487,26 @@ fn next_candidate_index(candidates: &[StoredRequestCandidate]) -> u32 {
 }
 
 fn build_report_candidate_extra_data(
-    metadata: &SchedulerRequestCandidateReportContext,
+    client_api_format: Option<String>,
+    provider_api_format: Option<String>,
+    proxy: Option<Value>,
 ) -> Option<Value> {
-    let mut extra_data = serde_json::Map::new();
+    let mut extra_data = Map::with_capacity(5);
     extra_data.insert("gateway_execution_runtime".to_string(), Value::Bool(true));
     extra_data.insert("phase".to_string(), Value::String("3c_trial".to_string()));
-    if let Some(client_api_format) = metadata.client_api_format.clone() {
+    if let Some(client_api_format) = client_api_format {
         extra_data.insert(
             "client_api_format".to_string(),
             Value::String(client_api_format),
         );
     }
-    if let Some(provider_api_format) = metadata.provider_api_format.clone() {
+    if let Some(provider_api_format) = provider_api_format {
         extra_data.insert(
             "provider_api_format".to_string(),
             Value::String(provider_api_format),
         );
     }
-    if let Some(proxy) = metadata.proxy.clone() {
+    if let Some(proxy) = proxy {
         extra_data.insert("proxy".to_string(), proxy);
     }
     (!extra_data.is_empty()).then_some(Value::Object(extra_data))

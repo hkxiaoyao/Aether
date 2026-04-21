@@ -21,7 +21,13 @@ pub fn prepare_local_success_response_parts(
     headers: &BTreeMap<String, String>,
     body_json: &Value,
 ) -> serde_json::Result<(Vec<u8>, BTreeMap<String, String>)> {
-    let mut headers = headers.clone();
+    prepare_local_success_response_parts_owned(headers.clone(), body_json)
+}
+
+pub fn prepare_local_success_response_parts_owned(
+    mut headers: BTreeMap<String, String>,
+    body_json: &Value,
+) -> serde_json::Result<(Vec<u8>, BTreeMap<String, String>)> {
     headers.remove("content-encoding");
     headers.remove("content-length");
     headers.insert("content-type".to_string(), "application/json".to_string());
@@ -77,7 +83,7 @@ mod tests {
     use super::{
         build_generated_tool_call_id, build_local_success_background_report,
         build_local_success_conversion_background_report, canonicalize_tool_arguments,
-        prepare_local_success_response_parts,
+        prepare_local_success_response_parts, prepare_local_success_response_parts_owned,
     };
     use aether_usage_runtime::GatewaySyncReportRequest;
     use std::collections::BTreeMap;
@@ -105,6 +111,37 @@ mod tests {
         ]);
         let (body_bytes, normalized_headers) =
             prepare_local_success_response_parts(&headers, &serde_json::json!({"ok": true}))
+                .expect("response parts should serialize");
+
+        assert_eq!(
+            serde_json::from_slice::<Value>(&body_bytes).expect("json body"),
+            serde_json::json!({"ok": true})
+        );
+        assert_eq!(
+            normalized_headers.get("content-type").map(String::as_str),
+            Some("application/json")
+        );
+        assert!(!normalized_headers.contains_key("content-encoding"));
+        let expected_length = body_bytes.len().to_string();
+        assert_eq!(
+            normalized_headers.get("content-length").map(String::as_str),
+            Some(expected_length.as_str())
+        );
+        assert_eq!(
+            normalized_headers.get("x-test").map(String::as_str),
+            Some("1")
+        );
+    }
+
+    #[test]
+    fn prepare_local_success_response_parts_owned_normalizes_headers() {
+        let headers = BTreeMap::from([
+            ("content-encoding".to_string(), "gzip".to_string()),
+            ("content-length".to_string(), "999".to_string()),
+            ("x-test".to_string(), "1".to_string()),
+        ]);
+        let (body_bytes, normalized_headers) =
+            prepare_local_success_response_parts_owned(headers, &serde_json::json!({"ok": true}))
                 .expect("response parts should serialize");
 
         assert_eq!(

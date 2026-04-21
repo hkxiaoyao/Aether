@@ -212,7 +212,7 @@ async fn materialize_local_video_create_candidate_attempts(
                 skipped_candidate.extra_data =
                     Some(build_local_execution_candidate_metadata_for_candidate(
                         &skipped_candidate.candidate,
-                        skipped_candidate.transport.as_ref(),
+                        skipped_candidate.transport_ref(),
                         api_format,
                         api_format,
                         serde_json::Map::new(),

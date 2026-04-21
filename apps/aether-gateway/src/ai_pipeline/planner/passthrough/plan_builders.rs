@@ -1,102 +1,75 @@
 use aether_contracts::{ExecutionPlan, RequestBody};
 
-use super::{augment_sync_report_context, LocalStreamPlanAndReport, LocalSyncPlanAndReport};
+use super::{
+    augment_sync_report_context, take_non_empty_string, LocalStreamPlanAndReport,
+    LocalSyncPlanAndReport,
+};
 use crate::{GatewayControlSyncDecisionResponse, GatewayError};
 
 pub(crate) fn build_passthrough_sync_plan_from_decision(
     parts: &http::request::Parts,
     payload: GatewayControlSyncDecisionResponse,
 ) -> Result<Option<LocalSyncPlanAndReport>, GatewayError> {
-    let Some(request_id) = payload
-        .request_id
-        .clone()
-        .filter(|value| !value.trim().is_empty())
-    else {
+    let mut payload = payload;
+    let Some(request_id) = take_non_empty_string(&mut payload.request_id) else {
         return Ok(None);
     };
-    let Some(provider_id) = payload
-        .provider_id
-        .clone()
-        .filter(|value| !value.trim().is_empty())
-    else {
+    let Some(provider_id) = take_non_empty_string(&mut payload.provider_id) else {
         return Ok(None);
     };
-    let Some(endpoint_id) = payload
-        .endpoint_id
-        .clone()
-        .filter(|value| !value.trim().is_empty())
-    else {
+    let Some(endpoint_id) = take_non_empty_string(&mut payload.endpoint_id) else {
         return Ok(None);
     };
-    let Some(key_id) = payload
-        .key_id
-        .clone()
-        .filter(|value| !value.trim().is_empty())
-    else {
+    let Some(key_id) = take_non_empty_string(&mut payload.key_id) else {
         return Ok(None);
     };
-    let Some(provider_api_format) = payload
-        .provider_api_format
-        .clone()
-        .filter(|value| !value.trim().is_empty())
-    else {
+    let Some(provider_api_format) = take_non_empty_string(&mut payload.provider_api_format) else {
         return Ok(None);
     };
-    let Some(client_api_format) = payload
-        .client_api_format
-        .clone()
-        .filter(|value| !value.trim().is_empty())
-    else {
+    let Some(client_api_format) = take_non_empty_string(&mut payload.client_api_format) else {
         return Ok(None);
     };
-    let Some(upstream_url) = payload
-        .upstream_url
-        .clone()
-        .filter(|value| !value.trim().is_empty())
-    else {
+    let Some(upstream_url) = take_non_empty_string(&mut payload.upstream_url) else {
         return Ok(None);
     };
-    let (request_body, provider_request_body_for_report) = resolve_passthrough_sync_request_body(
-        payload.provider_request_body.clone(),
-        payload.provider_request_body_base64.clone(),
+    let provider_request_headers = std::mem::take(&mut payload.provider_request_headers);
+    let ignored_provider_request_body = serde_json::Value::Null;
+    let report_context = augment_sync_report_context(
+        payload.report_context.take(),
+        &provider_request_headers,
+        &ignored_provider_request_body,
+    )?;
+    let request_body = resolve_passthrough_sync_request_body(
+        payload.provider_request_body.take(),
+        payload.provider_request_body_base64.take(),
     );
+    let provider_request_method = take_non_empty_string(&mut payload.provider_request_method);
+    let content_type = payload
+        .content_type
+        .take()
+        .or_else(|| provider_request_headers.get("content-type").cloned());
 
     let plan = ExecutionPlan {
         request_id,
-        candidate_id: payload.candidate_id.clone(),
-        provider_name: payload.provider_name.clone(),
+        candidate_id: payload.candidate_id.take(),
+        provider_name: payload.provider_name.take(),
         provider_id,
         endpoint_id,
         key_id,
-        method: payload
-            .provider_request_method
-            .clone()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| parts.method.to_string()),
+        method: provider_request_method.unwrap_or_else(|| parts.method.to_string()),
         url: upstream_url,
-        headers: payload.provider_request_headers.clone(),
-        content_type: payload.content_type.clone().or_else(|| {
-            payload
-                .provider_request_headers
-                .get("content-type")
-                .cloned()
-        }),
+        headers: provider_request_headers,
+        content_type,
         content_encoding: None,
         body: request_body,
         stream: false,
         client_api_format,
         provider_api_format,
-        model_name: payload.model_name.clone(),
-        proxy: payload.proxy.clone(),
-        tls_profile: payload.tls_profile.clone(),
-        timeouts: payload.timeouts.clone(),
+        model_name: payload.model_name.take(),
+        proxy: payload.proxy.take(),
+        tls_profile: payload.tls_profile.take(),
+        timeouts: payload.timeouts.take(),
     };
-
-    let report_context = augment_sync_report_context(
-        payload.report_context,
-        &plan.headers,
-        &provider_request_body_for_report,
-    )?;
 
     Ok(Some(LocalSyncPlanAndReport {
         plan,
@@ -109,71 +82,44 @@ pub(crate) fn build_passthrough_stream_plan_from_decision(
     parts: &http::request::Parts,
     payload: GatewayControlSyncDecisionResponse,
 ) -> Result<Option<LocalStreamPlanAndReport>, GatewayError> {
-    let Some(request_id) = payload
-        .request_id
-        .clone()
-        .filter(|value| !value.trim().is_empty())
-    else {
+    let mut payload = payload;
+    let Some(request_id) = take_non_empty_string(&mut payload.request_id) else {
         return Ok(None);
     };
-    let Some(provider_id) = payload
-        .provider_id
-        .clone()
-        .filter(|value| !value.trim().is_empty())
-    else {
+    let Some(provider_id) = take_non_empty_string(&mut payload.provider_id) else {
         return Ok(None);
     };
-    let Some(endpoint_id) = payload
-        .endpoint_id
-        .clone()
-        .filter(|value| !value.trim().is_empty())
-    else {
+    let Some(endpoint_id) = take_non_empty_string(&mut payload.endpoint_id) else {
         return Ok(None);
     };
-    let Some(key_id) = payload
-        .key_id
-        .clone()
-        .filter(|value| !value.trim().is_empty())
-    else {
+    let Some(key_id) = take_non_empty_string(&mut payload.key_id) else {
         return Ok(None);
     };
-    let Some(provider_api_format) = payload
-        .provider_api_format
-        .clone()
-        .filter(|value| !value.trim().is_empty())
-    else {
+    let Some(provider_api_format) = take_non_empty_string(&mut payload.provider_api_format) else {
         return Ok(None);
     };
-    let Some(client_api_format) = payload
-        .client_api_format
-        .clone()
-        .filter(|value| !value.trim().is_empty())
-    else {
+    let Some(client_api_format) = take_non_empty_string(&mut payload.client_api_format) else {
         return Ok(None);
     };
-    let Some(upstream_url) = payload
-        .upstream_url
-        .clone()
-        .filter(|value| !value.trim().is_empty())
-    else {
+    let Some(upstream_url) = take_non_empty_string(&mut payload.upstream_url) else {
         return Ok(None);
     };
+    let provider_request_headers = std::mem::take(&mut payload.provider_request_headers);
+    let content_type = payload
+        .content_type
+        .take()
+        .or_else(|| provider_request_headers.get("content-type").cloned());
     let plan = ExecutionPlan {
         request_id,
-        candidate_id: payload.candidate_id.clone(),
-        provider_name: payload.provider_name.clone(),
+        candidate_id: payload.candidate_id.take(),
+        provider_name: payload.provider_name.take(),
         provider_id,
         endpoint_id,
         key_id,
         method: parts.method.to_string(),
         url: upstream_url,
-        headers: payload.provider_request_headers.clone(),
-        content_type: payload.content_type.clone().or_else(|| {
-            payload
-                .provider_request_headers
-                .get("content-type")
-                .cloned()
-        }),
+        headers: provider_request_headers,
+        content_type,
         content_encoding: None,
         body: RequestBody {
             json_body: None,
@@ -183,10 +129,10 @@ pub(crate) fn build_passthrough_stream_plan_from_decision(
         stream: true,
         client_api_format,
         provider_api_format,
-        model_name: payload.model_name.clone(),
-        proxy: payload.proxy.clone(),
-        tls_profile: payload.tls_profile.clone(),
-        timeouts: payload.timeouts.clone(),
+        model_name: payload.model_name.take(),
+        proxy: payload.proxy.take(),
+        tls_profile: payload.tls_profile.take(),
+        timeouts: payload.timeouts.take(),
     };
 
     Ok(Some(LocalStreamPlanAndReport {
@@ -199,35 +145,33 @@ pub(crate) fn build_passthrough_stream_plan_from_decision(
 fn resolve_passthrough_sync_request_body(
     provider_request_body: Option<serde_json::Value>,
     provider_request_body_base64: Option<String>,
-) -> (RequestBody, serde_json::Value) {
-    if let Some(body_bytes_b64) = provider_request_body_base64
-        .as_ref()
-        .map(|value| value.trim())
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
+) -> RequestBody {
+    if let Some(body_bytes_b64) = provider_request_body_base64.and_then(trim_owned_non_empty_string)
     {
-        return (
-            RequestBody {
-                json_body: None,
-                body_bytes_b64: Some(body_bytes_b64.clone()),
-                body_ref: None,
-            },
-            serde_json::json!({"body_bytes_b64": body_bytes_b64}),
-        );
+        return RequestBody {
+            json_body: None,
+            body_bytes_b64: Some(body_bytes_b64),
+            body_ref: None,
+        };
     }
 
     match provider_request_body.unwrap_or(serde_json::Value::Null) {
-        serde_json::Value::Null => (
-            RequestBody {
-                json_body: None,
-                body_bytes_b64: None,
-                body_ref: None,
-            },
-            serde_json::Value::Null,
-        ),
-        other => {
-            let report_body = other.clone();
-            (RequestBody::from_json(other), report_body)
-        }
+        serde_json::Value::Null => RequestBody {
+            json_body: None,
+            body_bytes_b64: None,
+            body_ref: None,
+        },
+        other => RequestBody::from_json(other),
     }
+}
+
+fn trim_owned_non_empty_string(value: String) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.len() == value.len() {
+        return Some(value);
+    }
+    Some(trimmed.to_owned())
 }

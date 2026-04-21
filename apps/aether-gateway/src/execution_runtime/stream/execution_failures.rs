@@ -7,6 +7,7 @@ use aether_usage_runtime::{
 use axum::body::Body;
 use axum::http::Response;
 use base64::Engine as _;
+use serde::Serialize;
 use serde_json::{Map, Value};
 use tracing::warn;
 
@@ -32,7 +33,51 @@ pub(super) struct StreamFailureReport {
     pub(super) status_code: u16,
     pub(super) error_type: String,
     pub(super) error_message: String,
-    pub(super) body_json: Value,
+    extra_error_fields: Map<String, Value>,
+}
+
+#[derive(Serialize)]
+struct StreamFailureBody<'a> {
+    error: StreamFailureBodyFields<'a>,
+}
+
+#[derive(Serialize)]
+struct StreamFailureBodyFields<'a> {
+    #[serde(rename = "type")]
+    error_type: &'a str,
+    message: &'a str,
+    code: u16,
+    #[serde(flatten)]
+    extra_error_fields: &'a Map<String, Value>,
+}
+
+impl StreamFailureReport {
+    fn into_body_json(self) -> Value {
+        let Self {
+            status_code,
+            error_type,
+            error_message,
+            mut extra_error_fields,
+        } = self;
+        extra_error_fields.insert("type".to_string(), Value::String(error_type));
+        extra_error_fields.insert("message".to_string(), Value::String(error_message));
+        extra_error_fields.insert("code".to_string(), Value::from(status_code));
+        Value::Object(Map::from_iter([(
+            "error".to_string(),
+            Value::Object(extra_error_fields),
+        )]))
+    }
+
+    pub(super) fn to_json_string(&self) -> serde_json::Result<String> {
+        serde_json::to_string(&StreamFailureBody {
+            error: StreamFailureBodyFields {
+                error_type: self.error_type.as_str(),
+                message: self.error_message.as_str(),
+                code: self.status_code,
+                extra_error_fields: &self.extra_error_fields,
+            },
+        })
+    }
 }
 
 pub(super) fn build_stream_failure_report(
@@ -44,16 +89,9 @@ pub(super) fn build_stream_failure_report(
     let error_message = error_message.into();
     StreamFailureReport {
         status_code,
-        body_json: Value::Object(Map::from_iter([(
-            "error".to_string(),
-            Value::Object(Map::from_iter([
-                ("type".to_string(), Value::String(error_type.clone())),
-                ("message".to_string(), Value::String(error_message.clone())),
-                ("code".to_string(), Value::from(status_code)),
-            ])),
-        )])),
         error_type,
         error_message,
+        extra_error_fields: Map::new(),
     }
 }
 
@@ -65,11 +103,9 @@ pub(super) fn build_stream_failure_from_execution_error(
         .ok()
         .and_then(|value| value.as_str().map(ToOwned::to_owned))
         .unwrap_or_else(|| "internal".to_string());
+    let error_message = error.message.trim().to_string();
     let phase = serde_json::to_value(&error.phase).unwrap_or(Value::Null);
     let mut error_object = Map::from_iter([
-        ("type".to_string(), Value::String(error_type.clone())),
-        ("message".to_string(), Value::String(error.message.clone())),
-        ("code".to_string(), Value::from(status_code)),
         ("phase".to_string(), phase),
         ("retryable".to_string(), Value::Bool(error.retryable)),
         (
@@ -84,11 +120,8 @@ pub(super) fn build_stream_failure_from_execution_error(
     StreamFailureReport {
         status_code,
         error_type,
-        error_message: error.message.trim().to_string(),
-        body_json: Value::Object(Map::from_iter([(
-            "error".to_string(),
-            Value::Object(error_object),
-        )])),
+        error_message,
+        extra_error_fields: error_object,
     }
 }
 
@@ -96,23 +129,23 @@ fn build_stream_failure_sync_payload(
     trace_id: &str,
     report_kind: String,
     report_context: Option<Value>,
-    headers: &std::collections::BTreeMap<String, String>,
+    mut headers: std::collections::BTreeMap<String, String>,
     telemetry: Option<ExecutionTelemetry>,
     provider_buffered_body: &[u8],
-    failure: &StreamFailureReport,
+    failure: StreamFailureReport,
 ) -> GatewaySyncReportRequest {
-    let mut response_headers = headers.clone();
-    response_headers.remove("content-encoding");
-    response_headers.remove("content-length");
-    response_headers.insert("content-type".to_string(), "application/json".to_string());
+    let status_code = failure.status_code;
+    headers.remove("content-encoding");
+    headers.remove("content-length");
+    headers.insert("content-type".to_string(), "application/json".to_string());
 
     GatewaySyncReportRequest {
         trace_id: trace_id.to_string(),
         report_kind,
         report_context,
-        status_code: failure.status_code,
-        headers: response_headers,
-        body_json: Some(failure.body_json.clone()),
+        status_code,
+        headers,
+        body_json: Some(failure.into_body_json()),
         client_body_json: None,
         body_base64: (!provider_buffered_body.is_empty())
             .then(|| base64::engine::general_purpose::STANDARD.encode(provider_buffered_body)),
@@ -120,27 +153,40 @@ fn build_stream_failure_sync_payload(
     }
 }
 
+fn stream_failure_body_field<'a>(
+    payload: &'a GatewaySyncReportRequest,
+    field: &str,
+) -> Option<&'a str> {
+    payload
+        .body_json
+        .as_ref()
+        .and_then(|body_json| body_json.get("error"))
+        .and_then(|value| value.get(field))
+        .and_then(Value::as_str)
+}
+
 async fn record_stream_sync_failure(
     state: &AppState,
     plan: &ExecutionPlan,
     report_context: Option<&Value>,
     payload: &GatewaySyncReportRequest,
-    failure: &StreamFailureReport,
     started_at_unix_ms: Option<u64>,
 ) {
-    let error_body = serde_json::to_string(&failure.body_json).ok();
+    let error_type = stream_failure_body_field(payload, "type").unwrap_or("internal");
+    let error_message = stream_failure_body_field(payload, "message").unwrap_or_default();
+    let error_body = payload
+        .body_json
+        .as_ref()
+        .and_then(|body_json| serde_json::to_string(body_json).ok());
     let failure_analysis = resolve_local_failover_analysis_for_attempt(
         state,
         plan,
         report_context,
-        failure.status_code,
+        payload.status_code,
         error_body.as_deref(),
     )
     .await;
-    if matches!(
-        failure.error_type.as_str(),
-        "first_byte_timeout" | "read_timeout"
-    ) {
+    if matches!(error_type, "first_byte_timeout" | "read_timeout") {
         apply_local_execution_effect(
             state,
             LocalExecutionEffectContext {
@@ -158,7 +204,7 @@ async fn record_stream_sync_failure(
             report_context,
         },
         LocalExecutionEffect::AttemptFailure(LocalAttemptFailureEffect {
-            status_code: failure.status_code,
+            status_code: payload.status_code,
             classification: failure_analysis.classification,
         }),
     )
@@ -170,7 +216,7 @@ async fn record_stream_sync_failure(
             report_context,
         },
         LocalExecutionEffect::AdaptiveRateLimit(LocalAdaptiveRateLimitEffect {
-            status_code: failure.status_code,
+            status_code: payload.status_code,
             classification: failure_analysis.classification,
             headers: Some(&payload.headers),
         }),
@@ -183,7 +229,7 @@ async fn record_stream_sync_failure(
             report_context,
         },
         LocalExecutionEffect::HealthFailure(LocalHealthFailureEffect {
-            status_code: failure.status_code,
+            status_code: payload.status_code,
             classification: failure_analysis.classification,
         }),
     )
@@ -195,7 +241,7 @@ async fn record_stream_sync_failure(
             report_context,
         },
         LocalExecutionEffect::OauthInvalidation(LocalOAuthInvalidationEffect {
-            status_code: failure.status_code,
+            status_code: payload.status_code,
             response_text: error_body.as_deref(),
         }),
     )
@@ -207,7 +253,7 @@ async fn record_stream_sync_failure(
             report_context,
         },
         LocalExecutionEffect::PoolError(LocalPoolErrorEffect {
-            status_code: failure.status_code,
+            status_code: payload.status_code,
             classification: failure_analysis.classification,
             headers: &payload.headers,
             error_body: error_body.as_deref(),
@@ -218,16 +264,16 @@ async fn record_stream_sync_failure(
     let payload_seed = build_sync_terminal_usage_payload_seed(payload);
     state
         .usage_runtime
-        .record_sync_terminal(state.data.as_ref(), &context_seed, &payload_seed);
+        .record_sync_terminal(state.data.as_ref(), context_seed, payload_seed);
     let terminal_unix_secs = current_request_candidate_unix_ms();
     record_report_request_candidate_status(
         state,
         report_context,
         SchedulerRequestCandidateStatusUpdate {
             status: RequestCandidateStatus::Failed,
-            status_code: Some(failure.status_code),
-            error_type: Some(failure.error_type.clone()),
-            error_message: Some(failure.error_message.clone()),
+            status_code: Some(payload.status_code),
+            error_type: Some(error_type.to_string()),
+            error_message: Some(error_message.to_string()),
             latency_ms: payload
                 .telemetry
                 .as_ref()
@@ -249,7 +295,7 @@ pub(super) async fn handle_prefetch_stream_failure(
     request_id: &str,
     candidate_id: Option<&str>,
     report_kind: &str,
-    headers: &std::collections::BTreeMap<String, String>,
+    headers: std::collections::BTreeMap<String, String>,
     telemetry: Option<ExecutionTelemetry>,
     buffered_body: &[u8],
     failure: StreamFailureReport,
@@ -257,21 +303,13 @@ pub(super) async fn handle_prefetch_stream_failure(
     let payload = build_stream_failure_sync_payload(
         trace_id,
         report_kind.to_string(),
-        report_context.clone(),
+        report_context,
         headers,
         telemetry,
         buffered_body,
-        &failure,
+        failure,
     );
-    record_stream_sync_failure(
-        state,
-        plan,
-        report_context.as_ref(),
-        &payload,
-        &failure,
-        None,
-    )
-    .await;
+    record_stream_sync_failure(state, plan, payload.report_context.as_ref(), &payload, None).await;
 
     let response =
         submit_local_core_error_or_sync_finalize(state, trace_id, decision, payload).await?;
@@ -287,8 +325,8 @@ pub(super) async fn submit_midstream_stream_failure(
     trace_id: &str,
     plan: &ExecutionPlan,
     direct_stream_finalize_kind: Option<&str>,
-    report_context: Option<&Value>,
-    headers: &std::collections::BTreeMap<String, String>,
+    report_context: Option<Value>,
+    headers: std::collections::BTreeMap<String, String>,
     telemetry: Option<ExecutionTelemetry>,
     buffered_body: &[u8],
     started_at_unix_ms: u64,
@@ -303,22 +341,21 @@ pub(super) async fn submit_midstream_stream_failure(
     let payload = build_stream_failure_sync_payload(
         trace_id,
         report_kind,
-        report_context.cloned(),
+        report_context,
         headers,
         telemetry,
         buffered_body,
-        &failure,
+        failure,
     );
     record_stream_sync_failure(
         state,
         plan,
-        report_context,
+        payload.report_context.as_ref(),
         &payload,
-        &failure,
         Some(started_at_unix_ms),
     )
     .await;
-    if let Err(err) = submit_sync_report(state, trace_id, payload).await {
+    if let Err(err) = submit_sync_report(state, payload).await {
         let request_id = short_request_id(plan.request_id.as_str());
         warn!(
             event_name = "execution_report_submit_failed",

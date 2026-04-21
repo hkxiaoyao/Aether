@@ -9,7 +9,7 @@ use crate::ai_pipeline::planner::candidate_eligibility::{
 use crate::ai_pipeline::planner::runtime_miss::record_local_runtime_candidate_skip_reason;
 use crate::ai_pipeline::{GatewayAuthApiKeySnapshot, PlannerAppState};
 use crate::clock::current_unix_ms;
-use crate::orchestration::{build_local_attempt_identities, ExecutionAttemptIdentity};
+use crate::orchestration::{local_attempt_slot_count, ExecutionAttemptIdentity};
 use crate::AppState;
 
 #[derive(Debug, Clone)]
@@ -17,15 +17,13 @@ pub(crate) struct LocalExecutionCandidateAttempt {
     pub(crate) eligible: EligibleLocalExecutionCandidate,
     pub(crate) candidate_index: u32,
     pub(crate) retry_index: u32,
-    pub(crate) pool_key_index: Option<u32>,
-    pub(crate) candidate_group_id: Option<String>,
     pub(crate) candidate_id: String,
 }
 
 impl LocalExecutionCandidateAttempt {
     pub(crate) fn attempt_identity(&self) -> ExecutionAttemptIdentity {
         ExecutionAttemptIdentity::new(self.candidate_index, self.retry_index)
-            .with_pool_key_index(self.pool_key_index)
+            .with_pool_key_index(self.eligible.orchestration.pool_key_index)
     }
 }
 
@@ -84,17 +82,25 @@ where
     F: Fn(&EligibleLocalExecutionCandidate) -> Option<Value>,
 {
     let created_at_unix_ms = current_unix_ms();
-    let mut materialized = Vec::new();
+    let total_attempts = candidates
+        .iter()
+        .map(|eligible| local_attempt_slot_count(&eligible.transport) as usize)
+        .sum();
+    let mut materialized = Vec::with_capacity(total_attempts);
 
     for (candidate_index, eligible) in candidates.into_iter().enumerate() {
         let candidate_index = candidate_index as u32;
-        let attempt_identities =
-            build_local_attempt_identities(candidate_index, &eligible.transport)
-                .into_iter()
-                .map(|identity| identity.with_pool_key_index(eligible.orchestration.pool_key_index))
-                .collect::<Vec<_>>();
+        let attempt_slots = local_attempt_slot_count(&eligible.transport);
+        let pool_key_index = eligible.orchestration.pool_key_index;
+        let extra_data = build_extra_data(&eligible);
+        let mut owned_eligible = Some(eligible);
 
-        for attempt_identity in attempt_identities {
+        for retry_index in 0..attempt_slots {
+            let eligible = owned_eligible
+                .as_ref()
+                .expect("eligible candidate should remain available until final retry");
+            let attempt_identity = ExecutionAttemptIdentity::new(candidate_index, retry_index)
+                .with_pool_key_index(pool_key_index);
             let generated_candidate_id = Uuid::new_v4().to_string();
             let candidate_id = state
                 .persist_available_local_candidate(
@@ -106,18 +112,23 @@ where
                     attempt_identity.retry_index,
                     &generated_candidate_id,
                     required_capabilities,
-                    build_extra_data(&eligible),
+                    extra_data.clone(),
                     created_at_unix_ms,
                     error_context,
                 )
                 .await;
 
+            let eligible = if retry_index + 1 == attempt_slots {
+                owned_eligible
+                    .take()
+                    .expect("final retry should consume owned eligible candidate")
+            } else {
+                eligible.clone()
+            };
             materialized.push(LocalExecutionCandidateAttempt {
-                eligible: eligible.clone(),
+                eligible,
                 candidate_index: attempt_identity.candidate_index,
                 retry_index: attempt_identity.retry_index,
-                pool_key_index: attempt_identity.pool_key_index,
-                candidate_group_id: eligible.orchestration.candidate_group_id.clone(),
                 candidate_id,
             });
         }

@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use serde_json::Value;
 
@@ -36,7 +37,7 @@ pub(crate) struct LocalOpenAiChatCandidatePayloadParts {
     pub(super) execution_strategy: ExecutionStrategy,
     pub(super) conversion_mode: ConversionMode,
     pub(super) report_kind: String,
-    pub(super) transport: GatewayProviderTransportSnapshot,
+    pub(super) transport: Arc<GatewayProviderTransportSnapshot>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -192,7 +193,7 @@ pub(crate) async fn resolve_local_openai_chat_candidate_payload_parts(
             execution_strategy: ExecutionStrategy::LocalSameFormat,
             conversion_mode: ConversionMode::None,
             report_kind: report_kind.to_string(),
-            transport: transport.clone(),
+            transport: Arc::clone(transport),
         });
     }
 
@@ -374,6 +375,6 @@ pub(crate) async fn resolve_local_openai_chat_candidate_payload_parts(
         execution_strategy: ExecutionStrategy::LocalCrossFormat,
         conversion_mode: ConversionMode::Bidirectional,
         report_kind: resolved_report_kind,
-        transport: transport.clone(),
+        transport: Arc::clone(transport),
     })
 }

@@ -31,13 +31,36 @@ pub(crate) fn merge_usage_request_metadata(
     (!metadata.is_empty()).then_some(Value::Object(metadata))
 }
 
+pub(crate) fn merge_usage_request_metadata_owned(
+    base: Option<Value>,
+    override_value: Option<Value>,
+) -> Option<Value> {
+    let mut metadata = match base {
+        Some(Value::Object(base)) => base,
+        _ => Map::new(),
+    };
+    if let Some(Value::Object(override_object)) = override_value {
+        move_allowed_metadata_fields(override_object, &mut metadata);
+    }
+    (!metadata.is_empty()).then_some(Value::Object(metadata))
+}
+
 pub(crate) fn sanitize_usage_request_metadata(value: Option<Value>) -> Option<Value> {
     let Value::Object(object) = value? else {
         return None;
     };
 
     let mut filtered = Map::new();
-    copy_allowed_metadata_fields(&object, &mut filtered);
+    move_allowed_metadata_fields(object, &mut filtered);
+
+    (!filtered.is_empty()).then_some(Value::Object(filtered))
+}
+
+pub(crate) fn sanitize_usage_request_metadata_ref(value: Option<&Value>) -> Option<Value> {
+    let object = value.and_then(Value::as_object)?;
+
+    let mut filtered = Map::new();
+    copy_allowed_metadata_fields(object, &mut filtered);
 
     (!filtered.is_empty()).then_some(Value::Object(filtered))
 }
@@ -62,6 +85,26 @@ fn copy_allowed_metadata_fields(source: &Map<String, Value>, target: &mut Map<St
     copy_number(source, target, "price_per_request");
 }
 
+fn move_allowed_metadata_fields(mut source: Map<String, Value>, target: &mut Map<String, Value>) {
+    remove_non_empty_string(&mut source, target, "trace_id");
+    remove_number(&mut source, target, "provider_request_body_base64_bytes");
+    remove_number(&mut source, target, "provider_response_body_base64_bytes");
+    remove_number(&mut source, target, "client_response_body_base64_bytes");
+    remove_non_null_value(&mut source, target, "billing_snapshot");
+    remove_non_empty_string(&mut source, target, "billing_snapshot_schema_version");
+    remove_non_empty_string(&mut source, target, "billing_snapshot_status");
+    remove_non_null_value(&mut source, target, "dimensions");
+    remove_non_null_value(&mut source, target, "billing_rule_snapshot");
+    remove_non_null_value(&mut source, target, "scheduling_audit");
+    remove_number(&mut source, target, "rate_multiplier");
+    remove_bool(&mut source, target, "is_free_tier");
+    remove_number(&mut source, target, "input_price_per_1m");
+    remove_number(&mut source, target, "output_price_per_1m");
+    remove_number(&mut source, target, "cache_creation_price_per_1m");
+    remove_number(&mut source, target, "cache_read_price_per_1m");
+    remove_number(&mut source, target, "price_per_request");
+}
+
 fn copy_non_empty_string(source: &Map<String, Value>, target: &mut Map<String, Value>, key: &str) {
     let Some(value) = source
         .get(key)
@@ -77,6 +120,20 @@ fn copy_non_empty_string(source: &Map<String, Value>, target: &mut Map<String, V
     );
 }
 
+fn remove_non_empty_string(
+    source: &mut Map<String, Value>,
+    target: &mut Map<String, Value>,
+    key: &str,
+) {
+    let Some(Value::String(value)) = source.remove(key) else {
+        return;
+    };
+    let Some(value) = trim_and_truncate_usage_request_metadata_string_owned(value) else {
+        return;
+    };
+    target.insert(key.to_string(), Value::String(value));
+}
+
 fn copy_number(source: &Map<String, Value>, target: &mut Map<String, Value>, key: &str) {
     let Some(value) = source.get(key).filter(|value| value.is_number()) else {
         return;
@@ -84,11 +141,25 @@ fn copy_number(source: &Map<String, Value>, target: &mut Map<String, Value>, key
     target.insert(key.to_string(), value.clone());
 }
 
+fn remove_number(source: &mut Map<String, Value>, target: &mut Map<String, Value>, key: &str) {
+    let Some(value) = source.remove(key).filter(|value| value.is_number()) else {
+        return;
+    };
+    target.insert(key.to_string(), value);
+}
+
 fn copy_bool(source: &Map<String, Value>, target: &mut Map<String, Value>, key: &str) {
     let Some(value) = source.get(key).filter(|value| value.is_boolean()) else {
         return;
     };
     target.insert(key.to_string(), value.clone());
+}
+
+fn remove_bool(source: &mut Map<String, Value>, target: &mut Map<String, Value>, key: &str) {
+    let Some(value) = source.remove(key).filter(|value| value.is_boolean()) else {
+        return;
+    };
+    target.insert(key.to_string(), value);
 }
 
 fn copy_non_null_value(source: &Map<String, Value>, target: &mut Map<String, Value>, key: &str) {
@@ -101,11 +172,33 @@ fn copy_non_null_value(source: &Map<String, Value>, target: &mut Map<String, Val
     );
 }
 
+fn remove_non_null_value(
+    source: &mut Map<String, Value>,
+    target: &mut Map<String, Value>,
+    key: &str,
+) {
+    let Some(value) = source.remove(key).filter(|value| !value.is_null()) else {
+        return;
+    };
+    target.insert(
+        key.to_string(),
+        sanitize_usage_request_metadata_value_owned(value),
+    );
+}
+
 fn sanitize_usage_request_metadata_value(value: &Value) -> Value {
     match value {
         Value::String(text) => Value::String(truncate_usage_request_metadata_string(text)),
         _ if usage_request_metadata_within_limits(value) => value.clone(),
         _ => truncated_usage_request_metadata_value(value),
+    }
+}
+
+fn sanitize_usage_request_metadata_value_owned(value: Value) -> Value {
+    match value {
+        Value::String(text) => Value::String(truncate_usage_request_metadata_string_owned(text)),
+        _ if usage_request_metadata_within_limits(&value) => value,
+        _ => truncated_usage_request_metadata_value(&value),
     }
 }
 
@@ -132,6 +225,24 @@ fn truncate_usage_request_metadata_string(value: &str) -> String {
     }
 
     format!("{}{TRUNCATED_SUFFIX}", &value[..end])
+}
+
+fn trim_and_truncate_usage_request_metadata_string_owned(value: String) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.len() == value.len() {
+        return Some(truncate_usage_request_metadata_string_owned(value));
+    }
+    Some(truncate_usage_request_metadata_string(trimmed))
+}
+
+fn truncate_usage_request_metadata_string_owned(value: String) -> String {
+    if value.len() <= MAX_USAGE_REQUEST_METADATA_STRING_BYTES {
+        return value;
+    }
+    truncate_usage_request_metadata_string(value.as_str())
 }
 
 fn truncated_usage_request_metadata_value(value: &Value) -> Value {
@@ -217,7 +328,8 @@ mod tests {
 
     use super::{
         build_usage_request_metadata_seed, merge_usage_request_metadata,
-        sanitize_usage_request_metadata, MAX_USAGE_REQUEST_METADATA_BYTES,
+        merge_usage_request_metadata_owned, sanitize_usage_request_metadata,
+        sanitize_usage_request_metadata_ref, MAX_USAGE_REQUEST_METADATA_BYTES,
         MAX_USAGE_REQUEST_METADATA_DEPTH, MAX_USAGE_REQUEST_METADATA_NODES,
     };
 
@@ -362,5 +474,36 @@ mod tests {
         );
 
         assert_eq!(metadata, None);
+    }
+
+    #[test]
+    fn owned_merge_matches_filtered_merge_for_trusted_objects() {
+        let base = Some(json!({
+            "trace_id": "trace-1",
+            "provider_request_body_base64_bytes": 128
+        }));
+        let override_value = Some(json!({
+            "billing_snapshot_status": "complete",
+            "trace_id": "trace-2"
+        }));
+
+        assert_eq!(
+            merge_usage_request_metadata_owned(base.clone(), override_value.clone()),
+            merge_usage_request_metadata(base, override_value)
+        );
+    }
+
+    #[test]
+    fn borrowed_sanitize_matches_owned_sanitize() {
+        let value = json!({
+            "trace_id": "trace-1",
+            "billing_snapshot": {"status": "complete"},
+            "provider_name": "OpenAI"
+        });
+
+        assert_eq!(
+            sanitize_usage_request_metadata_ref(Some(&value)),
+            sanitize_usage_request_metadata(Some(value))
+        );
     }
 }

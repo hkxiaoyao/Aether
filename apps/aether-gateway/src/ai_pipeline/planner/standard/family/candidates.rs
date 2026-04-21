@@ -213,7 +213,7 @@ pub(super) async fn materialize_local_standard_candidate_attempts(
             skipped_candidate.extra_data = Some(
                 build_local_execution_candidate_contract_metadata_for_candidate(
                     &skipped_candidate.candidate,
-                    skipped_candidate.transport.as_ref(),
+                    skipped_candidate.transport_ref(),
                     provider_api_format.as_str(),
                     spec_metadata.api_format,
                     serde_json::Map::new(),

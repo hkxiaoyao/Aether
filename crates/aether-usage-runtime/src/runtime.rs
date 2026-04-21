@@ -12,8 +12,7 @@ use tracing::warn;
 use crate::executor::spawn_on_usage_background_runtime;
 use crate::{
     apply_usage_body_capture_policy_to_event, apply_usage_body_capture_policy_to_record,
-    build_pending_usage_record_from_seed, build_stream_terminal_usage_seed,
-    build_streaming_usage_record_from_seed, build_sync_terminal_usage_seed,
+    build_stream_terminal_usage_seed, build_sync_terminal_usage_seed,
     build_terminal_usage_event_from_seed, build_upsert_usage_record_from_event,
     build_usage_queue_worker, settle_usage_if_needed, LifecycleUsageSeed,
     StreamTerminalUsagePayloadSeed, SyncTerminalUsagePayloadSeed, TerminalUsageContextSeed,
@@ -74,17 +73,6 @@ pub struct UsageRuntime {
     config: UsageRuntimeConfig,
 }
 
-struct SyncTerminalUsageTaskInput {
-    context_seed: TerminalUsageContextSeed,
-    payload_seed: SyncTerminalUsagePayloadSeed,
-}
-
-struct StreamTerminalUsageTaskInput {
-    context_seed: TerminalUsageContextSeed,
-    payload_seed: StreamTerminalUsagePayloadSeed,
-    cancelled: bool,
-}
-
 impl Default for UsageRuntime {
     fn default() -> Self {
         Self::disabled()
@@ -126,7 +114,7 @@ impl UsageRuntime {
         Some(worker.spawn())
     }
 
-    pub fn record_pending<T>(&self, data: &T, seed: &LifecycleUsageSeed)
+    pub fn record_pending<T>(&self, data: &T, seed: LifecycleUsageSeed)
     where
         T: UsageRuntimeAccess + Clone + 'static,
     {
@@ -134,11 +122,10 @@ impl UsageRuntime {
             return;
         }
         let data = T::clone(data);
-        let seed = seed.clone();
         let request_id = seed.request_id.clone();
         spawn_on_usage_background_runtime(boxed_usage_task(async move {
             let now_unix_secs = now_unix_secs();
-            match build_pending_usage_record_offthread(&seed, now_unix_secs).await {
+            match build_pending_usage_record_offthread(seed, now_unix_secs).await {
                 Ok(mut record) => {
                     apply_body_capture_policy_to_record_from_data(&data, &mut record).await;
                     if let Err(err) = data.upsert_usage_record(record).await {
@@ -183,9 +170,9 @@ impl UsageRuntime {
         spawn_on_usage_background_runtime(boxed_usage_task(async move {
             let now_unix_secs = now_unix_secs();
             match build_streaming_usage_record_offthread(
-                &seed,
+                seed,
                 status_code,
-                telemetry.as_ref(),
+                telemetry,
                 now_unix_secs,
             )
             .await
@@ -218,8 +205,8 @@ impl UsageRuntime {
     pub fn record_sync_terminal<T>(
         &self,
         data: &T,
-        context_seed: &TerminalUsageContextSeed,
-        payload_seed: &SyncTerminalUsagePayloadSeed,
+        context_seed: TerminalUsageContextSeed,
+        payload_seed: SyncTerminalUsagePayloadSeed,
     ) where
         T: UsageRuntimeAccess + Clone + 'static,
     {
@@ -229,12 +216,8 @@ impl UsageRuntime {
         let runtime = self.clone();
         let data = T::clone(data);
         let request_id = context_seed.request_id.clone();
-        let input = Box::new(SyncTerminalUsageTaskInput {
-            context_seed: context_seed.clone(),
-            payload_seed: payload_seed.clone(),
-        });
         spawn_on_usage_background_runtime(boxed_usage_task(async move {
-            match build_sync_terminal_usage_event_offthread(input).await {
+            match build_sync_terminal_usage_event_offthread(context_seed, payload_seed).await {
                 Ok(mut event) => {
                     apply_body_capture_policy_from_data(&data, &mut event).await;
                     if let Err(err) = data.enrich_usage_event(&mut event).await {
@@ -264,8 +247,8 @@ impl UsageRuntime {
     pub fn record_stream_terminal<T>(
         &self,
         data: &T,
-        context_seed: &TerminalUsageContextSeed,
-        payload_seed: &StreamTerminalUsagePayloadSeed,
+        context_seed: TerminalUsageContextSeed,
+        payload_seed: StreamTerminalUsagePayloadSeed,
         cancelled: bool,
     ) where
         T: UsageRuntimeAccess + Clone + 'static,
@@ -276,13 +259,10 @@ impl UsageRuntime {
         let runtime = self.clone();
         let data = T::clone(data);
         let request_id = context_seed.request_id.clone();
-        let input = Box::new(StreamTerminalUsageTaskInput {
-            context_seed: context_seed.clone(),
-            payload_seed: payload_seed.clone(),
-            cancelled,
-        });
         spawn_on_usage_background_runtime(boxed_usage_task(async move {
-            match build_stream_terminal_usage_event_offthread(input).await {
+            match build_stream_terminal_usage_event_offthread(context_seed, payload_seed, cancelled)
+                .await
+            {
                 Ok(mut event) => {
                     apply_body_capture_policy_from_data(&data, &mut event).await;
                     if let Err(err) = data.enrich_usage_event(&mut event).await {
@@ -413,28 +393,27 @@ impl UsageRuntime {
 }
 
 async fn build_pending_usage_record_offthread(
-    seed: &LifecycleUsageSeed,
+    seed: LifecycleUsageSeed,
     now_unix_secs: u64,
 ) -> Result<UpsertUsageRecord, DataLayerError> {
-    let seed = seed.clone();
-    tokio::task::spawn_blocking(move || build_pending_usage_record_from_seed(&seed, now_unix_secs))
-        .await
-        .map_err(join_error_to_data_layer)?
+    tokio::task::spawn_blocking(move || {
+        crate::write::build_pending_usage_record_from_owned_seed(seed, now_unix_secs)
+    })
+    .await
+    .map_err(join_error_to_data_layer)?
 }
 
 async fn build_streaming_usage_record_offthread(
-    seed: &LifecycleUsageSeed,
+    seed: LifecycleUsageSeed,
     status_code: u16,
-    telemetry: Option<&ExecutionTelemetry>,
+    telemetry: Option<ExecutionTelemetry>,
     now_unix_secs: u64,
 ) -> Result<UpsertUsageRecord, DataLayerError> {
-    let seed = seed.clone();
-    let telemetry = telemetry.cloned();
     tokio::task::spawn_blocking(move || {
-        build_streaming_usage_record_from_seed(
-            &seed,
+        crate::write::build_streaming_usage_record_from_owned_seed(
+            seed,
             status_code,
-            telemetry.as_ref(),
+            telemetry,
             now_unix_secs,
         )
     })
@@ -443,12 +422,13 @@ async fn build_streaming_usage_record_offthread(
 }
 
 async fn build_sync_terminal_usage_event_offthread(
-    input: Box<SyncTerminalUsageTaskInput>,
+    context_seed: TerminalUsageContextSeed,
+    payload_seed: SyncTerminalUsagePayloadSeed,
 ) -> Result<UsageEvent, DataLayerError> {
     tokio::task::spawn_blocking(move || {
         build_terminal_usage_event_from_seed(build_sync_terminal_usage_seed(
-            input.context_seed,
-            input.payload_seed,
+            context_seed,
+            payload_seed,
         ))
     })
     .await
@@ -456,13 +436,15 @@ async fn build_sync_terminal_usage_event_offthread(
 }
 
 async fn build_stream_terminal_usage_event_offthread(
-    input: Box<StreamTerminalUsageTaskInput>,
+    context_seed: TerminalUsageContextSeed,
+    payload_seed: StreamTerminalUsagePayloadSeed,
+    cancelled: bool,
 ) -> Result<UsageEvent, DataLayerError> {
     tokio::task::spawn_blocking(move || {
         build_terminal_usage_event_from_seed(build_stream_terminal_usage_seed(
-            input.context_seed,
-            input.payload_seed,
-            input.cancelled,
+            context_seed,
+            payload_seed,
+            cancelled,
         ))
     })
     .await

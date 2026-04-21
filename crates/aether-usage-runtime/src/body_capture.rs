@@ -1,6 +1,9 @@
+use std::io::{self, Write};
+
 use aether_data_contracts::repository::usage::{
     UpsertUsageRecord, UsageBodyCaptureState, UsageBodyField,
 };
+use serde::Serialize;
 use serde_json::{json, Map, Value};
 
 use crate::event::UsageEvent;
@@ -74,6 +77,22 @@ impl<'a> UsageBodyCapturePayloadMut<'a> {
 #[derive(Debug, Clone, Copy)]
 pub struct UsageBodyCaptureEngine {
     policy: UsageBodyCapturePolicy,
+}
+
+#[derive(Default)]
+struct CountingWriter {
+    bytes: u64,
+}
+
+impl Write for CountingWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.bytes = self.bytes.saturating_add(buf.len() as u64);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -286,9 +305,7 @@ fn limit_usage_body_capture_value(
     value: Value,
     max_bytes: Option<usize>,
 ) -> LimitedUsageBodyCapture {
-    let source_bytes = serde_json::to_vec(&value)
-        .ok()
-        .map(|bytes| bytes.len() as u64);
+    let source_bytes = json_serialized_len(&value);
     let Some(limit) = max_bytes.filter(|value| *value > 0) else {
         return LimitedUsageBodyCapture {
             stored_bytes: source_bytes,
@@ -327,9 +344,7 @@ fn limit_usage_body_capture_value(
             "value_kind": usage_value_kind(&other),
         }),
     };
-    let stored_bytes = serde_json::to_vec(&truncated_value)
-        .ok()
-        .map(|bytes| bytes.len() as u64);
+    let stored_bytes = json_serialized_len(&truncated_value);
     LimitedUsageBodyCapture {
         value: truncated_value,
         source_bytes: Some(source_len),
@@ -340,13 +355,6 @@ fn limit_usage_body_capture_value(
 }
 
 fn truncate_usage_body_string(value: &str, max_bytes: usize) -> String {
-    if serde_json::to_vec(&Value::String(value.to_string()))
-        .ok()
-        .is_some_and(|bytes| bytes.len() <= max_bytes)
-    {
-        return value.to_string();
-    }
-
     let mut end = value.len();
     while end > 0 {
         while end > 0 && !value.is_char_boundary(end) {
@@ -354,10 +362,7 @@ fn truncate_usage_body_string(value: &str, max_bytes: usize) -> String {
         }
         let mut candidate = value[..end].to_string();
         candidate.push_str(TRUNCATED_BODY_STRING_SUFFIX);
-        if serde_json::to_vec(&Value::String(candidate.clone()))
-            .ok()
-            .is_some_and(|bytes| bytes.len() <= max_bytes)
-        {
+        if json_serialized_len(&candidate).is_some_and(|bytes| bytes <= max_bytes as u64) {
             return candidate;
         }
         end = value[..end]
@@ -379,27 +384,45 @@ fn truncate_usage_body_string(value: &str, max_bytes: usize) -> String {
     .to_string()
 }
 
+fn json_serialized_len<T: Serialize>(value: &T) -> Option<u64> {
+    let mut writer = CountingWriter::default();
+    serde_json::to_writer(&mut writer, value).ok()?;
+    Some(writer.bytes)
+}
+
 pub(crate) fn sync_usage_body_ref_metadata(
     metadata: &mut Option<Value>,
     field: UsageBodyField,
     body_ref: Option<&str>,
 ) {
+    let key = field.as_ref_key();
     let Some(body_ref) = body_ref.map(str::trim).filter(|value| !value.is_empty()) else {
-        if let Some(object) = metadata.as_mut().and_then(Value::as_object_mut) {
-            object.remove(field.as_ref_key());
+        let clear_metadata = match metadata.as_mut() {
+            Some(Value::Object(object)) => {
+                object.remove(key);
+                object.is_empty()
+            }
+            _ => false,
+        };
+        if clear_metadata {
+            *metadata = None;
         }
         return;
     };
+    if let Some(Value::Object(object)) = metadata.as_mut() {
+        if object.get(key).and_then(Value::as_str) == Some(body_ref) {
+            return;
+        }
+        object.insert(key.to_owned(), Value::String(body_ref.to_owned()));
+        return;
+    }
     let object = metadata
         .get_or_insert_with(|| Value::Object(Map::new()))
         .as_object_mut();
     let Some(object) = object else {
         return;
     };
-    object.insert(
-        field.as_ref_key().to_string(),
-        Value::String(body_ref.to_string()),
-    );
+    object.insert(key.to_owned(), Value::String(body_ref.to_owned()));
 }
 
 pub(crate) fn build_payload_body_capture_metadata(
@@ -408,36 +431,44 @@ pub(crate) fn build_payload_body_capture_metadata(
     provider_body_state: Option<UsageBodyCaptureState>,
     client_body_state: Option<UsageBodyCaptureState>,
 ) -> Option<Value> {
-    let mut metadata = Map::new();
-    if let Some(decoded_len) = provider_body_base64.and_then(decoded_base64_len_hint) {
+    let provider_decoded_len = provider_body_base64.and_then(decoded_base64_len_hint);
+    let client_decoded_len = client_body_base64.and_then(decoded_base64_len_hint);
+    let body_capture_capacity =
+        usize::from(provider_body_state.is_some()) + usize::from(client_body_state.is_some());
+    let mut metadata = Map::with_capacity(
+        usize::from(provider_decoded_len.is_some())
+            + usize::from(client_decoded_len.is_some())
+            + usize::from(body_capture_capacity > 0),
+    );
+    if let Some(decoded_len) = provider_decoded_len {
         metadata.insert(
             "provider_response_body_base64_bytes".to_string(),
             Value::Number(decoded_len.into()),
         );
     }
-    if let Some(decoded_len) = client_body_base64.and_then(decoded_base64_len_hint) {
+    if let Some(decoded_len) = client_decoded_len {
         metadata.insert(
             "client_response_body_base64_bytes".to_string(),
             Value::Number(decoded_len.into()),
         );
     }
 
-    let mut body_capture = Map::new();
-    append_body_capture_metadata_entry(
-        &mut body_capture,
-        "response",
-        provider_body_state,
-        provider_body_base64.and_then(decoded_base64_len_hint),
-        provider_body_base64.and_then(decoded_base64_len_hint),
-    );
-    append_body_capture_metadata_entry(
-        &mut body_capture,
-        "client_response",
-        client_body_state,
-        client_body_base64.and_then(decoded_base64_len_hint),
-        client_body_base64.and_then(decoded_base64_len_hint),
-    );
-    if !body_capture.is_empty() {
+    if body_capture_capacity > 0 {
+        let mut body_capture = Map::with_capacity(body_capture_capacity);
+        append_body_capture_metadata_entry(
+            &mut body_capture,
+            "response",
+            provider_body_state,
+            provider_decoded_len,
+            provider_decoded_len,
+        );
+        append_body_capture_metadata_entry(
+            &mut body_capture,
+            "client_response",
+            client_body_state,
+            client_decoded_len,
+            client_decoded_len,
+        );
         metadata.insert("body_capture".to_string(), Value::Object(body_capture));
     }
 
@@ -476,21 +507,29 @@ pub(crate) fn append_runtime_body_capture_metadata(
         input.provider_request_body_ref,
         input.provider_request_unavailable,
     );
-    upsert_body_capture_metadata_entry(metadata, "request", Some(states.request), None, None, None);
-    upsert_body_capture_metadata_entry(
-        metadata,
-        "provider_request",
-        Some(states.provider_request),
-        input.provider_request_source_bytes,
-        input.provider_request_source_bytes,
-        input.provider_request_unavailable_reason,
+    let Some(body_capture_object) = body_capture_object_mut(metadata, 2) else {
+        return;
+    };
+    body_capture_object.insert(
+        "request".to_string(),
+        build_body_capture_metadata_entry(states.request, None, None, None),
+    );
+    body_capture_object.insert(
+        "provider_request".to_string(),
+        build_body_capture_metadata_entry(
+            states.provider_request,
+            input.provider_request_source_bytes,
+            input.provider_request_source_bytes,
+            input.provider_request_unavailable_reason,
+        ),
     );
 }
 
 pub(crate) fn build_plan_body_capture_metadata(
     provider_request_body_base64: Option<&str>,
 ) -> Option<Value> {
-    let mut metadata = Map::new();
+    provider_request_body_base64?;
+    let mut metadata = Map::with_capacity(2);
     append_plan_body_capture_metadata(&mut metadata, provider_request_body_base64);
     (!metadata.is_empty()).then_some(Value::Object(metadata))
 }
@@ -507,13 +546,17 @@ pub(crate) fn append_plan_body_capture_metadata(
                 Value::Number(decoded_len.into()),
             );
         }
-        upsert_body_capture_metadata_entry(
-            metadata,
-            "provider_request",
-            Some(UsageBodyCaptureState::Unavailable),
-            decoded_len,
-            decoded_len,
-            Some("body_bytes_base64_only"),
+        let Some(body_capture_object) = body_capture_object_mut(metadata, 1) else {
+            return;
+        };
+        body_capture_object.insert(
+            "provider_request".to_string(),
+            build_body_capture_metadata_entry(
+                UsageBodyCaptureState::Unavailable,
+                decoded_len,
+                decoded_len,
+                Some("body_bytes_base64_only"),
+            ),
         );
     }
 }
@@ -528,58 +571,16 @@ fn append_body_capture_metadata_entry(
     let Some(state) = state else {
         return;
     };
-    let mut entry = Map::new();
-    entry.insert(
-        "state".to_string(),
-        Value::String(state.as_str().to_string()),
+    target.insert(
+        key.to_string(),
+        build_body_capture_metadata_entry(
+            state,
+            stored_bytes,
+            source_bytes,
+            matches!(state, UsageBodyCaptureState::Truncated)
+                .then_some("body_capture_limit_exceeded"),
+        ),
     );
-    if let Some(stored_bytes) = stored_bytes {
-        entry.insert("stored_bytes".to_string(), json!(stored_bytes));
-    }
-    if let Some(source_bytes) = source_bytes {
-        entry.insert("source_bytes".to_string(), json!(source_bytes));
-    }
-    if matches!(state, UsageBodyCaptureState::Truncated) {
-        entry.insert(
-            "reason".to_string(),
-            Value::String("body_capture_limit_exceeded".to_string()),
-        );
-    }
-    target.insert(key.to_string(), Value::Object(entry));
-}
-
-pub(crate) fn upsert_body_capture_metadata_entry(
-    metadata: &mut Map<String, Value>,
-    key: &str,
-    state: Option<UsageBodyCaptureState>,
-    stored_bytes: Option<u64>,
-    source_bytes: Option<u64>,
-    reason: Option<&str>,
-) {
-    let body_capture = metadata
-        .entry("body_capture".to_string())
-        .or_insert_with(|| Value::Object(Map::new()));
-    let Some(body_capture_object) = body_capture.as_object_mut() else {
-        return;
-    };
-    let Some(state) = state else {
-        return;
-    };
-    let mut entry = Map::new();
-    entry.insert(
-        "state".to_string(),
-        Value::String(state.as_str().to_string()),
-    );
-    if let Some(bytes) = stored_bytes {
-        entry.insert("stored_bytes".to_string(), json!(bytes));
-    }
-    if let Some(bytes) = source_bytes {
-        entry.insert("source_bytes".to_string(), json!(bytes));
-    }
-    if let Some(reason) = reason {
-        entry.insert("reason".to_string(), Value::String(reason.to_string()));
-    }
-    body_capture_object.insert(key.to_string(), Value::Object(entry));
 }
 
 fn upsert_body_capture_metadata_value_entry(
@@ -593,20 +594,61 @@ fn upsert_body_capture_metadata_value_entry(
     let Some(state) = state else {
         return;
     };
-    let metadata_object = metadata
-        .get_or_insert_with(|| Value::Object(Map::new()))
-        .as_object_mut();
-    let Some(metadata_object) = metadata_object else {
+    let Some(body_capture_object) = body_capture_value_object_mut(metadata, 1) else {
         return;
     };
-    upsert_body_capture_metadata_entry(
-        metadata_object,
-        key,
-        Some(state),
-        stored_bytes,
-        source_bytes,
-        reason,
+    body_capture_object.insert(
+        key.to_string(),
+        build_body_capture_metadata_entry(state, stored_bytes, source_bytes, reason),
     );
+}
+
+fn body_capture_object_mut(
+    metadata: &mut Map<String, Value>,
+    capacity: usize,
+) -> Option<&mut Map<String, Value>> {
+    let body_capture = metadata
+        .entry("body_capture".to_string())
+        .or_insert_with(|| Value::Object(Map::with_capacity(capacity)));
+    body_capture.as_object_mut()
+}
+
+fn body_capture_value_object_mut(
+    metadata: &mut Option<Value>,
+    capacity: usize,
+) -> Option<&mut Map<String, Value>> {
+    let metadata_object = metadata
+        .get_or_insert_with(|| Value::Object(Map::with_capacity(1)))
+        .as_object_mut();
+    let metadata_object = metadata_object?;
+    body_capture_object_mut(metadata_object, capacity)
+}
+
+fn build_body_capture_metadata_entry(
+    state: UsageBodyCaptureState,
+    stored_bytes: Option<u64>,
+    source_bytes: Option<u64>,
+    reason: Option<&str>,
+) -> Value {
+    let mut entry = Map::with_capacity(
+        1 + usize::from(stored_bytes.is_some())
+            + usize::from(source_bytes.is_some())
+            + usize::from(reason.is_some()),
+    );
+    entry.insert(
+        "state".to_string(),
+        Value::String(state.as_str().to_owned()),
+    );
+    if let Some(bytes) = stored_bytes {
+        entry.insert("stored_bytes".to_string(), json!(bytes));
+    }
+    if let Some(bytes) = source_bytes {
+        entry.insert("source_bytes".to_string(), json!(bytes));
+    }
+    if let Some(reason) = reason {
+        entry.insert("reason".to_string(), Value::String(reason.to_owned()));
+    }
+    Value::Object(entry)
 }
 
 pub(crate) fn decoded_base64_len_hint(body_base64: &str) -> Option<u64> {
@@ -642,9 +684,18 @@ pub(crate) fn decoded_base64_len_hint(body_base64: &str) -> Option<u64> {
 }
 
 fn sanitize_usage_body_ref(value: Option<String>) -> Option<String> {
-    value
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
+    value.and_then(trim_owned_non_empty_string)
+}
+
+fn trim_owned_non_empty_string(value: String) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.len() == value.len() {
+        return Some(value);
+    }
+    Some(trimmed.to_string())
 }
 
 fn usage_value_kind(value: &Value) -> &'static str {
@@ -655,5 +706,124 @@ fn usage_value_kind(value: &Value) -> &'static str {
         Value::String(_) => "string",
         Value::Array(_) => "array",
         Value::Object(_) => "object",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        build_plan_body_capture_metadata, sync_usage_body_ref_metadata,
+        trim_owned_non_empty_string, truncate_usage_body_string,
+        upsert_body_capture_metadata_value_entry,
+    };
+    use aether_data_contracts::repository::usage::UsageBodyCaptureState;
+    use aether_data_contracts::repository::usage::UsageBodyField;
+    use serde_json::{Map, Value};
+
+    #[test]
+    fn build_plan_body_capture_metadata_returns_none_without_base64_body() {
+        assert!(build_plan_body_capture_metadata(None).is_none());
+    }
+
+    #[test]
+    fn trim_owned_non_empty_string_preserves_clean_values_and_drops_blank_ones() {
+        assert_eq!(
+            trim_owned_non_empty_string("blob://body-ref-1".to_string()),
+            Some("blob://body-ref-1".to_string()),
+        );
+        assert_eq!(
+            trim_owned_non_empty_string("  blob://body-ref-1  ".to_string()),
+            Some("blob://body-ref-1".to_string()),
+        );
+        assert_eq!(trim_owned_non_empty_string("   ".to_string()), None);
+    }
+
+    #[test]
+    fn upsert_body_capture_metadata_value_entry_ignores_none_state() {
+        let mut metadata = Some(Value::Object(Map::<String, Value>::new()));
+        upsert_body_capture_metadata_value_entry(&mut metadata, "response", None, None, None, None);
+        assert_eq!(metadata, Some(Value::Object(Map::new())));
+    }
+
+    #[test]
+    fn upsert_body_capture_metadata_value_entry_preserves_existing_metadata_fields() {
+        let mut metadata = Some(Value::Object(Map::from_iter([(
+            "request_body_ref".to_string(),
+            Value::String("blob://body-ref-1".to_string()),
+        )])));
+
+        upsert_body_capture_metadata_value_entry(
+            &mut metadata,
+            "response",
+            Some(UsageBodyCaptureState::Reference),
+            None,
+            None,
+            None,
+        );
+
+        assert_eq!(
+            metadata,
+            Some(Value::Object(Map::from_iter([
+                (
+                    "request_body_ref".to_string(),
+                    Value::String("blob://body-ref-1".to_string()),
+                ),
+                (
+                    "body_capture".to_string(),
+                    Value::Object(Map::from_iter([(
+                        "response".to_string(),
+                        Value::Object(Map::from_iter([(
+                            "state".to_string(),
+                            Value::String("reference".to_string()),
+                        )])),
+                    )])),
+                ),
+            ]))),
+        );
+    }
+
+    #[test]
+    fn sync_usage_body_ref_metadata_clears_empty_metadata_object() {
+        let mut metadata = Some(Value::Object(Map::from_iter([(
+            "request_body_ref".to_string(),
+            Value::String("blob://body-ref-1".to_string()),
+        )])));
+
+        sync_usage_body_ref_metadata(&mut metadata, UsageBodyField::RequestBody, None);
+
+        assert!(metadata.is_none());
+    }
+
+    #[test]
+    fn sync_usage_body_ref_metadata_preserves_existing_ref_value() {
+        let mut metadata = Some(Value::Object(Map::from_iter([(
+            "request_body_ref".to_string(),
+            Value::String("blob://body-ref-1".to_string()),
+        )])));
+
+        sync_usage_body_ref_metadata(
+            &mut metadata,
+            UsageBodyField::RequestBody,
+            Some("blob://body-ref-1"),
+        );
+
+        assert_eq!(
+            metadata,
+            Some(Value::Object(Map::from_iter([(
+                "request_body_ref".to_string(),
+                Value::String("blob://body-ref-1".to_string()),
+            )]))),
+        );
+    }
+
+    #[test]
+    fn truncate_usage_body_string_respects_json_byte_limit() {
+        let limit = 32usize;
+        let truncated = truncate_usage_body_string("x".repeat(256).as_str(), limit);
+
+        assert!(truncated.ends_with("...[truncated]"));
+        assert!(serde_json::to_vec(&truncated)
+            .ok()
+            .is_some_and(|bytes| bytes.len() <= limit));
     }
 }

@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use tracing::warn;
 
 use aether_scheduler_core::SchedulerMinimalCandidateSelectionCandidate;
@@ -11,7 +13,7 @@ use super::pool_scheduler::apply_local_execution_pool_scheduler;
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct EligibleLocalExecutionCandidate {
     pub(crate) candidate: SchedulerMinimalCandidateSelectionCandidate,
-    pub(crate) transport: GatewayProviderTransportSnapshot,
+    pub(crate) transport: Arc<GatewayProviderTransportSnapshot>,
     pub(crate) provider_api_format: String,
     pub(crate) orchestration: LocalExecutionCandidateMetadata,
 }
@@ -20,8 +22,14 @@ pub(crate) struct EligibleLocalExecutionCandidate {
 pub(crate) struct SkippedLocalExecutionCandidate {
     pub(crate) candidate: SchedulerMinimalCandidateSelectionCandidate,
     pub(crate) skip_reason: &'static str,
-    pub(crate) transport: Option<GatewayProviderTransportSnapshot>,
+    pub(crate) transport: Option<Arc<GatewayProviderTransportSnapshot>>,
     pub(crate) extra_data: Option<serde_json::Value>,
+}
+
+impl SkippedLocalExecutionCandidate {
+    pub(crate) fn transport_ref(&self) -> Option<&GatewayProviderTransportSnapshot> {
+        self.transport.as_deref()
+    }
 }
 
 pub(crate) async fn filter_and_rank_local_execution_candidates(
@@ -35,17 +43,18 @@ pub(crate) async fn filter_and_rank_local_execution_candidates(
     Vec<EligibleLocalExecutionCandidate>,
     Vec<SkippedLocalExecutionCandidate>,
 ) {
+    let requested_model = requested_model.trim();
     filter_and_rank_local_execution_candidates_with_gate(
         state,
         candidates,
         client_api_format,
         required_capabilities,
         sticky_session_token,
-        |candidate, transport| {
+        |candidate, transport, normalized_client_api_format| {
             current_local_execution_candidate_skip_reason_with_transport(
                 candidate,
                 transport,
-                client_api_format,
+                normalized_client_api_format,
                 requested_model,
             )
         },
@@ -64,13 +73,14 @@ pub(crate) async fn filter_and_rank_local_execution_candidates_without_transport
     Vec<EligibleLocalExecutionCandidate>,
     Vec<SkippedLocalExecutionCandidate>,
 ) {
+    let requested_model = requested_model.map(str::trim);
     filter_and_rank_local_execution_candidates_with_gate(
         state,
         candidates,
         client_api_format,
         required_capabilities,
         sticky_session_token,
-        |candidate, transport| {
+        |candidate, transport, _normalized_client_api_format| {
             current_local_execution_candidate_common_skip_reason_with_transport(
                 candidate,
                 transport,
@@ -96,10 +106,12 @@ where
     F: Fn(
         &SchedulerMinimalCandidateSelectionCandidate,
         &GatewayProviderTransportSnapshot,
+        &str,
     ) -> Option<&'static str>,
 {
+    let normalized_client_api_format = client_api_format.trim().to_ascii_lowercase();
     let mut selectable = Vec::with_capacity(candidates.len());
-    let mut skipped = Vec::new();
+    let mut skipped = Vec::with_capacity(candidates.len());
 
     for candidate in candidates {
         let Some(transport) = read_candidate_transport_snapshot(state, &candidate).await else {
@@ -111,11 +123,18 @@ where
             });
             continue;
         };
-        if candidate_is_ineligible_due_to_disabled_format_conversion(&transport, client_api_format)
-        {
+        let transport = Arc::new(transport);
+        if candidate_is_ineligible_due_to_disabled_format_conversion(
+            transport.as_ref(),
+            normalized_client_api_format.as_str(),
+        ) {
             continue;
         }
-        match runtime_skip_reason(&candidate, &transport) {
+        match runtime_skip_reason(
+            &candidate,
+            transport.as_ref(),
+            normalized_client_api_format.as_str(),
+        ) {
             Some(skip_reason) => skipped.push(SkippedLocalExecutionCandidate {
                 candidate,
                 skip_reason,
@@ -134,7 +153,7 @@ where
     let ranked = rank_eligible_local_execution_candidates(
         state,
         selectable,
-        client_api_format,
+        normalized_client_api_format.as_str(),
         required_capabilities,
     )
     .await;
@@ -146,28 +165,27 @@ where
 }
 
 pub(crate) fn extract_pool_sticky_session_token(body_json: &serde_json::Value) -> Option<String> {
-    fn non_empty_string(value: Option<&serde_json::Value>) -> Option<String> {
+    fn non_empty_str(value: Option<&serde_json::Value>) -> Option<&str> {
         value
             .and_then(serde_json::Value::as_str)
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .map(ToOwned::to_owned)
     }
 
     let object = body_json.as_object()?;
 
-    non_empty_string(object.get("prompt_cache_key"))
-        .or_else(|| non_empty_string(object.get("conversation_id")))
-        .or_else(|| non_empty_string(object.get("conversationId")))
-        .or_else(|| non_empty_string(object.get("session_id")))
-        .or_else(|| non_empty_string(object.get("sessionId")))
+    non_empty_str(object.get("prompt_cache_key"))
+        .or_else(|| non_empty_str(object.get("conversation_id")))
+        .or_else(|| non_empty_str(object.get("conversationId")))
+        .or_else(|| non_empty_str(object.get("session_id")))
+        .or_else(|| non_empty_str(object.get("sessionId")))
         .or_else(|| {
             object
                 .get("metadata")
                 .and_then(serde_json::Value::as_object)
                 .and_then(|metadata| {
-                    non_empty_string(metadata.get("session_id"))
-                        .or_else(|| non_empty_string(metadata.get("conversation_id")))
+                    non_empty_str(metadata.get("session_id"))
+                        .or_else(|| non_empty_str(metadata.get("conversation_id")))
                 })
         })
         .or_else(|| {
@@ -175,10 +193,11 @@ pub(crate) fn extract_pool_sticky_session_token(body_json: &serde_json::Value) -
                 .get("conversationState")
                 .and_then(serde_json::Value::as_object)
                 .and_then(|state| {
-                    non_empty_string(state.get("conversationId"))
-                        .or_else(|| non_empty_string(state.get("sessionId")))
+                    non_empty_str(state.get("conversationId"))
+                        .or_else(|| non_empty_str(state.get("sessionId")))
                 })
         })
+        .map(ToOwned::to_owned)
 }
 
 fn current_local_execution_candidate_common_skip_reason_with_transport(
@@ -198,13 +217,16 @@ fn current_local_execution_candidate_common_skip_reason_with_transport(
         return Some("key_inactive");
     }
 
-    let candidate_api_format = candidate.endpoint_api_format.trim().to_ascii_lowercase();
-    let endpoint_api_format = transport.endpoint.api_format.trim().to_ascii_lowercase();
-    if endpoint_api_format != candidate_api_format {
+    let endpoint_api_format = transport.endpoint.api_format.trim();
+    if !candidate
+        .endpoint_api_format
+        .trim()
+        .eq_ignore_ascii_case(endpoint_api_format)
+    {
         return Some("endpoint_api_format_changed");
     }
 
-    if !transport_key_supports_api_format(transport, endpoint_api_format.as_str()) {
+    if !transport_key_supports_api_format(transport, endpoint_api_format) {
         return Some("key_api_format_disabled");
     }
     if !transport_key_allows_candidate_model(transport, requested_model, candidate) {
@@ -216,34 +238,33 @@ fn current_local_execution_candidate_common_skip_reason_with_transport(
 
 fn candidate_is_ineligible_due_to_disabled_format_conversion(
     transport: &GatewayProviderTransportSnapshot,
-    client_api_format: &str,
+    normalized_client_api_format: &str,
 ) -> bool {
-    let endpoint_api_format = transport.endpoint.api_format.trim().to_ascii_lowercase();
-    let client_api_format = client_api_format.trim().to_ascii_lowercase();
-    if client_api_format == endpoint_api_format {
+    let endpoint_api_format = transport.endpoint.api_format.trim();
+    if endpoint_api_format.eq_ignore_ascii_case(normalized_client_api_format) {
         return false;
     }
 
     crate::ai_pipeline::conversion::request_conversion_kind(
-        client_api_format.as_str(),
-        endpoint_api_format.as_str(),
+        normalized_client_api_format,
+        endpoint_api_format,
     )
     .is_some()
         && crate::ai_pipeline::conversion::request_conversion_requires_enable_flag(
-            client_api_format.as_str(),
-            endpoint_api_format.as_str(),
+            normalized_client_api_format,
+            endpoint_api_format,
         )
         && !crate::ai_pipeline::conversion::request_conversion_enabled_for_transport(
             transport,
-            client_api_format.as_str(),
-            endpoint_api_format.as_str(),
+            normalized_client_api_format,
+            endpoint_api_format,
         )
 }
 
 fn current_local_execution_candidate_skip_reason_with_transport(
     candidate: &SchedulerMinimalCandidateSelectionCandidate,
     transport: &GatewayProviderTransportSnapshot,
-    client_api_format: &str,
+    normalized_client_api_format: &str,
     requested_model: &str,
 ) -> Option<&'static str> {
     if let Some(skip_reason) = current_local_execution_candidate_common_skip_reason_with_transport(
@@ -254,16 +275,15 @@ fn current_local_execution_candidate_skip_reason_with_transport(
         return Some(skip_reason);
     }
 
-    let endpoint_api_format = transport.endpoint.api_format.trim().to_ascii_lowercase();
-    let client_api_format = client_api_format.trim().to_ascii_lowercase();
-    if client_api_format == endpoint_api_format {
+    let endpoint_api_format = transport.endpoint.api_format.trim();
+    if endpoint_api_format.eq_ignore_ascii_case(normalized_client_api_format) {
         return None;
     }
 
     if !crate::ai_pipeline::conversion::request_pair_allowed_for_transport(
         transport,
-        client_api_format.as_str(),
-        endpoint_api_format.as_str(),
+        normalized_client_api_format,
+        endpoint_api_format,
     ) {
         return Some("transport_unsupported");
     }
@@ -292,15 +312,6 @@ fn transport_key_allows_candidate_model(
         return true;
     };
 
-    let allowed_models = allowed_models
-        .iter()
-        .map(|value| value.trim())
-        .filter(|value| !value.is_empty())
-        .collect::<Vec<_>>();
-    if allowed_models.is_empty() {
-        return false;
-    }
-
     let requested_model = requested_model.trim();
     let global_model_name = candidate.global_model_name.trim();
     let selected_provider_model_name = candidate.selected_provider_model_name.trim();
@@ -310,12 +321,20 @@ fn transport_key_allows_candidate_model(
         .map(str::trim)
         .filter(|value| !value.is_empty());
 
-    allowed_models.iter().any(|allowed_model| {
-        *allowed_model == requested_model
-            || *allowed_model == global_model_name
-            || *allowed_model == selected_provider_model_name
-            || mapping_matched_model.is_some_and(|value| value == *allowed_model)
-    })
+    for allowed_model in allowed_models.iter().map(String::as_str).map(str::trim) {
+        if allowed_model.is_empty() {
+            continue;
+        }
+        if allowed_model == requested_model
+            || allowed_model == global_model_name
+            || allowed_model == selected_provider_model_name
+            || mapping_matched_model.is_some_and(|value| value == allowed_model)
+        {
+            return true;
+        }
+    }
+
+    false
 }
 
 pub(crate) async fn read_candidate_transport_snapshot(

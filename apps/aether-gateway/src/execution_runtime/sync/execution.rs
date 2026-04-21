@@ -23,7 +23,6 @@ use crate::api::response::{
     attach_control_metadata_headers, build_client_response, build_client_response_from_parts,
 };
 use crate::clock::current_unix_ms as current_request_candidate_unix_ms;
-use crate::constants::{CONTROL_CANDIDATE_ID_HEADER, CONTROL_REQUEST_ID_HEADER};
 use crate::control::GatewayControlDecision;
 #[cfg(test)]
 use crate::execution_runtime::remote_compat::post_sync_plan_to_remote_execution_runtime;
@@ -57,7 +56,8 @@ use policy::decode_execution_result_body;
 pub(crate) use response::{
     maybe_build_local_sync_finalize_response, maybe_build_local_video_error_response,
     maybe_build_local_video_success_outcome, resolve_local_sync_error_background_report_kind,
-    resolve_local_sync_success_background_report_kind, LocalVideoSyncSuccessOutcome,
+    resolve_local_sync_success_background_report_kind, LocalVideoSyncSuccessBuild,
+    LocalVideoSyncSuccessOutcome,
 };
 
 struct ImplicitSyncFinalizeOutcome {
@@ -75,7 +75,65 @@ fn record_sync_terminal_usage(
     let payload_seed = build_sync_terminal_usage_payload_seed(payload);
     state
         .usage_runtime
-        .record_sync_terminal(state.data.as_ref(), &context_seed, &payload_seed);
+        .record_sync_terminal(state.data.as_ref(), context_seed, payload_seed);
+}
+
+fn build_sync_report_payload(
+    trace_id: &str,
+    report_kind: String,
+    report_context: Option<serde_json::Value>,
+    status_code: u16,
+    headers: BTreeMap<String, String>,
+    body_json: Option<serde_json::Value>,
+    body_base64: Option<String>,
+    telemetry: Option<ExecutionTelemetry>,
+) -> GatewaySyncReportRequest {
+    GatewaySyncReportRequest {
+        trace_id: trace_id.to_string(),
+        report_kind,
+        report_context,
+        status_code,
+        headers,
+        body_json,
+        client_body_json: None,
+        body_base64,
+        telemetry,
+    }
+}
+
+async fn apply_sync_success_effects(
+    state: &AppState,
+    plan: &ExecutionPlan,
+    report_context: Option<&serde_json::Value>,
+    payload: &GatewaySyncReportRequest,
+) {
+    apply_local_execution_effect(
+        state,
+        LocalExecutionEffectContext {
+            plan,
+            report_context,
+        },
+        LocalExecutionEffect::HealthSuccess(LocalHealthSuccessEffect),
+    )
+    .await;
+    apply_local_execution_effect(
+        state,
+        LocalExecutionEffectContext {
+            plan,
+            report_context,
+        },
+        LocalExecutionEffect::AdaptiveSuccess(LocalAdaptiveSuccessEffect),
+    )
+    .await;
+    apply_local_execution_effect(
+        state,
+        LocalExecutionEffectContext {
+            plan,
+            report_context,
+        },
+        LocalExecutionEffect::PoolSuccessSync { payload },
+    )
+    .await;
 }
 
 #[cfg(test)]
@@ -112,7 +170,7 @@ pub(crate) async fn execute_execution_runtime_sync(
     let lifecycle_seed = build_lifecycle_usage_seed(&plan, report_context.as_ref());
     state
         .usage_runtime
-        .record_pending(state.data.as_ref(), &lifecycle_seed);
+        .record_pending(state.data.as_ref(), lifecycle_seed);
     record_local_request_candidate_status(
         state,
         &plan,
@@ -129,11 +187,8 @@ pub(crate) async fn execute_execution_runtime_sync(
     )
     .await;
     #[cfg(not(test))]
-    let result = {
-        match DirectSyncExecutionRuntime::new()
-            .execute_sync(plan.clone())
-            .await
-        {
+    let mut result = {
+        match DirectSyncExecutionRuntime::new().execute_sync(&plan).await {
             Ok(result) => result,
             Err(err) => {
                 warn!(
@@ -171,7 +226,7 @@ pub(crate) async fn execute_execution_runtime_sync(
         }
     };
     #[cfg(test)]
-    let result = {
+    let mut result = {
         if let Some(override_fn) = state.execution_runtime_sync_override.as_ref() {
             match (override_fn.0)(&plan) {
                 Ok(result) => result,
@@ -215,10 +270,7 @@ pub(crate) async fn execute_execution_runtime_sync(
             .trim()
             .is_empty()
         {
-            match DirectSyncExecutionRuntime::new()
-                .execute_sync(plan.clone())
-                .await
-            {
+            match DirectSyncExecutionRuntime::new().execute_sync(&plan).await {
                 Ok(result) => result,
                 Err(err) => {
                     warn!(
@@ -287,8 +339,9 @@ pub(crate) async fn execute_execution_runtime_sync(
         .telemetry
         .as_ref()
         .and_then(|telemetry| telemetry.elapsed_ms);
-    let mut headers = result.headers.clone();
-    let (body_bytes, body_json, body_base64) = decode_execution_result_body(&result, &mut headers)?;
+    let mut headers = std::mem::take(&mut result.headers);
+    let (body_bytes, body_json, body_base64) =
+        decode_execution_result_body(result.body.take(), &mut headers)?;
     let local_failover_response_text = local_failover_response_text(
         body_json.as_ref(),
         &body_bytes,
@@ -403,38 +456,26 @@ pub(crate) async fn execute_execution_runtime_sync(
         );
         return Ok(None);
     }
-    let request_id = (!result.request_id.trim().is_empty())
-        .then_some(result.request_id.as_str())
-        .or(Some(plan_request_id));
-    let request_id_for_log = short_request_id(request_id.unwrap_or("-"));
-    let candidate_id = result.candidate_id.as_deref().or(plan_candidate_id);
+    let status_code = result.status_code;
     let has_body_bytes = body_base64.is_some();
     let explicit_finalize = should_finalize_sync_response(report_kind.as_deref());
     let mapped_error_finalize_kind =
         resolve_core_sync_error_finalize_report_kind(plan_kind, &result, body_json.as_ref());
-    let implicit_finalize = if explicit_finalize || mapped_error_finalize_kind.is_some() {
-        None
-    } else {
+    let implicit_finalize = if !explicit_finalize && mapped_error_finalize_kind.is_none() {
         maybe_build_implicit_sync_finalize_outcome(
             trace_id,
             decision,
             plan_kind,
-            report_context.clone(),
-            result.status_code,
-            headers.clone(),
-            body_json.clone(),
-            body_base64.clone(),
-            result.telemetry.clone(),
+            &report_context,
+            status_code,
+            &headers,
+            &body_json,
+            &body_base64,
+            &result.telemetry,
         )?
-    };
-    let finalize_report_kind = if explicit_finalize {
-        report_kind.clone()
-    } else if let Some(implicit_finalize) = implicit_finalize.as_ref() {
-        Some(implicit_finalize.payload.report_kind.clone())
     } else {
-        mapped_error_finalize_kind.clone()
+        None
     };
-
     if !matches!(
         local_failover_analysis.decision,
         LocalFailoverDecision::StopLocalFailover
@@ -486,91 +527,83 @@ pub(crate) async fn execute_execution_runtime_sync(
     )
     .await;
 
-    let base_usage_payload = GatewaySyncReportRequest {
-        trace_id: trace_id.to_string(),
-        report_kind: finalize_report_kind
-            .clone()
-            .or_else(|| report_kind.clone())
-            .unwrap_or_default(),
-        report_context: report_context.clone(),
-        status_code: result.status_code,
-        headers: headers.clone(),
-        body_json: body_json.clone(),
-        client_body_json: None,
-        body_base64: body_base64.clone(),
-        telemetry: result.telemetry.clone(),
-    };
-    if result.status_code < 400 {
-        apply_local_execution_effect(
+    let request_id_owned = result.request_id;
+    let candidate_id_owned = result.candidate_id;
+    let request_id = (!request_id_owned.trim().is_empty())
+        .then_some(request_id_owned.as_str())
+        .or(Some(plan_request_id));
+    let request_id_for_log = short_request_id(request_id.unwrap_or("-"));
+    let candidate_id = candidate_id_owned.as_deref().or(plan_candidate_id);
+    let report_context = report_context;
+    let headers = headers;
+    let body_json = body_json;
+    let telemetry = result.telemetry;
+
+    if let Some(implicit_finalize) = implicit_finalize {
+        let usage_payload = implicit_finalize
+            .outcome
+            .background_report
+            .as_ref()
+            .unwrap_or(&implicit_finalize.payload);
+        apply_sync_success_effects(
             state,
-            LocalExecutionEffectContext {
-                plan: &plan,
-                report_context: report_context.as_ref(),
-            },
-            LocalExecutionEffect::HealthSuccess(LocalHealthSuccessEffect),
+            &plan,
+            implicit_finalize.payload.report_context.as_ref(),
+            usage_payload,
         )
         .await;
-        apply_local_execution_effect(
+        record_sync_terminal_usage(
             state,
-            LocalExecutionEffectContext {
-                plan: &plan,
-                report_context: report_context.as_ref(),
-            },
-            LocalExecutionEffect::AdaptiveSuccess(LocalAdaptiveSuccessEffect),
-        )
-        .await;
-        apply_local_execution_effect(
-            state,
-            LocalExecutionEffectContext {
-                plan: &plan,
-                report_context: report_context.as_ref(),
-            },
-            LocalExecutionEffect::PoolSuccessSync {
-                payload: &base_usage_payload,
-            },
-        )
-        .await;
+            &plan,
+            implicit_finalize.payload.report_context.as_ref(),
+            usage_payload,
+        );
+        if let Some(report_payload) = implicit_finalize.outcome.background_report {
+            spawn_sync_report(state.clone(), report_payload);
+        } else {
+            warn!(
+                event_name = "local_core_finalize_missing_success_report_mapping",
+                log_type = "event",
+                trace_id = %trace_id,
+                report_kind = %implicit_finalize.payload.report_kind,
+                "gateway implicit local core finalize produced response without background success report mapping"
+            );
+        }
+        return Ok(Some(attach_control_metadata_headers(
+            implicit_finalize.outcome.response,
+            request_id,
+            candidate_id,
+        )?));
     }
 
-    if let Some(finalize_report_kind) = finalize_report_kind {
-        if let Some(implicit_finalize) = implicit_finalize {
-            let usage_payload = implicit_finalize
-                .outcome
-                .background_report
-                .as_ref()
-                .unwrap_or(&implicit_finalize.payload);
-            record_sync_terminal_usage(state, &plan, report_context.as_ref(), usage_payload);
-            if let Some(report_payload) = implicit_finalize.outcome.background_report {
-                spawn_sync_report(state.clone(), trace_id.to_string(), report_payload);
-            } else {
-                warn!(
-                    event_name = "local_core_finalize_missing_success_report_mapping",
-                    log_type = "event",
-                    trace_id = %trace_id,
-                    report_kind = %implicit_finalize.payload.report_kind,
-                    "gateway implicit local core finalize produced response without background success report mapping"
-                );
-            }
-            return Ok(Some(attach_control_metadata_headers(
-                implicit_finalize.outcome.response,
-                request_id,
-                candidate_id,
-            )?));
-        }
+    let finalize_report_kind = if explicit_finalize {
+        report_kind.clone()
+    } else {
+        mapped_error_finalize_kind
+    };
 
-        let payload = GatewaySyncReportRequest {
-            trace_id: trace_id.to_string(),
-            report_kind: finalize_report_kind,
+    if let Some(finalize_report_kind) = finalize_report_kind {
+        let mut payload = build_sync_report_payload(
+            trace_id,
+            finalize_report_kind,
             report_context,
-            status_code: result.status_code,
-            headers: headers.clone(),
-            body_json: body_json.clone(),
-            client_body_json: None,
-            body_base64: body_base64.clone(),
-            telemetry: result.telemetry.clone(),
-        };
+            status_code,
+            headers,
+            body_json,
+            body_base64,
+            telemetry,
+        );
         if let Some(outcome) = maybe_build_sync_finalize_outcome(trace_id, decision, &payload)? {
             let usage_payload = outcome.background_report.as_ref().unwrap_or(&payload);
+            if status_code < 400 {
+                apply_sync_success_effects(
+                    state,
+                    &plan,
+                    payload.report_context.as_ref(),
+                    usage_payload,
+                )
+                .await;
+            }
             record_sync_terminal_usage(
                 state,
                 &plan,
@@ -578,7 +611,7 @@ pub(crate) async fn execute_execution_runtime_sync(
                 usage_payload,
             );
             if let Some(report_payload) = outcome.background_report {
-                spawn_sync_report(state.clone(), trace_id.to_string(), report_payload);
+                spawn_sync_report(state.clone(), report_payload);
             } else {
                 warn!(
                     event_name = "local_core_finalize_missing_success_report_mapping",
@@ -594,55 +627,62 @@ pub(crate) async fn execute_execution_runtime_sync(
                 candidate_id,
             )?));
         }
-        if let Some(outcome) = maybe_build_local_video_success_outcome(
+        let mut payload = match maybe_build_local_video_success_outcome(
             trace_id,
             decision,
-            &payload,
+            payload,
             &state.video_tasks,
             &plan,
         )? {
-            record_sync_terminal_usage(
-                state,
-                &plan,
-                payload.report_context.as_ref(),
-                &outcome.report_payload,
-            );
-            if let Some(snapshot) = outcome.local_task_snapshot.clone() {
-                state.video_tasks.record_snapshot(snapshot.clone());
-                let _ = state.upsert_video_task_snapshot(&snapshot).await?;
-            }
-            match outcome.report_mode {
-                VideoTaskSyncReportMode::InlineSync => {
-                    submit_sync_report(state, trace_id, outcome.report_payload).await?;
+            LocalVideoSyncSuccessBuild::Handled(outcome) => {
+                let LocalVideoSyncSuccessOutcome {
+                    response,
+                    report_payload,
+                    original_report_context,
+                    report_mode,
+                    local_task_snapshot,
+                } = outcome;
+                apply_sync_success_effects(
+                    state,
+                    &plan,
+                    original_report_context.as_ref(),
+                    &report_payload,
+                )
+                .await;
+                record_sync_terminal_usage(
+                    state,
+                    &plan,
+                    original_report_context.as_ref(),
+                    &report_payload,
+                );
+                if let Some(snapshot) = local_task_snapshot {
+                    let _ = state.upsert_video_task_snapshot(&snapshot).await?;
+                    state.video_tasks.record_snapshot(snapshot);
                 }
-                VideoTaskSyncReportMode::Background => {
-                    spawn_sync_report(state.clone(), trace_id.to_string(), outcome.report_payload);
+                match report_mode {
+                    VideoTaskSyncReportMode::InlineSync => {
+                        submit_sync_report(state, report_payload).await?;
+                    }
+                    VideoTaskSyncReportMode::Background => {
+                        spawn_sync_report(state.clone(), report_payload);
+                    }
                 }
+                return Ok(Some(attach_control_metadata_headers(
+                    response,
+                    request_id,
+                    candidate_id,
+                )?));
             }
-            return Ok(Some(attach_control_metadata_headers(
-                outcome.response,
-                request_id,
-                candidate_id,
-            )?));
-        }
+            LocalVideoSyncSuccessBuild::NotHandled(payload) => payload,
+        };
         if let Some(response) =
             maybe_build_local_sync_finalize_response(trace_id, decision, &payload)?
         {
-            let usage_payload = if let Some(success_report_kind) =
-                resolve_local_sync_success_background_report_kind(payload.report_kind.as_str())
-            {
-                let mut report_payload = payload.clone();
-                report_payload.report_kind = success_report_kind.to_string();
-                report_payload
-            } else {
-                payload.clone()
-            };
-            record_sync_terminal_usage(
-                state,
-                &plan,
-                payload.report_context.as_ref(),
-                &usage_payload,
-            );
+            let background_success_report_kind =
+                resolve_local_sync_success_background_report_kind(payload.report_kind.as_str());
+            apply_sync_success_effects(state, &plan, payload.report_context.as_ref(), &payload)
+                .await;
+            record_sync_terminal_usage(state, &plan, payload.report_context.as_ref(), &payload);
             state
                 .video_tasks
                 .apply_finalize_mutation(request_path, payload.report_kind.as_str());
@@ -652,12 +692,11 @@ pub(crate) async fn execute_execution_runtime_sync(
             {
                 let _ = state.upsert_video_task_snapshot(&snapshot).await?;
             }
-            if let Some(success_report_kind) =
-                resolve_local_sync_success_background_report_kind(payload.report_kind.as_str())
-            {
-                let mut report_payload = usage_payload;
-                report_payload.report_kind = success_report_kind.to_string();
-                spawn_sync_report(state.clone(), trace_id.to_string(), report_payload);
+            if let Some(success_report_kind) = background_success_report_kind {
+                payload.report_kind = success_report_kind.to_string();
+            }
+            if background_success_report_kind.is_some() {
+                spawn_sync_report(state.clone(), payload);
             } else {
                 warn!(
                     event_name = "local_video_finalize_missing_success_report_mapping",
@@ -678,27 +717,14 @@ pub(crate) async fn execute_execution_runtime_sync(
         if let Some(response) =
             maybe_build_local_video_error_response(trace_id, decision, &payload)?
         {
-            let usage_payload = if let Some(error_report_kind) =
-                resolve_local_sync_error_background_report_kind(payload.report_kind.as_str())
-            {
-                let mut report_payload = payload.clone();
-                report_payload.report_kind = error_report_kind.to_string();
-                report_payload
-            } else {
-                payload.clone()
-            };
-            record_sync_terminal_usage(
-                state,
-                &plan,
-                payload.report_context.as_ref(),
-                &usage_payload,
-            );
-            if let Some(error_report_kind) =
-                resolve_local_sync_error_background_report_kind(payload.report_kind.as_str())
-            {
-                let mut report_payload = usage_payload;
-                report_payload.report_kind = error_report_kind.to_string();
-                spawn_sync_report(state.clone(), trace_id.to_string(), report_payload);
+            let background_error_report_kind =
+                resolve_local_sync_error_background_report_kind(payload.report_kind.as_str());
+            if let Some(error_report_kind) = background_error_report_kind {
+                payload.report_kind = error_report_kind.to_string();
+            }
+            record_sync_terminal_usage(state, &plan, payload.report_context.as_ref(), &payload);
+            if background_error_report_kind.is_some() {
+                spawn_sync_report(state.clone(), payload);
             } else {
                 warn!(
                     event_name = "local_video_finalize_missing_error_report_mapping",
@@ -726,49 +752,47 @@ pub(crate) async fn execute_execution_runtime_sync(
         )?));
     }
 
-    record_sync_terminal_usage(state, &plan, report_context.as_ref(), &base_usage_payload);
-    if let Some(report_kind) = report_kind {
-        let report = GatewaySyncReportRequest {
-            trace_id: trace_id.to_string(),
-            report_kind,
-            report_context,
-            status_code: result.status_code,
-            headers: headers.clone(),
-            body_json: body_json.clone(),
-            client_body_json: None,
-            body_base64: body_base64.clone(),
-            telemetry: result.telemetry.clone(),
-        };
-        spawn_sync_report(state.clone(), trace_id.to_string(), report);
-    }
-
-    let request_id_header: Option<&str> = request_id
-        .map(str::trim)
-        .filter(|value: &&str| !value.is_empty());
-    if let Some(request_id) = request_id_header {
-        headers.insert(
-            CONTROL_REQUEST_ID_HEADER.to_string(),
-            request_id.to_string(),
-        );
-    }
-
-    let candidate_id_header: Option<&str> = candidate_id
-        .map(str::trim)
-        .filter(|value: &&str| !value.is_empty());
-    if let Some(candidate_id) = candidate_id_header {
-        headers.insert(
-            CONTROL_CANDIDATE_ID_HEADER.to_string(),
-            candidate_id.to_string(),
-        );
-    }
-
-    Ok(Some(build_client_response_from_parts(
-        result.status_code,
-        &headers,
-        Body::from(body_bytes),
+    let usage_payload = build_sync_report_payload(
         trace_id,
-        Some(decision),
-    )?))
+        report_kind.unwrap_or_default(),
+        report_context,
+        status_code,
+        headers,
+        body_json,
+        body_base64,
+        telemetry,
+    );
+    if status_code < 400 {
+        apply_sync_success_effects(
+            state,
+            &plan,
+            usage_payload.report_context.as_ref(),
+            &usage_payload,
+        )
+        .await;
+    }
+    record_sync_terminal_usage(
+        state,
+        &plan,
+        usage_payload.report_context.as_ref(),
+        &usage_payload,
+    );
+    let response = attach_control_metadata_headers(
+        build_client_response_from_parts(
+            status_code,
+            &usage_payload.headers,
+            Body::from(body_bytes),
+            trace_id,
+            Some(decision),
+        )?,
+        request_id,
+        candidate_id,
+    )?;
+    if !usage_payload.report_kind.trim().is_empty() {
+        spawn_sync_report(state.clone(), usage_payload);
+    }
+
+    Ok(Some(response))
 }
 
 #[allow(clippy::too_many_arguments)] // mirrors sync execution context
@@ -776,12 +800,12 @@ fn maybe_build_implicit_sync_finalize_outcome(
     trace_id: &str,
     decision: &GatewayControlDecision,
     plan_kind: &str,
-    report_context: Option<serde_json::Value>,
+    report_context: &Option<serde_json::Value>,
     status_code: u16,
-    headers: BTreeMap<String, String>,
-    body_json: Option<serde_json::Value>,
-    body_base64: Option<String>,
-    telemetry: Option<ExecutionTelemetry>,
+    headers: &BTreeMap<String, String>,
+    body_json: &Option<serde_json::Value>,
+    body_base64: &Option<String>,
+    telemetry: &Option<ExecutionTelemetry>,
 ) -> Result<Option<ImplicitSyncFinalizeOutcome>, GatewayError> {
     if status_code >= 400 || body_json.is_some() || body_base64.is_none() {
         return Ok(None);
@@ -794,13 +818,13 @@ fn maybe_build_implicit_sync_finalize_outcome(
     let payload = GatewaySyncReportRequest {
         trace_id: trace_id.to_string(),
         report_kind: report_kind.to_string(),
-        report_context,
+        report_context: report_context.clone(),
         status_code,
-        headers,
-        body_json,
+        headers: headers.clone(),
+        body_json: body_json.clone(),
         client_body_json: None,
-        body_base64,
-        telemetry,
+        body_base64: body_base64.clone(),
+        telemetry: telemetry.clone(),
     };
     let Some(outcome) = maybe_build_sync_finalize_outcome(trace_id, decision, &payload)? else {
         return Ok(None);

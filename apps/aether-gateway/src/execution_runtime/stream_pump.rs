@@ -274,7 +274,7 @@ fn format_error_chain(err: &(dyn std::error::Error + 'static)) -> String {
 fn observe_stream_chunk(
     observer: &mut StreamingStandardTerminalObserver,
     report_context: &Value,
-    private_stream_normalizer: Option<&mut crate::ai_pipeline::ProviderPrivateStreamNormalizer>,
+    private_stream_normalizer: Option<&mut crate::ai_pipeline::ProviderPrivateStreamNormalizer<'_>>,
     observer_buffered: &mut Vec<u8>,
     chunk: &[u8],
 ) {
@@ -298,7 +298,7 @@ fn observe_stream_chunk(
 fn finalize_stream_terminal_summary(
     observer: &mut StreamingStandardTerminalObserver,
     report_context: &Value,
-    private_stream_normalizer: Option<&mut crate::ai_pipeline::ProviderPrivateStreamNormalizer>,
+    private_stream_normalizer: Option<&mut crate::ai_pipeline::ProviderPrivateStreamNormalizer<'_>>,
     observer_buffered: &mut Vec<u8>,
 ) -> Option<ExecutionStreamTerminalSummary> {
     if let Some(normalizer) = private_stream_normalizer {
@@ -412,7 +412,7 @@ mod tests {
         });
 
         let execution = DirectSyncExecutionRuntime::new()
-            .execute_stream(ExecutionPlan {
+            .execute_stream(&ExecutionPlan {
                 request_id: "req-stream-ttfb-1".into(),
                 candidate_id: Some("cand-stream-ttfb-1".into()),
                 provider_name: Some("openai".into()),
@@ -499,7 +499,7 @@ mod tests {
 
         let runtime = DirectSyncExecutionRuntime::new();
         let execution = runtime
-            .execute_stream(ExecutionPlan {
+            .execute_stream(&ExecutionPlan {
                 request_id: "req-telemetry-order".to_string(),
                 candidate_id: Some("cand-telemetry-order".to_string()),
                 provider_name: Some("OpenAI".to_string()),

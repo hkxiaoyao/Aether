@@ -40,3 +40,7 @@ pub(super) fn augment_sync_report_context(
     )
     .map_err(|err| GatewayError::Internal(err.to_string()))
 }
+
+pub(super) fn take_non_empty_string(value: &mut Option<String>) -> Option<String> {
+    value.take().filter(|value| !value.trim().is_empty())
+}

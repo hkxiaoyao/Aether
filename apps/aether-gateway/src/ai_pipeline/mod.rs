@@ -8,7 +8,7 @@ pub(crate) mod transport;
 
 use axum::body::Body;
 use axum::http::{Response, Uri};
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::{usage::GatewaySyncReportRequest, AppState, GatewayError};
 
@@ -62,8 +62,18 @@ pub(crate) fn collect_control_headers(
     crate::headers::collect_control_headers(headers)
 }
 
-pub(crate) fn build_report_context_original_request_echo(body_json: &Value) -> Option<Value> {
-    (!body_json.is_null()).then(|| body_json.clone())
+pub(crate) fn build_report_context_original_request_echo(
+    body_json: Option<&Value>,
+    body_bytes_b64: Option<&str>,
+) -> Option<Value> {
+    if let Some(body_bytes_b64) = body_bytes_b64
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Some(json!({ "body_bytes_b64": body_bytes_b64 }));
+    }
+
+    body_json.filter(|body| !body.is_null()).cloned()
 }
 
 pub(crate) fn is_json_request(headers: &http::HeaderMap) -> bool {
@@ -138,10 +148,21 @@ mod tests {
             "body_bytes_b64": "aGVsbG8=",
         });
 
-        let echo =
-            build_report_context_original_request_echo(&body).expect("echo should be produced");
+        let echo = build_report_context_original_request_echo(Some(&body), None)
+            .expect("echo should be produced");
 
         assert_eq!(echo, body);
+    }
+
+    #[test]
+    fn build_report_context_original_request_echo_prefers_binary_body_bytes() {
+        let echo = build_report_context_original_request_echo(
+            Some(&json!({"ignored": true})),
+            Some("aGVsbG8="),
+        )
+        .expect("echo should be produced");
+
+        assert_eq!(echo, json!({"body_bytes_b64": "aGVsbG8="}));
     }
 
     #[test]

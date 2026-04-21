@@ -61,28 +61,28 @@ fn log_dropped_report(
 
 pub(crate) async fn submit_sync_report(
     state: &AppState,
-    trace_id: &str,
-    payload: GatewaySyncReportRequest,
+    mut payload: GatewaySyncReportRequest,
 ) -> Result<(), GatewayError> {
+    let original_report_context = payload.report_context.take();
     if let Some(report_context) =
-        resolve_locally_actionable_report_context(state, payload.report_context.as_ref()).await
+        resolve_locally_actionable_report_context(state, original_report_context.as_ref()).await
     {
-        let mut local_payload = payload.clone();
-        local_payload.report_context = Some(report_context);
+        payload.report_context = Some(report_context);
         if should_handle_local_sync_report(
-            local_payload.report_context.as_ref(),
-            local_payload.report_kind.as_str(),
+            payload.report_context.as_ref(),
+            payload.report_kind.as_str(),
         ) {
-            handle_local_sync_report(state, &local_payload).await;
+            handle_local_sync_report(state, &payload).await;
             log_local_report_handled(
-                trace_id,
-                &local_payload.report_kind,
+                payload.trace_id.as_str(),
+                &payload.report_kind,
                 "sync",
-                local_payload.report_context.as_ref(),
+                payload.report_context.as_ref(),
             );
             return Ok(());
         }
     }
+    payload.report_context = original_report_context;
 
     if should_handle_local_sync_report(
         payload.report_context.as_ref(),
@@ -90,7 +90,7 @@ pub(crate) async fn submit_sync_report(
     ) {
         handle_local_sync_report(state, &payload).await;
         log_local_report_handled(
-            trace_id,
+            payload.trace_id.as_str(),
             &payload.report_kind,
             "sync",
             payload.report_context.as_ref(),
@@ -99,7 +99,7 @@ pub(crate) async fn submit_sync_report(
     }
 
     log_dropped_report(
-        trace_id,
+        payload.trace_id.as_str(),
         &payload.report_kind,
         "sync",
         payload.report_context.as_ref(),
@@ -107,15 +107,12 @@ pub(crate) async fn submit_sync_report(
     Ok(())
 }
 
-pub(crate) fn spawn_sync_report(
-    state: AppState,
-    trace_id: String,
-    payload: GatewaySyncReportRequest,
-) {
+pub(crate) fn spawn_sync_report(state: AppState, payload: GatewaySyncReportRequest) {
     let report_request_id_for_log =
         short_request_id(report_request_id(payload.report_context.as_ref()));
     tokio::spawn(async move {
-        if let Err(err) = submit_sync_report(&state, &trace_id, payload).await {
+        let trace_id = payload.trace_id.clone();
+        if let Err(err) = submit_sync_report(&state, payload).await {
             warn!(
                 event_name = "execution_report_submit_failed",
                 log_type = "ops",
@@ -131,39 +128,28 @@ pub(crate) fn spawn_sync_report(
 
 pub(crate) async fn submit_stream_report(
     state: &AppState,
-    trace_id: &str,
-    payload: GatewayStreamReportRequest,
+    mut payload: GatewayStreamReportRequest,
 ) -> Result<(), GatewayError> {
+    let original_report_context = payload.report_context.take();
     if let Some(report_context) =
-        resolve_locally_actionable_report_context(state, payload.report_context.as_ref()).await
+        resolve_locally_actionable_report_context(state, original_report_context.as_ref()).await
     {
-        let local_payload = GatewayStreamReportRequest {
-            trace_id: payload.trace_id.clone(),
-            report_kind: payload.report_kind.clone(),
-            report_context: Some(report_context),
-            status_code: payload.status_code,
-            headers: payload.headers.clone(),
-            provider_body_base64: payload.provider_body_base64.clone(),
-            provider_body_state: payload.provider_body_state,
-            client_body_base64: payload.client_body_base64.clone(),
-            client_body_state: payload.client_body_state,
-            terminal_summary: payload.terminal_summary.clone(),
-            telemetry: payload.telemetry.clone(),
-        };
+        payload.report_context = Some(report_context);
         if should_handle_local_stream_report(
-            local_payload.report_context.as_ref(),
-            local_payload.report_kind.as_str(),
+            payload.report_context.as_ref(),
+            payload.report_kind.as_str(),
         ) {
-            handle_local_stream_report(state, &local_payload).await;
+            handle_local_stream_report(state, &payload).await;
             log_local_report_handled(
-                trace_id,
-                &local_payload.report_kind,
+                payload.trace_id.as_str(),
+                &payload.report_kind,
                 "stream",
-                local_payload.report_context.as_ref(),
+                payload.report_context.as_ref(),
             );
             return Ok(());
         }
     }
+    payload.report_context = original_report_context;
 
     if should_handle_local_stream_report(
         payload.report_context.as_ref(),
@@ -171,7 +157,7 @@ pub(crate) async fn submit_stream_report(
     ) {
         handle_local_stream_report(state, &payload).await;
         log_local_report_handled(
-            trace_id,
+            payload.trace_id.as_str(),
             &payload.report_kind,
             "stream",
             payload.report_context.as_ref(),
@@ -180,7 +166,7 @@ pub(crate) async fn submit_stream_report(
     }
 
     log_dropped_report(
-        trace_id,
+        payload.trace_id.as_str(),
         &payload.report_kind,
         "stream",
         payload.report_context.as_ref(),
@@ -545,7 +531,6 @@ mod tests {
 
         submit_sync_report(
             &state,
-            "trace-reporting-sync-123",
             GatewaySyncReportRequest {
                 trace_id: "trace-reporting-sync-123".to_string(),
                 report_kind: "openai_chat_sync_success".to_string(),
@@ -586,7 +571,6 @@ mod tests {
 
         submit_sync_report(
             &state,
-            "trace-reporting-sync-null-1",
             GatewaySyncReportRequest {
                 trace_id: "trace-reporting-sync-null-1".to_string(),
                 report_kind: "claude_cli_sync_success".to_string(),
@@ -629,7 +613,6 @@ mod tests {
 
         submit_stream_report(
             &state,
-            "trace-reporting-stream-123",
             GatewayStreamReportRequest {
                 trace_id: "trace-reporting-stream-123".to_string(),
                 report_kind: "openai_chat_stream_success".to_string(),
@@ -682,7 +665,6 @@ mod tests {
 
         submit_sync_report(
             &state,
-            "trace-codex-reporting-sync",
             GatewaySyncReportRequest {
                 trace_id: "trace-codex-reporting-sync".to_string(),
                 report_kind: "openai_cli_sync_success".to_string(),
@@ -746,7 +728,6 @@ mod tests {
 
         submit_stream_report(
             &state,
-            "trace-codex-reporting-stream",
             GatewayStreamReportRequest {
                 trace_id: "trace-codex-reporting-stream".to_string(),
                 report_kind: "openai_cli_stream_success".to_string(),
@@ -812,7 +793,6 @@ mod tests {
 
         submit_sync_report(
             &state,
-            "trace-gemini-files-store-123",
             GatewaySyncReportRequest {
                 trace_id: "trace-gemini-files-store-123".to_string(),
                 report_kind: "gemini_files_store_mapping".to_string(),
@@ -883,7 +863,6 @@ mod tests {
 
         submit_sync_report(
             &state,
-            "trace-gemini-files-delete-123",
             GatewaySyncReportRequest {
                 trace_id: "trace-gemini-files-delete-123".to_string(),
                 report_kind: "gemini_files_delete_mapping".to_string(),
@@ -926,7 +905,6 @@ mod tests {
 
         submit_sync_report(
             &state,
-            "trace-reporting-video-delete-123",
             GatewaySyncReportRequest {
                 trace_id: "trace-reporting-video-delete-123".to_string(),
                 report_kind: "openai_video_delete_sync_success".to_string(),
@@ -991,7 +969,6 @@ mod tests {
 
         submit_sync_report(
             &state,
-            "trace-openai-video-reporting-123",
             GatewaySyncReportRequest {
                 trace_id: "trace-openai-video-reporting-123".to_string(),
                 report_kind: "openai_video_create_sync_success".to_string(),
@@ -1053,7 +1030,6 @@ mod tests {
 
         submit_sync_report(
             &state,
-            "trace-gemini-video-reporting-123",
             GatewaySyncReportRequest {
                 trace_id: "trace-gemini-video-reporting-123".to_string(),
                 report_kind: "gemini_video_create_sync_success".to_string(),
@@ -1103,7 +1079,6 @@ mod tests {
 
         submit_sync_report(
             &state,
-            "trace-openai-video-task-id-123",
             GatewaySyncReportRequest {
                 trace_id: "trace-openai-video-task-id-123".to_string(),
                 report_kind: "openai_video_cancel_sync_success".to_string(),
@@ -1206,7 +1181,6 @@ mod tests {
 
         submit_sync_report(
             &state,
-            "trace-gemini-video-external-id-123",
             GatewaySyncReportRequest {
                 trace_id: "trace-gemini-video-external-id-123".to_string(),
                 report_kind: "gemini_video_cancel_sync_success".to_string(),

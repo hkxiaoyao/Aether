@@ -545,7 +545,7 @@ pub(crate) async fn submit_local_core_error_or_sync_finalize(
     {
         let mut report_payload = payload.clone();
         report_payload.report_kind = error_report_kind;
-        spawn_sync_report(state.clone(), trace_id.to_string(), report_payload);
+        spawn_sync_report(state.clone(), report_payload);
     } else {
         warn!(
             event_name = "local_core_finalize_missing_error_report_mapping",

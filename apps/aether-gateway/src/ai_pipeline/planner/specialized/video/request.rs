@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use serde_json::Value;
 
@@ -26,7 +27,7 @@ use super::support::{
 use super::{LocalVideoCreateFamily, LocalVideoCreateSpec};
 
 pub(super) struct LocalVideoCreateCandidatePayloadParts {
-    pub(super) transport: GatewayProviderTransportSnapshot,
+    pub(super) transport: Arc<GatewayProviderTransportSnapshot>,
     pub(super) auth_header: String,
     pub(super) auth_value: String,
     pub(super) mapped_model: String,
@@ -168,7 +169,7 @@ pub(super) async fn resolve_local_video_create_candidate_payload_parts(
     }
 
     Some(LocalVideoCreateCandidatePayloadParts {
-        transport: transport.clone(),
+        transport: Arc::clone(transport),
         auth_header,
         auth_value,
         mapped_model,

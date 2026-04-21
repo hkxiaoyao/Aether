@@ -406,7 +406,7 @@
                 v-for="key in keyPage.keys"
                 :key="key.key_id"
                 class="border-b border-border/40 last:border-b-0 hover:bg-muted/30 transition-colors"
-                :class="getRowClass(key)"
+                :class="keyUiStateMap[key.key_id]?.rowClass || ''"
               >
                 <TableCell
                   class="py-3"
@@ -469,7 +469,7 @@
                           size="icon"
                           class="h-4 w-4 shrink-0"
                           :disabled="refreshingOAuthKeyId === key.key_id"
-                          :title="getOAuthRefreshButtonTitle(key)"
+                          :title="keyUiStateMap[key.key_id]?.oauthRefreshButtonTitle || ''"
                           @click.stop="handleRefreshOAuth(key)"
                         >
                           <RefreshCw
@@ -478,33 +478,33 @@
                           />
                         </Button>
                         <span
-                          v-if="getVisibleOAuthState(key)"
+                          v-if="keyUiStateMap[key.key_id]?.visibleOAuthState"
                           class="text-[10px]"
                           :class="{
-                            'text-destructive': getVisibleOAuthState(key)?.isInvalid || getVisibleOAuthState(key)?.isExpired,
-                            'text-warning': getVisibleOAuthState(key)?.isExpiringSoon && !getVisibleOAuthState(key)?.isExpired && !getVisibleOAuthState(key)?.isInvalid,
-                            'text-muted-foreground': !getVisibleOAuthState(key)?.isExpired && !getVisibleOAuthState(key)?.isExpiringSoon && !getVisibleOAuthState(key)?.isInvalid
+                            'text-destructive': keyUiStateMap[key.key_id]?.visibleOAuthState?.isInvalid || keyUiStateMap[key.key_id]?.visibleOAuthState?.isExpired,
+                            'text-warning': keyUiStateMap[key.key_id]?.visibleOAuthState?.isExpiringSoon && !keyUiStateMap[key.key_id]?.visibleOAuthState?.isExpired && !keyUiStateMap[key.key_id]?.visibleOAuthState?.isInvalid,
+                            'text-muted-foreground': !keyUiStateMap[key.key_id]?.visibleOAuthState?.isExpired && !keyUiStateMap[key.key_id]?.visibleOAuthState?.isExpiringSoon && !keyUiStateMap[key.key_id]?.visibleOAuthState?.isInvalid
                           }"
-                          :title="getOAuthStatusTitle(key)"
+                          :title="keyUiStateMap[key.key_id]?.oauthStatusTitle || ''"
                         >
-                          {{ getVisibleOAuthState(key)?.text }}
+                          {{ keyUiStateMap[key.key_id]?.visibleOAuthState?.text }}
                         </span>
                       </template>
                       <Badge
                         v-if="key.oauth_plan_type"
                         variant="outline"
                         class="text-[9px] px-1 py-0 h-4 shrink-0"
-                        :class="getOAuthPlanTypeClass(key.oauth_plan_type)"
+                        :class="keyUiStateMap[key.key_id]?.planClass || ''"
                       >
-                        {{ formatOAuthPlanType(key.oauth_plan_type) }}
+                        {{ keyUiStateMap[key.key_id]?.planLabel }}
                       </Badge>
                       <Badge
-                        v-if="getOAuthOrgBadge(key)"
+                        v-if="keyUiStateMap[key.key_id]?.oauthOrgBadge"
                         variant="secondary"
                         class="text-[9px] px-1 py-0 h-4 shrink-0"
-                        :title="getOAuthOrgBadge(key)?.title"
+                        :title="keyUiStateMap[key.key_id]?.oauthOrgBadge?.title"
                       >
-                        {{ getOAuthOrgBadge(key)?.label }}
+                        {{ keyUiStateMap[key.key_id]?.oauthOrgBadge?.label }}
                       </Badge>
                     </div>
                   </div>
@@ -546,10 +546,10 @@
                     </div>
                   </div>
                   <span
-                    v-else-if="getQuotaFallbackText(key)"
-                    :class="getQuotaTextClass(getQuotaFallbackText(key) || '')"
+                    v-else-if="keyUiStateMap[key.key_id]?.quotaFallbackText"
+                    :class="keyUiStateMap[key.key_id]?.quotaTextClass || ''"
                   >
-                    {{ getQuotaFallbackText(key) }}
+                    {{ keyUiStateMap[key.key_id]?.quotaFallbackText }}
                   </span>
                   <span
                     v-else
@@ -580,16 +580,16 @@
                 </TableCell>
                 <TableCell class="py-3 text-center">
                   <span class="text-[10px] text-muted-foreground whitespace-nowrap">
-                    {{ key.last_used_at ? formatRelativeTime(key.last_used_at) : '-' }}
+                    {{ keyUiStateMap[key.key_id]?.lastUsedRelative || '-' }}
                   </span>
                 </TableCell>
                 <TableCell class="py-3 text-center">
                   <Badge
-                    :variant="getSchedulingBadgeVariant(key)"
+                    :variant="keyUiStateMap[key.key_id]?.schedulingBadgeVariant || 'default'"
                     class="text-[10px]"
-                    :title="getSchedulingTitle(key)"
+                    :title="keyUiStateMap[key.key_id]?.schedulingTitle || ''"
                   >
-                    {{ getSchedulingBadgeLabel(key) }}
+                    {{ keyUiStateMap[key.key_id]?.schedulingBadgeLabel }}
                   </Badge>
                 </TableCell>
                 <TableCell class="py-3 px-2 align-middle">
@@ -705,7 +705,7 @@
             v-for="key in keyPage.keys"
             :key="key.key_id"
             class="p-4 sm:p-5 hover:bg-muted/30 transition-colors"
-            :class="getRowClass(key)"
+            :class="keyUiStateMap[key.key_id]?.rowClass || ''"
           >
             <div class="space-y-3">
               <div class="text-sm font-medium truncate">
@@ -714,11 +714,11 @@
 
               <div class="flex flex-wrap items-center gap-1.5">
                 <Badge
-                  :variant="getSchedulingBadgeVariant(key)"
+                  :variant="keyUiStateMap[key.key_id]?.schedulingBadgeVariant || 'default'"
                   class="text-[10px] shrink-0"
-                  :title="getSchedulingTitle(key)"
+                  :title="keyUiStateMap[key.key_id]?.schedulingTitle || ''"
                 >
-                  {{ getSchedulingBadgeLabel(key) }}
+                  {{ keyUiStateMap[key.key_id]?.schedulingBadgeLabel }}
                 </Badge>
                 <span
                   v-if="key.cooldown_ttl_seconds"
@@ -727,7 +727,7 @@
                   冷却 {{ formatTTL(key.cooldown_ttl_seconds) }}
                 </span>
                 <template
-                  v-for="item in getMobileTagItems(key)"
+                  v-for="item in keyUiStateMap[key.key_id]?.mobileTagItems || []"
                   :key="`${key.key_id}-${item.key}`"
                 >
                   <button
@@ -744,7 +744,7 @@
                     v-else-if="item.key === 'plan'"
                     variant="outline"
                     class="text-[9px] px-1 py-0 h-4 shrink-0"
-                    :class="key.oauth_plan_type ? getOAuthPlanTypeClass(key.oauth_plan_type) : ''"
+                    :class="keyUiStateMap[key.key_id]?.planClass || ''"
                   >
                     {{ item.label }}
                   </Badge>
@@ -752,7 +752,7 @@
                     v-else-if="item.key === 'org'"
                     variant="secondary"
                     class="text-[9px] px-1 py-0 h-4 shrink-0"
-                    :title="getOAuthOrgBadge(key)?.title"
+                    :title="keyUiStateMap[key.key_id]?.oauthOrgBadge?.title"
                   >
                     {{ item.label }}
                   </Badge>
@@ -775,7 +775,7 @@
                   <span class="mx-1.5 text-muted-foreground/40">|</span>
                   <span class="font-medium text-foreground/90">费用:{{ formatStatUsd(key.total_cost_usd) }}</span>
                   <span class="mx-1.5 text-muted-foreground/40">|</span>
-                  <span class="font-medium text-foreground/90">最后使用:{{ key.last_used_at ? formatRelativeTime(key.last_used_at) : '-' }}</span>
+                  <span class="font-medium text-foreground/90">最后使用:{{ keyUiStateMap[key.key_id]?.lastUsedRelative || '-' }}</span>
                 </div>
               </div>
 
@@ -819,10 +819,10 @@
                   </div>
                 </div>
                 <div
-                  v-else-if="getQuotaFallbackText(key)"
-                  :class="getQuotaTextClass(getQuotaFallbackText(key) || '')"
+                  v-else-if="keyUiStateMap[key.key_id]?.quotaFallbackText"
+                  :class="keyUiStateMap[key.key_id]?.quotaTextClass || ''"
                 >
-                  {{ getQuotaFallbackText(key) }}
+                  {{ keyUiStateMap[key.key_id]?.quotaFallbackText }}
                 </div>
                 <div
                   v-else
@@ -834,7 +834,7 @@
 
               <div class="flex items-center gap-0.5">
                 <div
-                  v-for="actionId in getMobileActionIds(key)"
+                  v-for="actionId in keyUiStateMap[key.key_id]?.mobileActionIds || []"
                   :key="`${key.key_id}-${actionId}`"
                   class="min-w-0 flex-1 flex justify-center"
                 >
@@ -864,7 +864,7 @@
                     size="icon"
                     class="h-7 w-7 shrink-0"
                     :disabled="refreshingOAuthKeyId === key.key_id"
-                    :title="getOAuthRefreshButtonTitle(key)"
+                    :title="keyUiStateMap[key.key_id]?.oauthRefreshButtonTitle || ''"
                     @click.stop="handleRefreshOAuth(key)"
                   >
                     <RefreshCw
@@ -1626,11 +1626,65 @@ interface QuotaProgressItem {
   updatedAtSeconds?: number | null
 }
 
+type PoolKeyUiState = {
+  rowClass: string
+  schedulingBadgeLabel: string
+  schedulingBadgeVariant: PoolStatusVariant
+  schedulingTitle: string
+  oauthOrgBadge: ReturnType<typeof getOAuthOrgBadge>
+  visibleOAuthState: ReturnType<typeof getOAuthStatusDisplay>
+  oauthStatusTitle: string
+  oauthRefreshButtonTitle: string
+  planLabel: string
+  planClass: string
+  quotaFallbackText: string | null
+  quotaTextClass: string
+  lastUsedRelative: string
+  mobileTagItems: PoolMobileTagItem[]
+  mobileActionIds: PoolMobileActionId[]
+}
+
 const quotaProgressMap = computed<Record<string, QuotaProgressItem[]>>(() => {
   const map: Record<string, QuotaProgressItem[]> = {}
   for (const key of keyPage.value.keys) {
     map[key.key_id] = parseQuotaProgressItems(key)
   }
+  return map
+})
+
+const keyUiStateMap = computed<Record<string, PoolKeyUiState>>(() => {
+  const map: Record<string, PoolKeyUiState> = {}
+
+  for (const key of keyPage.value.keys) {
+    const visibleOAuthState = getVisibleOAuthState(key)
+    const oauthOrgBadge = getOAuthOrgBadge(key)
+    const quotaFallbackText = getQuotaFallbackText(key)
+    const canRefreshToken = canRefreshOAuthCredential(key)
+
+    map[key.key_id] = {
+      rowClass: getRowClass(key),
+      schedulingBadgeLabel: getSchedulingBadgeLabel(key),
+      schedulingBadgeVariant: getSchedulingBadgeVariant(key),
+      schedulingTitle: getSchedulingTitle(key),
+      oauthOrgBadge,
+      visibleOAuthState,
+      oauthStatusTitle: visibleOAuthState ? getOAuthStatusTitle(key) : '',
+      oauthRefreshButtonTitle: canRefreshToken ? getOAuthRefreshButtonTitle(key) : '',
+      planLabel: key.oauth_plan_type ? formatOAuthPlanType(key.oauth_plan_type) : '',
+      planClass: key.oauth_plan_type ? getOAuthPlanTypeClass(key.oauth_plan_type) : '',
+      quotaFallbackText,
+      quotaTextClass: quotaFallbackText ? getQuotaTextClass(quotaFallbackText) : '',
+      lastUsedRelative: key.last_used_at ? formatRelativeTime(key.last_used_at) : '-',
+      mobileTagItems: getMobileTagItems(key),
+      mobileActionIds: splitPoolMobileActions({
+        canDownloadOrCopy: true,
+        canRefreshToken,
+        canClearCooldown: Boolean(key.cooldown_reason),
+        hasProxy: true,
+      }).primary,
+    }
+  }
+
   return map
 })
 
@@ -2504,15 +2558,6 @@ function getMobileTagItems(key: PoolKeyDetail): PoolMobileTagItem[] {
     orgLabel: orgBadge?.label ?? null,
     proxyLabel: key.proxy?.node_id ? '独立代理' : null,
   })
-}
-
-function getMobileActionIds(key: PoolKeyDetail): PoolMobileActionId[] {
-  return splitPoolMobileActions({
-    canDownloadOrCopy: true,
-    canRefreshToken: canRefreshOAuthCredential(key),
-    canClearCooldown: Boolean(key.cooldown_reason),
-    hasProxy: true,
-  }).primary
 }
 
 function getMobileTagClass(item: PoolMobileTagItem): string {

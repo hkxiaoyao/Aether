@@ -6,5 +6,6 @@ pub(crate) use execution::execute_execution_runtime_sync;
 pub(crate) use execution::{
     maybe_build_local_sync_finalize_response, maybe_build_local_video_error_response,
     maybe_build_local_video_success_outcome, resolve_local_sync_error_background_report_kind,
-    resolve_local_sync_success_background_report_kind, LocalVideoSyncSuccessOutcome,
+    resolve_local_sync_success_background_report_kind, LocalVideoSyncSuccessBuild,
+    LocalVideoSyncSuccessOutcome,
 };

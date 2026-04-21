@@ -221,7 +221,7 @@ async fn execute_sync(
     let plan = parse_request_json::<ExecutionPlan>(request).await?;
     let result = state
         .execution_runtime
-        .execute_sync(plan)
+        .execute_sync(&plan)
         .await
         .map_err(|err| ExecutionRuntimeAppError(ExecutionRuntimeServerError::Transport(err)))?;
     Ok(maybe_hold_axum_response_permit(
@@ -238,7 +238,7 @@ async fn execute_stream(
     let plan = parse_request_json::<ExecutionPlan>(request).await?;
     let execution = state
         .execution_runtime
-        .execute_stream(plan)
+        .execute_stream(&plan)
         .await
         .map_err(|err| ExecutionRuntimeAppError(ExecutionRuntimeServerError::Transport(err)))?;
 

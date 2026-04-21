@@ -145,7 +145,7 @@ pub(super) async fn materialize_local_gemini_files_candidate_attempts(
                 skipped_candidate.extra_data =
                     Some(build_local_execution_candidate_metadata_for_candidate(
                         &skipped_candidate.candidate,
-                        skipped_candidate.transport.as_ref(),
+                        skipped_candidate.transport_ref(),
                         GEMINI_FILES_CLIENT_API_FORMAT,
                         GEMINI_FILES_CLIENT_API_FORMAT,
                         extra_fields,

@@ -54,7 +54,7 @@ pub(crate) fn build_local_execution_candidate_metadata(
 ) -> Value {
     build_local_execution_candidate_metadata_for_candidate(
         &parts.eligible.candidate,
-        Some(&parts.eligible.transport),
+        Some(parts.eligible.transport.as_ref()),
         parts.provider_api_format,
         parts.client_api_format,
         parts.extra_fields,
@@ -127,7 +127,7 @@ pub(crate) fn build_local_execution_candidate_contract_metadata(
     append_execution_contract_fields_to_value(
         build_local_execution_candidate_metadata_for_candidate(
             &parts.eligible.candidate,
-            Some(&parts.eligible.transport),
+            Some(parts.eligible.transport.as_ref()),
             parts.provider_api_format,
             parts.client_api_format,
             parts.extra_fields,

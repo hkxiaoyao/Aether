@@ -40,4 +40,43 @@ describe('getOAuthOrgBadge', () => {
 
     expect(badge).toBeNull()
   })
+
+  it('reuses cached badge objects when identity fields are unchanged', () => {
+    const identity = {
+      oauth_account_id: 'acct-demo-001',
+      oauth_account_name: 'Workspace Alpha',
+      oauth_account_user_id: 'user-1__acct-demo-001',
+      oauth_organizations: [
+        { id: 'org-personal-1234', title: 'Personal', is_default: true },
+      ],
+    }
+
+    const first = getOAuthOrgBadge(identity)
+    const second = getOAuthOrgBadge(identity)
+
+    expect(first).toBe(second)
+  })
+
+  it('invalidates the cached badge when the selected organization changes in place', () => {
+    const organizations = [
+      { id: 'org-personal-1234', title: 'Personal', is_default: true },
+      { id: 'org-team-5678', title: 'Team', is_default: false },
+    ]
+    const identity = {
+      oauth_account_id: 'acct-demo-001',
+      oauth_organizations: organizations,
+    }
+
+    const first = getOAuthOrgBadge(identity)
+    organizations[0].is_default = false
+    organizations[1].is_default = true
+    const second = getOAuthOrgBadge(identity)
+
+    expect(first).not.toBe(second)
+    expect(second).toEqual({
+      id: 'org-team-5678',
+      label: 'org:team-5678',
+      title: 'account_id: acct-demo-001 | org_id: org-team-5678 | org_title: Team',
+    })
+  })
 })

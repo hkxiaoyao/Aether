@@ -24,21 +24,40 @@ pub(crate) struct LocalCoreSyncFinalizeOutcome {
     pub(crate) background_report: Option<GatewaySyncReportRequest>,
 }
 
+fn build_local_success_response(
+    trace_id: &str,
+    decision: &GatewayControlDecision,
+    status_code: u16,
+    body_bytes: Vec<u8>,
+    headers: BTreeMap<String, String>,
+) -> Result<Response<Body>, GatewayError> {
+    build_client_response_from_parts(
+        status_code,
+        &headers,
+        Body::from(body_bytes),
+        trace_id,
+        Some(decision),
+    )
+}
+
 pub(crate) fn build_local_success_outcome(
     trace_id: &str,
     decision: &GatewayControlDecision,
     payload: &GatewaySyncReportRequest,
     body_json: Value,
 ) -> Result<LocalCoreSyncFinalizeOutcome, GatewayError> {
-    let headers = payload.headers.clone();
+    let report_headers = payload.headers.clone();
+    let (body_bytes, response_headers) =
+        prepare_local_success_response_parts_impl(&payload.headers, &body_json)
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
     let background_report =
-        build_local_success_background_report_impl(payload, body_json.clone(), headers.clone());
+        build_local_success_background_report_impl(payload, body_json, report_headers);
     build_local_success_outcome_with_report(
         trace_id,
         decision,
         payload.status_code,
-        body_json,
-        headers,
+        body_bytes,
+        response_headers,
         background_report,
     )
 }
@@ -47,19 +66,12 @@ pub(crate) fn build_local_success_outcome_with_report(
     trace_id: &str,
     decision: &GatewayControlDecision,
     status_code: u16,
-    body_json: Value,
+    body_bytes: Vec<u8>,
     headers: BTreeMap<String, String>,
     background_report: Option<GatewaySyncReportRequest>,
 ) -> Result<LocalCoreSyncFinalizeOutcome, GatewayError> {
-    let (body_bytes, headers) = prepare_local_success_response_parts_impl(&headers, &body_json)
-        .map_err(|err| GatewayError::Internal(err.to_string()))?;
-    let response = build_client_response_from_parts(
-        status_code,
-        &headers,
-        Body::from(body_bytes),
-        trace_id,
-        Some(decision),
-    )?;
+    let response =
+        build_local_success_response(trace_id, decision, status_code, body_bytes, headers)?;
     Ok(LocalCoreSyncFinalizeOutcome {
         response,
         background_report,
@@ -73,9 +85,12 @@ pub(crate) fn build_local_success_outcome_with_conversion_report(
     client_body_json: Value,
     provider_body_json: Value,
 ) -> Result<LocalCoreSyncFinalizeOutcome, GatewayError> {
+    let (body_bytes, response_headers) =
+        prepare_local_success_response_parts_impl(&payload.headers, &client_body_json)
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
     let report_payload = build_local_success_conversion_background_report_impl(
         payload,
-        client_body_json.clone(),
+        client_body_json,
         provider_body_json,
     );
 
@@ -83,8 +98,8 @@ pub(crate) fn build_local_success_outcome_with_conversion_report(
         trace_id,
         decision,
         payload.status_code,
-        client_body_json,
-        payload.headers.clone(),
+        body_bytes,
+        response_headers,
         report_payload,
     )
 }

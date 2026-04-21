@@ -80,7 +80,7 @@ pub use crate::conversion::{
 pub use crate::finalize::common::{
     build_generated_tool_call_id, build_local_success_background_report,
     build_local_success_conversion_background_report, canonicalize_tool_arguments,
-    prepare_local_success_response_parts,
+    prepare_local_success_response_parts, prepare_local_success_response_parts_owned,
 };
 pub use crate::finalize::sse::{encode_done_sse, encode_json_sse, map_claude_stop_reason};
 pub use crate::finalize::standard::claude::stream::{ClaudeClientEmitter, ClaudeProviderState};

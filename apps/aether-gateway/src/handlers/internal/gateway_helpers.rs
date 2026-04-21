@@ -11,7 +11,7 @@ use crate::control::GatewayControlDecision;
 use crate::execution_runtime::{
     maybe_build_local_sync_finalize_response, maybe_build_local_video_error_response,
     maybe_build_local_video_success_outcome, resolve_local_sync_error_background_report_kind,
-    resolve_local_sync_success_background_report_kind,
+    resolve_local_sync_success_background_report_kind, LocalVideoSyncSuccessBuild,
 };
 use crate::handlers::shared::{
     unix_secs_to_rfc3339, InternalTunnelHeartbeatRequest, InternalTunnelNodeStatusRequest,
@@ -244,59 +244,66 @@ pub(crate) async fn maybe_build_internal_finalize_video_response(
     state: &AppState,
     trace_id: &str,
     decision: &GatewayControlDecision,
-    payload: &crate::usage::GatewaySyncReportRequest,
+    payload: crate::usage::GatewaySyncReportRequest,
 ) -> Result<Option<Response<Body>>, GatewayError> {
-    let Some(plan) = infer_internal_finalize_signature(payload).and_then(|signature| {
-        build_internal_finalize_video_plan(
-            payload.trace_id.as_str(),
-            signature.as_str(),
-            payload.report_context.as_ref(),
-        )
-    }) else {
+    let Some((signature, plan)) =
+        infer_internal_finalize_signature(&payload).and_then(|signature| {
+            build_internal_finalize_video_plan(
+                payload.trace_id.as_str(),
+                signature.as_str(),
+                payload.report_context.as_ref(),
+            )
+            .map(|plan| (signature, plan))
+        })
+    else {
         return Ok(None);
     };
 
-    if let Some(outcome) = maybe_build_local_video_success_outcome(
+    let mut payload = match maybe_build_local_video_success_outcome(
         trace_id,
         decision,
         payload,
         &state.video_tasks,
         &plan,
     )? {
-        if let Some(snapshot) = outcome.local_task_snapshot.clone() {
-            state.video_tasks.record_snapshot(snapshot.clone());
-            let _ = state.upsert_video_task_snapshot(&snapshot).await?;
-        }
-        match outcome.report_mode {
-            crate::video_tasks::VideoTaskSyncReportMode::InlineSync => {
-                crate::usage::submit_sync_report(state, trace_id, outcome.report_payload).await?;
+        LocalVideoSyncSuccessBuild::Handled(outcome) => {
+            let crate::execution_runtime::LocalVideoSyncSuccessOutcome {
+                response,
+                report_payload,
+                original_report_context: _,
+                report_mode,
+                local_task_snapshot,
+            } = outcome;
+            if let Some(snapshot) = local_task_snapshot {
+                let _ = state.upsert_video_task_snapshot(&snapshot).await?;
+                state.video_tasks.record_snapshot(snapshot);
             }
-            crate::video_tasks::VideoTaskSyncReportMode::Background => {
-                crate::usage::spawn_sync_report(
-                    state.clone(),
-                    trace_id.to_string(),
-                    outcome.report_payload,
-                );
+            match report_mode {
+                crate::video_tasks::VideoTaskSyncReportMode::InlineSync => {
+                    crate::usage::submit_sync_report(state, report_payload).await?;
+                }
+                crate::video_tasks::VideoTaskSyncReportMode::Background => {
+                    crate::usage::spawn_sync_report(state.clone(), report_payload);
+                }
             }
+            let mut response = response;
+            response.headers_mut().insert(
+                HeaderName::from_static(CONTROL_EXECUTED_HEADER),
+                HeaderValue::from_static("true"),
+            );
+            return Ok(Some(response));
         }
-        let mut response = outcome.response;
-        response.headers_mut().insert(
-            HeaderName::from_static(CONTROL_EXECUTED_HEADER),
-            HeaderValue::from_static("true"),
-        );
-        return Ok(Some(response));
-    }
+        LocalVideoSyncSuccessBuild::NotHandled(payload) => payload,
+    };
 
     if let Some(mut response) =
-        maybe_build_local_sync_finalize_response(trace_id, decision, payload)?
+        maybe_build_local_sync_finalize_response(trace_id, decision, &payload)?
     {
-        let request_path = infer_internal_finalize_signature(payload).and_then(|signature| {
-            build_local_sync_finalize_request_path(
-                payload.report_kind.as_str(),
-                signature.as_str(),
-                payload.report_context.as_ref(),
-            )
-        });
+        let request_path = build_local_sync_finalize_request_path(
+            payload.report_kind.as_str(),
+            signature.as_str(),
+            payload.report_context.as_ref(),
+        );
         if let Some(request_path) = request_path {
             state
                 .video_tasks
@@ -311,9 +318,8 @@ pub(crate) async fn maybe_build_internal_finalize_video_response(
         if let Some(success_report_kind) =
             resolve_local_sync_success_background_report_kind(payload.report_kind.as_str())
         {
-            let mut report_payload = payload.clone();
-            report_payload.report_kind = success_report_kind.to_string();
-            crate::usage::spawn_sync_report(state.clone(), trace_id.to_string(), report_payload);
+            payload.report_kind = success_report_kind.to_string();
+            crate::usage::spawn_sync_report(state.clone(), payload);
         }
         response.headers_mut().insert(
             HeaderName::from_static(CONTROL_EXECUTED_HEADER),
@@ -322,14 +328,14 @@ pub(crate) async fn maybe_build_internal_finalize_video_response(
         return Ok(Some(response));
     }
 
-    if let Some(mut response) = maybe_build_local_video_error_response(trace_id, decision, payload)?
+    if let Some(mut response) =
+        maybe_build_local_video_error_response(trace_id, decision, &payload)?
     {
         if let Some(error_report_kind) =
             resolve_local_sync_error_background_report_kind(payload.report_kind.as_str())
         {
-            let mut report_payload = payload.clone();
-            report_payload.report_kind = error_report_kind.to_string();
-            crate::usage::spawn_sync_report(state.clone(), trace_id.to_string(), report_payload);
+            payload.report_kind = error_report_kind.to_string();
+            crate::usage::spawn_sync_report(state.clone(), payload);
         }
         response.headers_mut().insert(
             HeaderName::from_static(CONTROL_EXECUTED_HEADER),

@@ -44,15 +44,17 @@ fn resolve_global_model_name_by<F>(
 where
     F: Fn(&StoredMinimalCandidateSelectionRow) -> bool,
 {
-    let mut matches = rows
-        .iter()
-        .filter(|row| matches(row))
-        .map(|row| row.global_model_name.trim())
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
-        .collect::<BTreeSet<_>>()
-        .into_iter();
-    matches.next()
+    let mut best_match = None::<&str>;
+    for row in rows.iter().filter(|row| matches(row)) {
+        let candidate = row.global_model_name.trim();
+        if candidate.is_empty() {
+            continue;
+        }
+        if best_match.is_none_or(|current| candidate < current) {
+            best_match = Some(candidate);
+        }
+    }
+    best_match.map(ToOwned::to_owned)
 }
 
 pub fn resolve_provider_model_name(
@@ -75,25 +77,26 @@ pub fn resolve_provider_model_name(
         return Some((selected_provider_model_name, None));
     }
 
-    let candidate_models = candidate_model_names(row, api_format);
     let mut sorted_allowed_models = key_allowed_models
         .iter()
-        .map(|value| value.trim())
+        .map(String::as_str)
+        .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
         .collect::<Vec<_>>();
-    sorted_allowed_models.sort();
+    sorted_allowed_models.sort_unstable();
 
-    for allowed_model in &sorted_allowed_models {
-        if candidate_models.contains(allowed_model.as_str()) {
-            return Some((allowed_model.clone(), Some(allowed_model.clone())));
+    for &allowed_model in &sorted_allowed_models {
+        if row_has_candidate_model_name(row, api_format, allowed_model) {
+            let allowed_model = allowed_model.to_owned();
+            return Some((allowed_model.clone(), Some(allowed_model)));
         }
     }
 
     let global_model_mappings = row.global_model_mappings.as_ref()?;
-    for allowed_model in sorted_allowed_models {
+    for &allowed_model in &sorted_allowed_models {
         for pattern in global_model_mappings {
-            if matches_model_mapping(pattern, &allowed_model) {
+            if matches_model_mapping(pattern, allowed_model) {
+                let allowed_model = allowed_model.to_owned();
                 return Some((allowed_model.clone(), Some(allowed_model)));
             }
         }
@@ -110,23 +113,14 @@ pub fn select_provider_model_name(
         return row.model_provider_model_name.clone();
     };
 
-    let mut scoped = mappings
+    mappings
         .iter()
         .filter(|mapping| mapping_scope_matches(mapping, api_format))
-        .collect::<Vec<_>>();
-    if scoped.is_empty() {
-        return row.model_provider_model_name.clone();
-    }
-
-    scoped.sort_by(|left, right| {
-        left.priority
-            .cmp(&right.priority)
-            .then(left.name.cmp(&right.name))
-    });
-    let top_priority = scoped[0].priority;
-    scoped
-        .into_iter()
-        .find(|mapping| mapping.priority == top_priority)
+        .min_by(|left, right| {
+            left.priority
+                .cmp(&right.priority)
+                .then(left.name.cmp(&right.name))
+        })
         .map(|mapping| mapping.name.clone())
         .unwrap_or_else(|| row.model_provider_model_name.clone())
 }
@@ -153,7 +147,7 @@ fn mapping_scope_matches(mapping: &StoredProviderModelMapping, api_format: &str)
 
     api_formats
         .iter()
-        .any(|value| normalize_api_format(value) == api_format)
+        .any(|value| api_format_matches(value, api_format))
 }
 
 pub fn row_supports_required_capability(
@@ -230,7 +224,7 @@ pub fn extract_global_priority_for_format(
 
     let Some(value) = object
         .iter()
-        .find(|(key, _)| normalize_api_format(key) == api_format)
+        .find(|(key, _)| api_format_matches(key, api_format))
         .map(|(_, value)| value)
     else {
         return Ok(None);
@@ -260,6 +254,26 @@ pub fn extract_global_priority_for_format(
 
 pub fn normalize_api_format(value: &str) -> String {
     value.trim().to_ascii_lowercase()
+}
+
+fn row_has_candidate_model_name(
+    row: &StoredMinimalCandidateSelectionRow,
+    api_format: &str,
+    model_name: &str,
+) -> bool {
+    row.model_provider_model_name == model_name
+        || row
+            .model_provider_model_mappings
+            .as_ref()
+            .is_some_and(|mappings| {
+                mappings.iter().any(|mapping| {
+                    mapping_scope_matches(mapping, api_format) && mapping.name == model_name
+                })
+            })
+}
+
+fn api_format_matches(left: &str, right: &str) -> bool {
+    left.trim().eq_ignore_ascii_case(right.trim())
 }
 
 #[cfg(test)]

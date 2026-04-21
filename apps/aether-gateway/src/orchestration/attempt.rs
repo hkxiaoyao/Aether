@@ -64,13 +64,13 @@ pub(crate) fn build_local_attempt_identities(
     candidate_index: u32,
     transport: &GatewayProviderTransportSnapshot,
 ) -> Vec<ExecutionAttemptIdentity> {
-    let attempt_slots = resolve_local_attempt_slot_count(transport);
+    let attempt_slots = local_attempt_slot_count(transport);
     (0..attempt_slots)
         .map(|retry_index| ExecutionAttemptIdentity::new(candidate_index, retry_index))
         .collect()
 }
 
-fn resolve_local_attempt_slot_count(transport: &GatewayProviderTransportSnapshot) -> u32 {
+pub(crate) fn local_attempt_slot_count(transport: &GatewayProviderTransportSnapshot) -> u32 {
     local_attempt_slots_from_transport(transport).unwrap_or(1)
 }
 

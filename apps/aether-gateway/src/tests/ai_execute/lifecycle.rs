@@ -389,3 +389,109 @@ async fn gateway_stops_execution_runtime_stream_when_client_disconnects() {
     execution_runtime_handle.abort();
     upstream_handle.abort();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gateway_returns_error_body_when_prefetch_detects_embedded_stream_error() {
+    let public_hits = Arc::new(Mutex::new(0usize));
+    let public_hits_clone = Arc::clone(&public_hits);
+
+    let upstream = Router::new().route(
+        "/v1/chat/completions",
+        any(move |_request: Request| {
+            let public_hits_inner = Arc::clone(&public_hits_clone);
+            async move {
+                *public_hits_inner.lock().expect("mutex should lock") += 1;
+                (StatusCode::IM_A_TEAPOT, Body::from("public-route-hit"))
+            }
+        }),
+    );
+
+    let execution_runtime = Router::new().route(
+        "/v1/execute/stream",
+        any(|_request: Request| async move {
+            let body_stream = async_stream::stream! {
+                yield Ok::<Bytes, Infallible>(Bytes::from_static(
+                    b"{\"type\":\"headers\",\"payload\":{\"kind\":\"headers\",\"status_code\":200,\"headers\":{\"content-type\":\"text/event-stream\"}}}\n"
+                ));
+                yield Ok::<Bytes, Infallible>(Bytes::from_static(
+                    b"{\"type\":\"data\",\"payload\":{\"kind\":\"data\",\"text\":\"data: {\\\"error\\\":{\\\"message\\\":\\\"slow down\\\",\\\"type\\\":\\\"rate_limit_error\\\",\\\"code\\\":\\\"rate_limit\\\"}}\\n\\n\"}}\n"
+                ));
+            };
+            let mut response = Response::builder()
+                .status(StatusCode::OK)
+                .body(Body::from_stream(body_stream))
+                .expect("response should build");
+            response.headers_mut().insert(
+                http::header::CONTENT_TYPE,
+                HeaderValue::from_static("application/x-ndjson"),
+            );
+            response
+        }),
+    );
+
+    let (upstream_url, upstream_handle) = start_server(upstream).await;
+    let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
+    let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+        Some(hash_api_key("sk-client-openai-stream-prefetch-error")),
+        sample_local_openai_auth_snapshot(
+            "api-key-openai-lifecycle-local-1",
+            "user-openai-lifecycle-local-1",
+        ),
+    )]));
+    let candidate_selection_repository =
+        Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
+            sample_local_openai_candidate_row(),
+        ]));
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![sample_local_openai_provider()],
+        vec![sample_local_openai_endpoint()],
+        vec![sample_local_openai_key()],
+    ));
+    let request_candidate_repository = Arc::new(InMemoryRequestCandidateRepository::default());
+    let gateway = build_router_with_state(
+        build_state_with_execution_runtime_override(execution_runtime_url)
+            .with_data_state_for_tests(
+                GatewayDataState::with_auth_candidate_selection_provider_catalog_and_request_candidate_repository_for_tests(
+                    auth_repository,
+                    candidate_selection_repository,
+                    provider_catalog_repository,
+                    request_candidate_repository,
+                    DEVELOPMENT_ENCRYPTION_KEY,
+                ),
+            ),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{gateway_url}/v1/chat/completions"))
+        .header(http::header::CONTENT_TYPE, "application/json")
+        .header(
+            http::header::AUTHORIZATION,
+            "Bearer sk-client-openai-stream-prefetch-error",
+        )
+        .header(
+            TRACE_ID_HEADER,
+            "trace-openai-chat-stream-prefetch-error-123",
+        )
+        .body("{\"model\":\"gpt-5\",\"messages\":[],\"stream\":true}")
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get(http::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("text/event-stream")
+    );
+    let body_text = response.text().await.expect("response body should read");
+    assert!(body_text.contains("\"rate_limit_error\""));
+    assert!(body_text.contains("\"slow down\""));
+    assert_eq!(*public_hits.lock().expect("mutex should lock"), 0);
+
+    gateway_handle.abort();
+    execution_runtime_handle.abort();
+    upstream_handle.abort();
+}

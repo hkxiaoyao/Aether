@@ -61,7 +61,7 @@
 
           <div class="flex flex-col gap-2 text-xs lg:flex-row lg:items-center lg:justify-between">
             <div class="text-muted-foreground">
-              共 {{ filteredTotal }} 个匹配账号，当前页 {{ pageKeys.length }} 个，已选 {{ selectedCount }} 个
+              共 {{ filteredTotal }} 个匹配账号，当前页 {{ pageKeyRows.length }} 个，已选 {{ selectedCount }} 个
             </div>
             <div class="flex flex-wrap items-center gap-1">
               <div class="mr-1 flex items-center gap-2">
@@ -77,7 +77,7 @@
                 variant="ghost"
                 size="sm"
                 class="h-7 px-2 text-[11px]"
-                :disabled="pageKeys.length === 0 || loading || executing || selectAllFiltered"
+                :disabled="pageKeyRows.length === 0 || loading || executing || selectAllFiltered"
                 @click="toggleSelectCurrentPage"
               >
                 {{ isCurrentPageFullySelected ? '取消本页全选' : '本页全选' }}
@@ -106,54 +106,54 @@
               正在加载账号列表...
             </div>
             <div
-              v-else-if="pageKeys.length === 0"
+              v-else-if="pageKeyRows.length === 0"
               class="py-10 text-center text-sm text-muted-foreground"
             >
               无匹配账号
             </div>
             <label
-              v-for="key in pageKeys"
-              :key="key.key_id"
+              v-for="row in pageKeyRows"
+              :key="row.key.key_id"
               class="flex items-center gap-2.5 px-3 py-2 border-b last:border-b-0 cursor-pointer hover:bg-muted/30"
             >
               <Checkbox
-                :checked="selectAllFiltered || selectedIdSet.has(key.key_id)"
+                :checked="selectAllFiltered || selectedIdSet.has(row.key.key_id)"
                 :disabled="executing || selectAllFiltered"
-                @update:checked="(checked) => toggleOne(key.key_id, checked === true)"
+                @update:checked="(checked) => toggleOne(row.key.key_id, checked === true)"
               />
               <div class="min-w-0 flex-1">
                 <div class="flex items-center gap-1.5">
-                  <span class="text-xs font-medium truncate">{{ key.key_name || '未命名' }}</span>
+                  <span class="text-xs font-medium truncate">{{ row.key.key_name || '未命名' }}</span>
                   <Badge
                     variant="outline"
                     class="text-[10px] px-1 py-0 h-4 shrink-0"
-                  >{{ normalizeAuthTypeLabel(key) }}</Badge>
+                  >{{ row.authTypeLabel }}</Badge>
                   <Badge
-                    v-if="getStatusBadgeLabel(key)"
+                    v-if="row.statusBadgeLabel"
                     variant="destructive"
                     class="text-[10px] px-1 py-0 h-4 shrink-0"
-                    :title="getStatusBadgeTitle(key)"
-                  >{{ getStatusBadgeLabel(key) }}</Badge>
+                    :title="row.statusBadgeTitle"
+                  >{{ row.statusBadgeLabel }}</Badge>
                   <Badge
-                    v-if="key.oauth_plan_type"
+                    v-if="row.key.oauth_plan_type"
                     variant="outline"
                     class="text-[10px] px-1 py-0 h-4 shrink-0"
-                  >{{ key.oauth_plan_type }}</Badge>
+                  >{{ row.key.oauth_plan_type }}</Badge>
                   <Badge
-                    v-if="getOAuthOrgBadge(key)"
+                    v-if="row.oauthOrgBadge"
                     variant="secondary"
                     class="text-[10px] px-1 py-0 h-4 shrink-0"
-                    :title="getOAuthOrgBadge(key)?.title"
-                  >{{ getOAuthOrgBadge(key)?.label }}</Badge>
+                    :title="row.oauthOrgBadge.title"
+                  >{{ row.oauthOrgBadge.label }}</Badge>
                 </div>
                 <div class="flex items-center gap-1.5 mt-0.5 text-[11px] text-muted-foreground flex-wrap">
-                  <span :class="key.is_active ? '' : 'text-destructive'">{{ key.is_active ? '启用' : '禁用' }}</span>
-                  <span v-if="getQuotaText(key)">{{ shortenQuota(getQuotaText(key) || '') }}</span>
-                  <span v-if="key.proxy?.node_id">独立代理</span>
+                  <span :class="row.key.is_active ? '' : 'text-destructive'">{{ row.key.is_active ? '启用' : '禁用' }}</span>
+                  <span v-if="row.quotaText">{{ row.quotaTextShort }}</span>
+                  <span v-if="row.key.proxy?.node_id">独立代理</span>
                   <span
-                    v-if="key.last_used_at"
+                    v-if="row.lastUsedRelative"
                     class="ml-auto shrink-0"
-                  >{{ formatRelativeTime(key.last_used_at) }}</span>
+                  >{{ row.lastUsedRelative }}</span>
                 </div>
               </div>
             </label>
@@ -331,6 +331,17 @@ type BatchActionOption = {
   destructive?: boolean
 }
 
+type PageKeyRow = {
+  key: PoolKeyDetail
+  authTypeLabel: string
+  statusBadgeLabel: string | null
+  statusBadgeTitle: string
+  oauthOrgBadge: ReturnType<typeof getOAuthOrgBadge>
+  quotaText: string | null
+  quotaTextShort: string
+  lastUsedRelative: string
+}
+
 const props = defineProps<{
   modelValue: boolean
   providerId: string
@@ -407,17 +418,32 @@ const totalPages = computed(() => Math.max(1, Math.ceil(filteredTotal.value / PA
 const isAllFilteredSelected = computed(() => selectAllFiltered.value && filteredTotal.value > 0)
 const isPartiallyFilteredSelected = computed(() => !selectAllFiltered.value && selectedKeyIds.value.length > 0)
 const hasActiveFilters = computed(() => searchText.value.trim().length > 0 || activeQuickSelectors.value.length > 0)
+const pageKeyRows = computed<PageKeyRow[]>(() => pageKeys.value.map((key) => {
+  const statusBadgeLabel = getStatusBadgeLabel(key)
+  const quotaText = getQuotaText(key)
+
+  return {
+    key,
+    authTypeLabel: normalizeAuthTypeLabel(key),
+    statusBadgeLabel,
+    statusBadgeTitle: statusBadgeLabel ? getStatusBadgeTitle(key) : '',
+    oauthOrgBadge: getOAuthOrgBadge(key),
+    quotaText,
+    quotaTextShort: quotaText ? shortenQuota(quotaText) : '',
+    lastUsedRelative: key.last_used_at ? formatRelativeTime(key.last_used_at) : '',
+  }
+}))
 const selectedOnCurrentPageCount = computed(() => {
-  if (selectAllFiltered.value) return pageKeys.value.length
+  if (selectAllFiltered.value) return pageKeyRows.value.length
   let count = 0
-  for (const key of pageKeys.value) {
-    if (selectedIdSet.value.has(key.key_id)) count += 1
+  for (const row of pageKeyRows.value) {
+    if (selectedIdSet.value.has(row.key.key_id)) count += 1
   }
   return count
 })
 const isCurrentPageFullySelected = computed(() => {
-  if (selectAllFiltered.value || pageKeys.value.length === 0) return false
-  return selectedOnCurrentPageCount.value === pageKeys.value.length
+  if (selectAllFiltered.value || pageKeyRows.value.length === 0) return false
+  return selectedOnCurrentPageCount.value === pageKeyRows.value.length
 })
 const canClearSelection = computed(() => selectAllFiltered.value || selectedKeyIds.value.length > 0)
 const activeQuickSelectorSet = computed(() => new Set(activeQuickSelectors.value))

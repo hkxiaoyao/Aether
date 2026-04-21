@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use tracing::warn;
 
 use crate::ai_pipeline::{
@@ -8,8 +10,8 @@ use crate::scheduler::affinity::SCHEDULER_AFFINITY_TTL;
 use crate::scheduler::config::{read_scheduler_ordering_config, SchedulerOrderingConfig};
 use aether_scheduler_core::SchedulerMinimalCandidateSelectionCandidate;
 use aether_scheduler_core::{
-    build_scheduler_affinity_cache_key_for_api_key_id, compare_candidates_by_priority_mode,
-    requested_capability_priority_for_candidate, SchedulerAffinityTarget, SchedulerPriorityMode,
+    build_scheduler_affinity_cache_key_for_api_key_id, requested_capability_priority_for_candidate,
+    SchedulerAffinityTarget, SchedulerPriorityMode,
 };
 
 use super::candidate_eligibility::{
@@ -17,6 +19,8 @@ use super::candidate_eligibility::{
 };
 
 const PLANNER_SCHEDULER_AFFINITY_MAX_ENTRIES: usize = 10_000;
+
+type CandidateTransportIdentity<'a> = (&'a str, &'a str, &'a str);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum TunnelOwnerAffinityBucket {
@@ -31,20 +35,36 @@ struct CandidateExecutionOrdering {
     keep_priority_on_conversion: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PlannerCandidateRankingState {
+    capability_priority: (u32, u32),
+    tunnel_bucket: TunnelOwnerAffinityBucket,
+    demote_cross_format: bool,
+    format_preference: (u8, u8),
+    original_index: usize,
+}
+
 pub(crate) async fn prefer_local_tunnel_owner_candidates(
     state: PlannerAppState<'_>,
     candidates: Vec<SchedulerMinimalCandidateSelectionCandidate>,
 ) -> Vec<SchedulerMinimalCandidateSelectionCandidate> {
-    let mut ranked = Vec::with_capacity(candidates.len());
-    for (original_index, candidate) in candidates.into_iter().enumerate() {
-        let bucket = resolve_candidate_tunnel_owner_affinity(state, &candidate).await;
-        ranked.push((bucket, original_index, candidate));
+    let mut candidates = candidates;
+    let mut rankings = Vec::with_capacity(candidates.len());
+    let mut tunnel_affinity_cache = BTreeMap::new();
+    for (original_index, candidate) in candidates.iter().enumerate() {
+        let bucket = resolve_cached_candidate_tunnel_owner_affinity(
+            state,
+            &mut tunnel_affinity_cache,
+            candidate,
+        )
+        .await;
+        rankings.push((bucket, original_index));
     }
-    ranked.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
-    ranked
-        .into_iter()
-        .map(|(_, _, candidate)| candidate)
-        .collect()
+    let mut order = (0..candidates.len()).collect::<Vec<_>>();
+    order.sort_by(|left, right| rankings[*left].cmp(&rankings[*right]));
+    drop(tunnel_affinity_cache);
+    apply_order(&mut candidates, order);
+    candidates
 }
 
 #[cfg(test)]
@@ -56,11 +76,18 @@ async fn rank_local_execution_candidates(
 ) -> Vec<SchedulerMinimalCandidateSelectionCandidate> {
     let normalized_client_api_format = client_api_format.trim().to_ascii_lowercase();
     let ordering_config = read_scheduler_ordering_config_or_default(state).await;
-    let mut ranked = Vec::with_capacity(candidates.len());
+    let mut candidates = candidates;
+    let mut rankings = Vec::with_capacity(candidates.len());
+    let mut ordering_cache = BTreeMap::new();
 
-    for (original_index, candidate) in candidates.into_iter().enumerate() {
-        let ordering =
-            resolve_candidate_execution_ordering(state, &candidate, ordering_config).await;
+    for (original_index, candidate) in candidates.iter().enumerate() {
+        let ordering = resolve_cached_candidate_execution_ordering(
+            state,
+            &mut ordering_cache,
+            candidate,
+            ordering_config,
+        )
+        .await;
         let is_same_format = candidate
             .endpoint_api_format
             .trim()
@@ -71,112 +98,82 @@ async fn rank_local_execution_candidates(
             candidate.endpoint_api_format.as_str(),
         );
         let capability_priority =
-            requested_capability_priority_for_candidate(required_capabilities, &candidate);
-        ranked.push((
-            capability_priority.0,
-            capability_priority.1,
-            ordering.tunnel_bucket,
+            requested_capability_priority_for_candidate(required_capabilities, candidate);
+        rankings.push(PlannerCandidateRankingState {
+            capability_priority,
+            tunnel_bucket: ordering.tunnel_bucket,
             demote_cross_format,
             format_preference,
             original_index,
-            candidate,
-        ));
+        });
     }
 
-    ranked.sort_by(|left, right| {
-        left.0
-            .cmp(&right.0)
-            .then(left.1.cmp(&right.1))
-            .then(left.2.cmp(&right.2))
-            .then(left.3.cmp(&right.3))
-            .then_with(|| {
-                compare_candidate_priority_slot(&left.6, &right.6, ordering_config.priority_mode)
-            })
-            .then(left.4.cmp(&right.4))
-            .then_with(|| {
-                compare_candidates_by_priority_mode(
-                    &left.6,
-                    &right.6,
-                    ordering_config.priority_mode,
-                    None,
-                )
-            })
-            .then(left.5.cmp(&right.5))
+    let mut order = (0..candidates.len()).collect::<Vec<_>>();
+    order.sort_by(|left, right| {
+        compare_planner_candidate_ranking(
+            &rankings[*left],
+            &candidates[*left],
+            &rankings[*right],
+            &candidates[*right],
+            ordering_config.priority_mode,
+        )
     });
-
-    ranked
-        .into_iter()
-        .map(|(_, _, _, _, _, _, candidate)| candidate)
-        .collect()
+    drop(ordering_cache);
+    apply_order(&mut candidates, order);
+    candidates
 }
 
 pub(crate) async fn rank_eligible_local_execution_candidates(
     state: PlannerAppState<'_>,
     candidates: Vec<EligibleLocalExecutionCandidate>,
-    client_api_format: &str,
+    normalized_client_api_format: &str,
     required_capabilities: Option<&serde_json::Value>,
 ) -> Vec<EligibleLocalExecutionCandidate> {
-    let normalized_client_api_format = client_api_format.trim().to_ascii_lowercase();
     let ordering_config = read_scheduler_ordering_config_or_default(state).await;
-    let mut ranked = Vec::with_capacity(candidates.len());
+    let mut candidates = candidates;
+    let mut rankings = Vec::with_capacity(candidates.len());
+    let mut ordering_cache = BTreeMap::new();
 
-    for (original_index, eligible) in candidates.into_iter().enumerate() {
-        let ordering = resolve_candidate_execution_ordering_from_transport(
+    for (original_index, eligible) in candidates.iter().enumerate() {
+        let ordering = resolve_cached_eligible_candidate_execution_ordering(
             state,
-            &eligible.transport,
+            &mut ordering_cache,
+            eligible,
             ordering_config,
         )
         .await;
         let is_same_format = eligible
             .provider_api_format
-            .eq_ignore_ascii_case(normalized_client_api_format.as_str());
+            .eq_ignore_ascii_case(normalized_client_api_format);
         let demote_cross_format = !is_same_format && !ordering.keep_priority_on_conversion;
         let format_preference = candidate_api_format_preference(
-            normalized_client_api_format.as_str(),
+            normalized_client_api_format,
             eligible.provider_api_format.as_str(),
         );
         let capability_priority =
             requested_capability_priority_for_candidate(required_capabilities, &eligible.candidate);
-        ranked.push((
-            capability_priority.0,
-            capability_priority.1,
-            ordering.tunnel_bucket,
+        rankings.push(PlannerCandidateRankingState {
+            capability_priority,
+            tunnel_bucket: ordering.tunnel_bucket,
             demote_cross_format,
             format_preference,
             original_index,
-            eligible,
-        ));
+        });
     }
 
-    ranked.sort_by(|left, right| {
-        left.0
-            .cmp(&right.0)
-            .then(left.1.cmp(&right.1))
-            .then(left.2.cmp(&right.2))
-            .then(left.3.cmp(&right.3))
-            .then_with(|| {
-                compare_candidate_priority_slot(
-                    &left.6.candidate,
-                    &right.6.candidate,
-                    ordering_config.priority_mode,
-                )
-            })
-            .then(left.4.cmp(&right.4))
-            .then_with(|| {
-                compare_candidates_by_priority_mode(
-                    &left.6.candidate,
-                    &right.6.candidate,
-                    ordering_config.priority_mode,
-                    None,
-                )
-            })
-            .then(left.5.cmp(&right.5))
+    let mut order = (0..candidates.len()).collect::<Vec<_>>();
+    order.sort_by(|left, right| {
+        compare_planner_candidate_ranking(
+            &rankings[*left],
+            &candidates[*left].candidate,
+            &rankings[*right],
+            &candidates[*right].candidate,
+            ordering_config.priority_mode,
+        )
     });
-
-    ranked
-        .into_iter()
-        .map(|(_, _, _, _, _, _, eligible)| eligible)
-        .collect()
+    drop(ordering_cache);
+    apply_order(&mut candidates, order);
+    candidates
 }
 
 pub(crate) fn remember_scheduler_affinity_for_candidate(
@@ -223,6 +220,21 @@ async fn resolve_candidate_tunnel_owner_affinity(
     resolve_tunnel_owner_affinity_from_transport(state, &transport).await
 }
 
+async fn resolve_cached_candidate_tunnel_owner_affinity<'a>(
+    state: PlannerAppState<'_>,
+    cache: &mut BTreeMap<CandidateTransportIdentity<'a>, TunnelOwnerAffinityBucket>,
+    candidate: &'a SchedulerMinimalCandidateSelectionCandidate,
+) -> TunnelOwnerAffinityBucket {
+    let identity = candidate_transport_identity(candidate);
+    if let Some(bucket) = cache.get(&identity).copied() {
+        return bucket;
+    }
+
+    let bucket = resolve_candidate_tunnel_owner_affinity(state, candidate).await;
+    cache.insert(identity, bucket);
+    bucket
+}
+
 async fn resolve_candidate_execution_ordering(
     state: PlannerAppState<'_>,
     candidate: &SchedulerMinimalCandidateSelectionCandidate,
@@ -236,6 +248,43 @@ async fn resolve_candidate_execution_ordering(
     };
 
     resolve_candidate_execution_ordering_from_transport(state, &transport, ordering_config).await
+}
+
+async fn resolve_cached_candidate_execution_ordering<'a>(
+    state: PlannerAppState<'_>,
+    cache: &mut BTreeMap<CandidateTransportIdentity<'a>, CandidateExecutionOrdering>,
+    candidate: &'a SchedulerMinimalCandidateSelectionCandidate,
+    ordering_config: SchedulerOrderingConfig,
+) -> CandidateExecutionOrdering {
+    let identity = candidate_transport_identity(candidate);
+    if let Some(ordering) = cache.get(&identity).copied() {
+        return ordering;
+    }
+
+    let ordering = resolve_candidate_execution_ordering(state, candidate, ordering_config).await;
+    cache.insert(identity, ordering);
+    ordering
+}
+
+async fn resolve_cached_eligible_candidate_execution_ordering<'a>(
+    state: PlannerAppState<'_>,
+    cache: &mut BTreeMap<CandidateTransportIdentity<'a>, CandidateExecutionOrdering>,
+    eligible: &'a EligibleLocalExecutionCandidate,
+    ordering_config: SchedulerOrderingConfig,
+) -> CandidateExecutionOrdering {
+    let identity = candidate_transport_identity(&eligible.candidate);
+    if let Some(ordering) = cache.get(&identity).copied() {
+        return ordering;
+    }
+
+    let ordering = resolve_candidate_execution_ordering_from_transport(
+        state,
+        &eligible.transport,
+        ordering_config,
+    )
+    .await;
+    cache.insert(identity, ordering);
+    ordering
 }
 
 async fn resolve_candidate_execution_ordering_from_transport(
@@ -301,6 +350,16 @@ async fn resolve_tunnel_owner_affinity_from_transport(
     }
 }
 
+fn candidate_transport_identity(
+    candidate: &SchedulerMinimalCandidateSelectionCandidate,
+) -> CandidateTransportIdentity<'_> {
+    (
+        candidate.provider_id.as_str(),
+        candidate.endpoint_id.as_str(),
+        candidate.key_id.as_str(),
+    )
+}
+
 fn candidate_api_format_preference(client_api_format: &str, provider_api_format: &str) -> (u8, u8) {
     request_candidate_api_format_preference(client_api_format, provider_api_format)
         .unwrap_or((u8::MAX, u8::MAX))
@@ -322,6 +381,67 @@ fn compare_candidate_priority_slot(
             .cmp(&right.key_global_priority_for_format.unwrap_or(i32::MAX))
             .then(left.provider_priority.cmp(&right.provider_priority))
             .then(left.key_internal_priority.cmp(&right.key_internal_priority)),
+    }
+}
+
+fn compare_candidate_identity(
+    left: &SchedulerMinimalCandidateSelectionCandidate,
+    right: &SchedulerMinimalCandidateSelectionCandidate,
+) -> std::cmp::Ordering {
+    left.provider_id
+        .cmp(&right.provider_id)
+        .then(left.endpoint_id.cmp(&right.endpoint_id))
+        .then(left.key_id.cmp(&right.key_id))
+        .then(
+            left.selected_provider_model_name
+                .cmp(&right.selected_provider_model_name),
+        )
+}
+
+fn compare_planner_candidate_ranking(
+    left_state: &PlannerCandidateRankingState,
+    left_candidate: &SchedulerMinimalCandidateSelectionCandidate,
+    right_state: &PlannerCandidateRankingState,
+    right_candidate: &SchedulerMinimalCandidateSelectionCandidate,
+    priority_mode: SchedulerPriorityMode,
+) -> std::cmp::Ordering {
+    left_state
+        .capability_priority
+        .cmp(&right_state.capability_priority)
+        .then(left_state.tunnel_bucket.cmp(&right_state.tunnel_bucket))
+        .then(
+            left_state
+                .demote_cross_format
+                .cmp(&right_state.demote_cross_format),
+        )
+        .then_with(|| {
+            compare_candidate_priority_slot(left_candidate, right_candidate, priority_mode)
+        })
+        .then(
+            left_state
+                .format_preference
+                .cmp(&right_state.format_preference),
+        )
+        .then_with(|| compare_candidate_identity(left_candidate, right_candidate))
+        .then(left_state.original_index.cmp(&right_state.original_index))
+}
+
+fn apply_order<T>(items: &mut [T], sorted_old_indices: Vec<usize>) {
+    if items.len() < 2 {
+        return;
+    }
+
+    let mut target_positions = vec![0usize; sorted_old_indices.len()];
+    for (new_position, old_position) in sorted_old_indices.into_iter().enumerate() {
+        target_positions[old_position] = new_position;
+    }
+
+    for index in 0..items.len() {
+        while target_positions[index] != index {
+            let target = target_positions[index];
+            items.swap(index, target);
+            target_positions.swap(index, target);
+        }
     }
 }
 

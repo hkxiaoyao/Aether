@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use aether_provider_transport::url::{
     build_claude_messages_url, build_gemini_content_url, build_openai_chat_url,
     build_openai_cli_url, build_passthrough_path_url,
@@ -30,13 +32,13 @@ pub fn build_standard_request_body(
     body_rules: Option<&Value>,
     user_api_key_id: Option<&str>,
 ) -> Option<Value> {
-    let canonical_request = normalize_standard_request_to_openai_chat_request(
+    let canonical_request = normalize_standard_request_to_openai_chat_request_cow(
         body_json,
         client_api_format,
         request_path,
     )?;
     let mut provider_request_body = build_standard_request_body_from_canonical(
-        &canonical_request,
+        canonical_request.as_ref(),
         mapped_model,
         provider_api_format,
         upstream_is_stream,
@@ -99,14 +101,29 @@ pub fn normalize_standard_request_to_openai_chat_request(
     client_api_format: &str,
     request_path: &str,
 ) -> Option<Value> {
+    normalize_standard_request_to_openai_chat_request_cow(
+        body_json,
+        client_api_format,
+        request_path,
+    )
+    .map(Cow::into_owned)
+}
+
+fn normalize_standard_request_to_openai_chat_request_cow<'a>(
+    body_json: &'a Value,
+    client_api_format: &str,
+    request_path: &str,
+) -> Option<Cow<'a, Value>> {
     match client_api_format.trim().to_ascii_lowercase().as_str() {
-        "openai:chat" => Some(body_json.clone()),
+        "openai:chat" => Some(Cow::Borrowed(body_json)),
         "openai:cli" | "openai:compact" => {
-            normalize_openai_cli_request_to_openai_chat_request(body_json)
+            normalize_openai_cli_request_to_openai_chat_request(body_json).map(Cow::Owned)
         }
-        "claude:chat" | "claude:cli" => normalize_claude_request_to_openai_chat_request(body_json),
+        "claude:chat" | "claude:cli" => {
+            normalize_claude_request_to_openai_chat_request(body_json).map(Cow::Owned)
+        }
         "gemini:chat" | "gemini:cli" => {
-            normalize_gemini_request_to_openai_chat_request(body_json, request_path)
+            normalize_gemini_request_to_openai_chat_request(body_json, request_path).map(Cow::Owned)
         }
         _ => None,
     }

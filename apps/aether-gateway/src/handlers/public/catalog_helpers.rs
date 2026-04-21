@@ -122,6 +122,10 @@ pub(crate) async fn build_public_providers_payload(
         .iter()
         .map(|provider| provider.id.clone())
         .collect::<Vec<_>>();
+    let provider_ids_set = provider_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
     let endpoints = if provider_ids.is_empty() {
         Vec::new()
     } else {
@@ -156,7 +160,7 @@ pub(crate) async fn build_public_providers_payload(
                 .ok()
                 .unwrap_or_default();
             for row in rows {
-                if provider_ids.contains(&row.provider_id) {
+                if provider_ids_set.contains(row.provider_id.as_str()) {
                     models_by_provider
                         .entry(row.provider_id.clone())
                         .or_default()
@@ -332,7 +336,6 @@ pub(crate) async fn build_api_format_health_monitor_payload(
     let mut endpoint_ids_by_format = BTreeMap::<String, Vec<String>>::new();
     let mut endpoint_to_format = BTreeMap::<String, String>::new();
     let mut provider_ids_by_format = BTreeMap::<String, BTreeSet<String>>::new();
-    let mut active_provider_formats = BTreeSet::<(String, String)>::new();
     for endpoint in active_endpoints {
         endpoint_to_format.insert(endpoint.id.clone(), endpoint.api_format.clone());
         endpoint_ids_by_format
@@ -343,7 +346,6 @@ pub(crate) async fn build_api_format_health_monitor_payload(
             .entry(endpoint.api_format.clone())
             .or_default()
             .insert(endpoint.provider_id.clone());
-        active_provider_formats.insert((endpoint.provider_id, endpoint.api_format));
     }
     let all_endpoint_ids = endpoint_to_format.keys().cloned().collect::<Vec<_>>();
 
@@ -356,7 +358,9 @@ pub(crate) async fn build_api_format_health_monitor_payload(
             .unwrap_or_default();
         for key in keys.into_iter().filter(|key| key.is_active) {
             for api_format in provider_key_api_formats(&key) {
-                if active_provider_formats.contains(&(key.provider_id.clone(), api_format.clone()))
+                if provider_ids_by_format
+                    .get(&api_format)
+                    .is_some_and(|provider_ids| provider_ids.contains(key.provider_id.as_str()))
                 {
                     *key_counts_by_format.entry(api_format).or_default() += 1;
                 }

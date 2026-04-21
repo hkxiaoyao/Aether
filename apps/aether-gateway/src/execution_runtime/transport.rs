@@ -161,12 +161,12 @@ impl DirectSyncExecutionRuntime {
 
     pub(crate) async fn execute_sync(
         &self,
-        plan: ExecutionPlan,
+        plan: &ExecutionPlan,
     ) -> Result<ExecutionResult, ExecutionRuntimeTransportError> {
-        let body_bytes = build_request_body(&plan)?;
+        let body_bytes = build_request_body(plan)?;
 
         let started_at = Instant::now();
-        let response = send_request(&plan, body_bytes).await?;
+        let response = send_request(plan, body_bytes).await?;
         let ttfb_ms = started_at.elapsed().as_millis() as u64;
         let status_code = response.status().as_u16();
         let headers = collect_response_headers(response.headers());
@@ -200,8 +200,8 @@ impl DirectSyncExecutionRuntime {
         };
 
         Ok(ExecutionResult {
-            request_id: plan.request_id,
-            candidate_id: plan.candidate_id,
+            request_id: plan.request_id.clone(),
+            candidate_id: plan.candidate_id.clone(),
             status_code,
             headers,
             body,
@@ -216,24 +216,24 @@ impl DirectSyncExecutionRuntime {
 
     pub(crate) async fn execute_stream(
         &self,
-        plan: ExecutionPlan,
+        plan: &ExecutionPlan,
     ) -> Result<DirectUpstreamStreamExecution, ExecutionRuntimeTransportError> {
         if !plan.stream {
             return Err(ExecutionRuntimeTransportError::StreamUnsupported);
         }
 
-        let body_bytes = build_request_body(&plan)?;
+        let body_bytes = build_request_body(plan)?;
 
         let started_at = Instant::now();
-        let response = send_request(&plan, body_bytes).await?;
+        let response = send_request(plan, body_bytes).await?;
         let status_code = response.status().as_u16();
         let headers = collect_response_headers(response.headers());
 
-        let stream_summary_report_context = build_stream_summary_report_context(&plan);
+        let stream_summary_report_context = build_stream_summary_report_context(plan);
 
         Ok(DirectUpstreamStreamExecution {
-            request_id: plan.request_id,
-            candidate_id: plan.candidate_id,
+            request_id: plan.request_id.clone(),
+            candidate_id: plan.candidate_id.clone(),
             status_code,
             headers,
             provider_api_format: plan.provider_api_format.clone(),
@@ -274,7 +274,7 @@ pub(crate) async fn execute_sync_plan(
     let _ = state;
     let _ = trace_id;
     DirectSyncExecutionRuntime::new()
-        .execute_sync(plan.clone())
+        .execute_sync(plan)
         .await
         .map_err(|err| GatewayError::Internal(err.to_string()))
 }
@@ -1101,7 +1101,7 @@ mod tests {
 
         let execution_runtime = DirectSyncExecutionRuntime::new();
         let result = execution_runtime
-            .execute_sync(ExecutionPlan {
+            .execute_sync(&ExecutionPlan {
                 request_id: "req-1".into(),
                 candidate_id: Some("cand-1".into()),
                 provider_name: Some("openai".into()),
@@ -1168,7 +1168,7 @@ mod tests {
 
         let execution_runtime = DirectSyncExecutionRuntime::new();
         let result = execution_runtime
-            .execute_sync(ExecutionPlan {
+            .execute_sync(&ExecutionPlan {
                 request_id: "req-1".into(),
                 candidate_id: None,
                 provider_name: None,
@@ -1369,7 +1369,7 @@ mod tests {
 
         let execution_runtime = DirectSyncExecutionRuntime::new();
         let result = execution_runtime
-            .execute_sync(ExecutionPlan {
+            .execute_sync(&ExecutionPlan {
                 request_id: "req-redirect-1".into(),
                 candidate_id: None,
                 provider_name: Some("provider_ops".into()),
@@ -1442,7 +1442,7 @@ mod tests {
 
         let execution_runtime = DirectSyncExecutionRuntime::new();
         let result = execution_runtime
-            .execute_sync(ExecutionPlan {
+            .execute_sync(&ExecutionPlan {
                 request_id: "req-redirect-2".into(),
                 candidate_id: None,
                 provider_name: Some("provider_oauth".into()),
@@ -1512,7 +1512,7 @@ mod tests {
 
         let execution_runtime = DirectSyncExecutionRuntime::new();
         let result = execution_runtime
-            .execute_sync(ExecutionPlan {
+            .execute_sync(&ExecutionPlan {
                 request_id: "req-relay-http1-1".into(),
                 candidate_id: None,
                 provider_name: Some("provider_ops".into()),
@@ -1579,7 +1579,7 @@ mod tests {
 
         let execution_runtime = DirectSyncExecutionRuntime::new();
         let result = execution_runtime
-            .execute_sync(ExecutionPlan {
+            .execute_sync(&ExecutionPlan {
                 request_id: "req-tls-1".into(),
                 candidate_id: Some("cand-1".into()),
                 provider_name: Some("claude".into()),
@@ -1654,7 +1654,7 @@ mod tests {
 
         let execution_runtime = DirectSyncExecutionRuntime::new();
         let result = execution_runtime
-            .execute_sync(ExecutionPlan {
+            .execute_sync(&ExecutionPlan {
                 request_id: "req-gzip-1".into(),
                 candidate_id: Some("cand-1".into()),
                 provider_name: Some("openai".into()),
@@ -1715,7 +1715,7 @@ mod tests {
 
         let execution_runtime = DirectSyncExecutionRuntime::new();
         let result = execution_runtime
-            .execute_sync(ExecutionPlan {
+            .execute_sync(&ExecutionPlan {
                 request_id: "req-ttfb-1".into(),
                 candidate_id: Some("cand-1".into()),
                 provider_name: Some("openai".into()),

@@ -49,7 +49,6 @@ pub(super) async fn maybe_build_local_gemini_files_decision_payload_for_candidat
     .await?;
     let LocalGeminiFilesCandidateAttempt {
         eligible,
-        candidate_group_id,
         candidate_id,
         ..
     } = attempt;
@@ -66,6 +65,41 @@ pub(super) async fn maybe_build_local_gemini_files_decision_payload_for_candidat
     }
     extra_fields.insert("file_key_id".to_string(), json!(candidate.key_id));
     extra_fields.insert("file_name".to_string(), json!(resolved.file_name));
+    let report_context = build_local_execution_report_context(LocalExecutionReportContextParts {
+        auth_context: &input.auth_context,
+        request_id: trace_id,
+        candidate_id: &candidate_id,
+        attempt_identity,
+        model: "gemini-files",
+        provider_name: &transport.provider.name,
+        provider_id: &candidate.provider_id,
+        endpoint_id: &candidate.endpoint_id,
+        key_id: &candidate.key_id,
+        key_name: None,
+        provider_api_format: GEMINI_FILES_CLIENT_API_FORMAT,
+        client_api_format: GEMINI_FILES_CLIENT_API_FORMAT,
+        mapped_model: None,
+        candidate_group_id: eligible.orchestration.candidate_group_id.as_deref(),
+        upstream_url: None,
+        provider_request_method: None,
+        provider_request_headers: None,
+        original_headers: &parts.headers,
+        original_request_body_json: Some(body_json),
+        original_request_body_base64: resolved.provider_request_body_base64.as_deref(),
+        has_envelope: false,
+        needs_conversion: false,
+        extra_fields,
+    });
+    let super::request::LocalGeminiFilesCandidatePayloadParts {
+        transport: _,
+        auth_header,
+        auth_value,
+        provider_request_headers,
+        provider_request_body,
+        provider_request_body_base64,
+        upstream_url,
+        file_name: _,
+    } = resolved;
 
     Some(build_local_execution_decision_response(
         LocalExecutionDecisionResponseParts {
@@ -80,18 +114,18 @@ pub(super) async fn maybe_build_local_gemini_files_decision_payload_for_candidat
             endpoint_id: candidate.endpoint_id.clone(),
             key_id: candidate.key_id.clone(),
             upstream_base_url: transport.endpoint.base_url.clone(),
-            upstream_url: resolved.upstream_url,
+            upstream_url,
             provider_request_method: Some(parts.method.to_string()),
-            auth_header: Some(resolved.auth_header),
-            auth_value: Some(resolved.auth_value),
+            auth_header: Some(auth_header),
+            auth_value: Some(auth_value),
             provider_api_format: GEMINI_FILES_CLIENT_API_FORMAT.to_string(),
             client_api_format: GEMINI_FILES_CLIENT_API_FORMAT.to_string(),
             model_name: "gemini-files".to_string(),
             mapped_model: candidate.selected_provider_model_name.clone(),
             prompt_cache_key: None,
-            provider_request_headers: resolved.provider_request_headers,
-            provider_request_body: resolved.provider_request_body,
-            provider_request_body_base64: resolved.provider_request_body_base64,
+            provider_request_headers,
+            provider_request_body,
+            provider_request_body_base64,
             content_type: parts
                 .headers
                 .get(http::header::CONTENT_TYPE)
@@ -104,32 +138,7 @@ pub(super) async fn maybe_build_local_gemini_files_decision_payload_for_candidat
             timeouts: resolve_transport_execution_timeouts(&transport),
             upstream_is_stream: spec_metadata.require_streaming,
             report_kind: spec_metadata.report_kind.map(ToOwned::to_owned),
-            report_context: Some(build_local_execution_report_context(
-                LocalExecutionReportContextParts {
-                    auth_context: &input.auth_context,
-                    request_id: trace_id,
-                    candidate_id: &candidate_id,
-                    attempt_identity,
-                    model: "gemini-files",
-                    provider_name: &transport.provider.name,
-                    provider_id: &candidate.provider_id,
-                    endpoint_id: &candidate.endpoint_id,
-                    key_id: &candidate.key_id,
-                    key_name: None,
-                    provider_api_format: GEMINI_FILES_CLIENT_API_FORMAT,
-                    client_api_format: GEMINI_FILES_CLIENT_API_FORMAT,
-                    mapped_model: None,
-                    candidate_group_id: candidate_group_id.as_deref(),
-                    upstream_url: None,
-                    provider_request_method: None,
-                    provider_request_headers: None,
-                    original_headers: &parts.headers,
-                    original_request_body: &resolved.original_request_body,
-                    has_envelope: false,
-                    needs_conversion: false,
-                    extra_fields,
-                },
-            )),
+            report_context: Some(report_context),
             auth_context: input.auth_context.clone(),
         },
     ))

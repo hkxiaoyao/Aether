@@ -113,11 +113,12 @@ fn decrypt_secret(
     ciphertext: &str,
     field_name: &str,
 ) -> Result<String, DataLayerError> {
+    if should_use_plaintext_secret(ciphertext, field_name) {
+        return Ok(ciphertext.trim().to_string());
+    }
+
     match decrypt_python_fernet_ciphertext(encryption_key, ciphertext) {
         Ok(value) => Ok(value),
-        Err(_error) if should_use_plaintext_secret(ciphertext, field_name) => {
-            Ok(ciphertext.trim().to_string())
-        }
         Err(error) => {
             for fallback_encryption_key in fallback_encryption_keys {
                 if let Ok(value) =
@@ -156,14 +157,19 @@ fn should_use_plaintext_secret(ciphertext: &str, field_name: &str) -> bool {
     if ciphertext.is_empty() {
         return false;
     }
-    if looks_like_python_fernet_ciphertext(ciphertext) {
-        return false;
-    }
 
     match field_name {
-        "provider_api_keys.api_key" => !ciphertext.starts_with('{') && !ciphertext.starts_with('['),
+        "provider_api_keys.api_key" => {
+            if ciphertext.starts_with('{') || ciphertext.starts_with('[') {
+                return false;
+            }
+            !looks_like_python_fernet_ciphertext(ciphertext)
+        }
         "provider_api_keys.auth_config" => {
-            ciphertext.starts_with('{') || ciphertext.starts_with('[')
+            if ciphertext.starts_with('{') || ciphertext.starts_with('[') {
+                return true;
+            }
+            false
         }
         _ => false,
     }

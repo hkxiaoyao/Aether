@@ -11,15 +11,15 @@ enum ProviderPrivateStreamNormalizeMode {
     KiroToClaudeCli(KiroToClaudeCliStreamState),
 }
 
-pub(crate) struct ProviderPrivateStreamNormalizer {
-    report_context: Value,
+pub(crate) struct ProviderPrivateStreamNormalizer<'a> {
+    report_context: &'a Value,
     buffered: Vec<u8>,
     mode: ProviderPrivateStreamNormalizeMode,
 }
 
-pub(crate) fn maybe_build_provider_private_stream_normalizer(
-    report_context: Option<&Value>,
-) -> Option<ProviderPrivateStreamNormalizer> {
+pub(crate) fn maybe_build_provider_private_stream_normalizer<'a>(
+    report_context: Option<&'a Value>,
+) -> Option<ProviderPrivateStreamNormalizer<'a>> {
     let report_context = report_context?;
     if !report_context
         .get("has_envelope")
@@ -51,17 +51,17 @@ pub(crate) fn maybe_build_provider_private_stream_normalizer(
         return None;
     };
     Some(ProviderPrivateStreamNormalizer {
-        report_context: report_context.clone(),
+        report_context,
         buffered: Vec::new(),
         mode,
     })
 }
 
-impl ProviderPrivateStreamNormalizer {
+impl ProviderPrivateStreamNormalizer<'_> {
     pub(crate) fn push_chunk(&mut self, chunk: &[u8]) -> Result<Vec<u8>, GatewayError> {
         match &mut self.mode {
             ProviderPrivateStreamNormalizeMode::KiroToClaudeCli(state) => {
-                state.push_chunk(&self.report_context, chunk)
+                state.push_chunk(self.report_context, chunk)
             }
             ProviderPrivateStreamNormalizeMode::EnvelopeUnwrap => {
                 self.buffered.extend_from_slice(chunk);
@@ -69,7 +69,7 @@ impl ProviderPrivateStreamNormalizer {
                 while let Some(line_end) = self.buffered.iter().position(|byte| *byte == b'\n') {
                     let line = self.buffered.drain(..=line_end).collect::<Vec<_>>();
                     output.extend(
-                        transform_provider_private_stream_line(&self.report_context, line)
+                        transform_provider_private_stream_line(self.report_context, line)
                             .map_err(|err| GatewayError::Internal(err.to_string()))?,
                     );
                 }
@@ -81,14 +81,14 @@ impl ProviderPrivateStreamNormalizer {
     pub(crate) fn finish(&mut self) -> Result<Vec<u8>, GatewayError> {
         match &mut self.mode {
             ProviderPrivateStreamNormalizeMode::KiroToClaudeCli(state) => {
-                state.finish(&self.report_context)
+                state.finish(self.report_context)
             }
             ProviderPrivateStreamNormalizeMode::EnvelopeUnwrap => {
                 if self.buffered.is_empty() {
                     return Ok(Vec::new());
                 }
                 let line = std::mem::take(&mut self.buffered);
-                transform_provider_private_stream_line(&self.report_context, line)
+                transform_provider_private_stream_line(self.report_context, line)
                     .map_err(|err| GatewayError::Internal(err.to_string()))
             }
         }

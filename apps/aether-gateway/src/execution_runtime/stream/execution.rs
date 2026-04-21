@@ -74,6 +74,7 @@ use crate::orchestration::{
 };
 use crate::request_candidate_runtime::{
     ensure_execution_request_candidate_slot, record_local_request_candidate_status,
+    record_local_request_candidate_status_snapshot, snapshot_local_request_candidate_status,
 };
 use crate::usage::submit_stream_report;
 use crate::usage::{GatewayStreamReportRequest, GatewaySyncReportRequest};
@@ -89,7 +90,30 @@ fn record_sync_terminal_usage(
     let payload_seed = build_sync_terminal_usage_payload_seed(payload);
     state
         .usage_runtime
-        .record_sync_terminal(state.data.as_ref(), &context_seed, &payload_seed);
+        .record_sync_terminal(state.data.as_ref(), context_seed, payload_seed);
+}
+
+fn build_stream_sync_payload(
+    trace_id: &str,
+    report_kind: String,
+    report_context: Option<Value>,
+    status_code: u16,
+    headers: BTreeMap<String, String>,
+    body_json: Option<Value>,
+    body_base64: Option<String>,
+    telemetry: Option<ExecutionTelemetry>,
+) -> GatewaySyncReportRequest {
+    GatewaySyncReportRequest {
+        trace_id: trace_id.to_string(),
+        report_kind,
+        report_context,
+        status_code,
+        headers,
+        body_json,
+        client_body_json: None,
+        body_base64,
+        telemetry,
+    }
 }
 
 fn record_stream_terminal_usage(
@@ -103,10 +127,59 @@ fn record_stream_terminal_usage(
     let payload_seed = build_stream_terminal_usage_payload_seed(payload);
     state.usage_runtime.record_stream_terminal(
         state.data.as_ref(),
-        &context_seed,
-        &payload_seed,
+        context_seed,
+        payload_seed,
         cancelled,
     );
+}
+
+fn build_stream_body_capture(
+    body: &[u8],
+    truncated: bool,
+) -> (Option<String>, Option<UsageBodyCaptureState>) {
+    let body_base64 =
+        (!body.is_empty()).then(|| base64::engine::general_purpose::STANDARD.encode(body));
+    let body_state = Some(if truncated {
+        UsageBodyCaptureState::Truncated
+    } else if body.is_empty() {
+        UsageBodyCaptureState::None
+    } else {
+        UsageBodyCaptureState::Inline
+    });
+    (body_base64, body_state)
+}
+
+#[allow(clippy::too_many_arguments)] // stream report payload assembly mirrors runtime state
+fn build_stream_usage_payload(
+    trace_id: String,
+    report_kind: String,
+    report_context: Option<Value>,
+    status_code: u16,
+    headers: BTreeMap<String, String>,
+    provider_body: &[u8],
+    provider_body_truncated: bool,
+    client_body: &[u8],
+    client_body_truncated: bool,
+    terminal_summary: Option<ExecutionStreamTerminalSummary>,
+    telemetry: Option<ExecutionTelemetry>,
+) -> GatewayStreamReportRequest {
+    let (provider_body_base64, provider_body_state) =
+        build_stream_body_capture(provider_body, provider_body_truncated);
+    let (client_body_base64, client_body_state) =
+        build_stream_body_capture(client_body, client_body_truncated);
+    GatewayStreamReportRequest {
+        trace_id,
+        report_kind,
+        report_context,
+        status_code,
+        headers,
+        provider_body_base64,
+        provider_body_state,
+        client_body_base64,
+        client_body_state,
+        terminal_summary,
+        telemetry,
+    }
 }
 
 fn append_stream_capture_bytes(
@@ -138,9 +211,7 @@ async fn execute_in_process_stream(
         return Ok(execution);
     }
 
-    DirectSyncExecutionRuntime::new()
-        .execute_stream(plan.clone())
-        .await
+    DirectSyncExecutionRuntime::new().execute_stream(plan).await
 }
 
 #[allow(clippy::too_many_arguments)] // internal function, grouping would add unnecessary indirection
@@ -155,19 +226,18 @@ pub(crate) async fn execute_execution_runtime_stream(
 ) -> Result<Option<Response<Body>>, GatewayError> {
     ensure_execution_request_candidate_slot(state, &mut plan, &mut report_context).await;
     let lifecycle_seed = build_lifecycle_usage_seed(&plan, report_context.as_ref());
+    let request_candidate_status_snapshot =
+        snapshot_local_request_candidate_status(&plan, report_context.as_ref());
     state
         .usage_runtime
-        .record_pending(state.data.as_ref(), &lifecycle_seed);
+        .record_pending(state.data.as_ref(), lifecycle_seed.clone());
     let candidate_started_unix_secs = current_request_candidate_unix_ms();
-    {
+    if let Some(snapshot) = request_candidate_status_snapshot.clone() {
         let state_bg = state.clone();
-        let plan_bg = plan.clone();
-        let report_context_bg = report_context.clone();
         tokio::spawn(async move {
-            record_local_request_candidate_status(
+            record_local_request_candidate_status_snapshot(
                 &state_bg,
-                &plan_bg,
-                report_context_bg.as_ref(),
+                &snapshot,
                 SchedulerRequestCandidateStatusUpdate {
                     status: RequestCandidateStatus::Pending,
                     status_code: None,
@@ -412,8 +482,9 @@ fn response_headers_indicate_sse(headers: &BTreeMap<String, String>) -> bool {
 }
 
 fn encode_terminal_sse_error_event(failure: &StreamFailureReport) -> Result<Bytes, std::io::Error> {
-    let payload =
-        serde_json::to_string(&failure.body_json).map_err(|err| IoError::other(err.to_string()))?;
+    let payload = failure
+        .to_json_string()
+        .map_err(|err| IoError::other(err.to_string()))?;
     let mut event = String::from("event: aether.error\n");
     for line in payload.lines() {
         event.push_str("data: ");
@@ -527,6 +598,8 @@ async fn execute_stream_from_frame_stream(
     let provider_name = plan.provider_name.as_deref().unwrap_or("-");
     let model_name = plan.model_name.as_deref().unwrap_or("-");
     let lifecycle_seed = build_lifecycle_usage_seed(&plan, report_context.as_ref());
+    let request_candidate_status_snapshot =
+        snapshot_local_request_candidate_status(&plan, report_context.as_ref());
     let candidate_index = parse_request_candidate_report_context(report_context.as_ref())
         .and_then(|context| context.candidate_index)
         .map(|value| value.to_string())
@@ -756,27 +829,26 @@ async fn execute_stream_from_frame_stream(
             return Ok(None);
         }
 
-        let usage_report_kind = stream_error_finalize_kind
-            .clone()
-            .or_else(|| report_kind.clone())
-            .unwrap_or_default();
-        let usage_payload = GatewaySyncReportRequest {
-            trace_id: trace_id.to_string(),
-            report_kind: usage_report_kind,
-            report_context: report_context.clone(),
+        let payload = build_stream_sync_payload(
+            trace_id,
+            stream_error_finalize_kind
+                .as_deref()
+                .or(report_kind.as_deref())
+                .unwrap_or_default()
+                .to_string(),
+            report_context,
             status_code,
-            headers: headers.clone(),
-            body_json: body_json.clone(),
-            client_body_json: None,
-            body_base64: body_base64.clone(),
-            telemetry: None,
-        };
-        record_sync_terminal_usage(state, &plan, report_context.as_ref(), &usage_payload);
+            headers,
+            body_json,
+            body_base64,
+            None,
+        );
+        record_sync_terminal_usage(state, &plan, payload.report_context.as_ref(), &payload);
         let terminal_unix_secs = current_request_candidate_unix_ms();
         record_local_request_candidate_status(
             state,
             &plan,
-            report_context.as_ref(),
+            payload.report_context.as_ref(),
             SchedulerRequestCandidateStatusUpdate {
                 status: RequestCandidateStatus::Failed,
                 status_code: Some(status_code),
@@ -790,18 +862,7 @@ async fn execute_stream_from_frame_stream(
             },
         )
         .await;
-        if let Some(report_kind) = stream_error_finalize_kind {
-            let payload = GatewaySyncReportRequest {
-                trace_id: trace_id.to_string(),
-                report_kind,
-                report_context,
-                status_code,
-                headers: headers.clone(),
-                body_json,
-                client_body_json: None,
-                body_base64,
-                telemetry: None,
-            };
+        if stream_error_finalize_kind.is_some() {
             let response =
                 submit_local_core_error_or_sync_finalize(state, trace_id, decision, payload)
                     .await?;
@@ -817,7 +878,7 @@ async fn execute_stream_from_frame_stream(
                 decision,
                 plan_kind,
                 status_code,
-                headers,
+                payload.headers,
                 error_body,
             )?,
             Some(request_id),
@@ -891,12 +952,12 @@ async fn execute_stream_from_frame_stream(
                         trace_id,
                         decision,
                         &plan,
-                        report_context.clone(),
+                        report_context,
                         request_id,
                         candidate_id,
                         report_kind,
-                        &headers,
-                        prefetched_telemetry.clone(),
+                        headers,
+                        prefetched_telemetry,
                         &provider_prefetched_body,
                         failure,
                     )
@@ -924,12 +985,12 @@ async fn execute_stream_from_frame_stream(
                                     trace_id,
                                     decision,
                                     &plan,
-                                    report_context.clone(),
+                                    report_context,
                                     request_id,
                                     candidate_id,
                                     report_kind,
-                                    &headers,
-                                    prefetched_telemetry.clone(),
+                                    headers,
+                                    prefetched_telemetry,
                                     &prefetched_body,
                                     failure,
                                 )
@@ -964,21 +1025,20 @@ async fn execute_stream_from_frame_stream(
                                 provider_prefetched_body_bytes = provider_prefetched_body.len(),
                                 "gateway detected embedded error while prefetching execution runtime stream"
                             );
-                            let payload = GatewaySyncReportRequest {
-                                trace_id: trace_id.to_string(),
-                                report_kind: report_kind.clone(),
-                                report_context: report_context.clone(),
+                            let payload = build_stream_sync_payload(
+                                trace_id,
+                                report_kind.clone(),
+                                report_context,
                                 status_code,
-                                headers: headers.clone(),
-                                body_json: Some(body_json),
-                                client_body_json: None,
-                                body_base64: None,
-                                telemetry: prefetched_telemetry.clone(),
-                            };
+                                headers,
+                                Some(body_json),
+                                None,
+                                prefetched_telemetry,
+                            );
                             record_sync_terminal_usage(
                                 state,
                                 &plan,
-                                report_context.as_ref(),
+                                payload.report_context.as_ref(),
                                 &payload,
                             );
                             let response = submit_local_core_error_or_sync_finalize(
@@ -1013,12 +1073,12 @@ async fn execute_stream_from_frame_stream(
                                     trace_id,
                                     decision,
                                     &plan,
-                                    report_context.clone(),
+                                    report_context,
                                     request_id,
                                     candidate_id,
                                     report_kind,
-                                    &headers,
-                                    prefetched_telemetry.clone(),
+                                    headers,
+                                    prefetched_telemetry,
                                     &provider_prefetched_body,
                                     failure,
                                 )
@@ -1044,12 +1104,12 @@ async fn execute_stream_from_frame_stream(
                                     trace_id,
                                     decision,
                                     &plan,
-                                    report_context.clone(),
+                                    report_context,
                                     request_id,
                                     candidate_id,
                                     report_kind,
-                                    &headers,
-                                    prefetched_telemetry.clone(),
+                                    headers,
+                                    prefetched_telemetry,
                                     &provider_prefetched_body,
                                     failure,
                                 )
@@ -1093,12 +1153,12 @@ async fn execute_stream_from_frame_stream(
                         trace_id,
                         decision,
                         &plan,
-                        report_context.clone(),
+                        report_context,
                         request_id,
                         candidate_id,
                         report_kind,
-                        &headers,
-                        prefetched_telemetry.clone(),
+                        headers,
+                        prefetched_telemetry,
                         &provider_prefetched_body,
                         build_stream_failure_from_execution_error(&error),
                     )
@@ -1108,6 +1168,8 @@ async fn execute_stream_from_frame_stream(
             }
         }
     }
+    drop(private_stream_normalizer);
+    drop(local_stream_rewriter);
 
     state.usage_runtime.record_stream_started(
         state.data.as_ref(),
@@ -1115,18 +1177,15 @@ async fn execute_stream_from_frame_stream(
         status_code,
         prefetched_telemetry.as_ref(),
     );
-    {
+    if let Some(snapshot) = request_candidate_status_snapshot {
         let state_bg = state.clone();
-        let plan_bg = plan.clone();
-        let report_context_bg = report_context.clone();
         let latency_ms = prefetched_telemetry
             .as_ref()
             .and_then(|telemetry| telemetry.elapsed_ms);
         tokio::spawn(async move {
-            record_local_request_candidate_status(
+            record_local_request_candidate_status_snapshot(
                 &state_bg,
-                &plan_bg,
-                report_context_bg.as_ref(),
+                &snapshot,
                 SchedulerRequestCandidateStatusUpdate {
                     status: RequestCandidateStatus::Streaming,
                     status_code: Some(status_code),
@@ -1141,24 +1200,27 @@ async fn execute_stream_from_frame_stream(
         });
     }
 
+    let request_id = request_id.to_string();
+    let candidate_id = candidate_id.map(ToOwned::to_owned);
     let (tx, mut rx) = mpsc::channel::<Result<Bytes, IoError>>(16);
     let state_for_report = state.clone();
-    let plan_for_report = plan.clone();
+    let plan_for_report = plan;
     let trace_id_owned = trace_id.to_string();
     let headers_for_report = headers.clone();
-    let report_kind_owned = report_kind.clone();
-    let report_context_owned = report_context.clone();
-    let lifecycle_seed_for_report = lifecycle_seed.clone();
+    let report_kind_owned = report_kind;
+    let report_context_owned = report_context;
+    let normalized_stream_report_context_owned = normalized_stream_report_context;
+    let lifecycle_seed_for_report = lifecycle_seed;
     let provider_prefetched_body_for_report = provider_prefetched_body;
     let prefetched_body_for_report = prefetched_body;
     let prefetched_chunks_for_body = prefetched_chunks;
-    let initial_telemetry = prefetched_telemetry.clone();
+    let initial_telemetry = prefetched_telemetry;
     let initial_reached_eof = reached_eof;
-    let direct_stream_finalize_kind_owned = direct_stream_finalize_kind.clone();
+    let direct_stream_finalize_kind_owned = direct_stream_finalize_kind;
     let candidate_started_unix_secs_for_report = candidate_started_unix_secs;
-    let request_id_for_report = request_id.to_string();
-    let request_id_for_report_log = short_request_id(request_id);
-    let candidate_id_for_report = candidate_id.map(ToOwned::to_owned);
+    let request_id_for_report = request_id.clone();
+    let request_id_for_report_log = short_request_id(&request_id);
+    let candidate_id_for_report = candidate_id.clone();
     let emit_passthrough_sse_terminal_error =
         skip_direct_finalize_prefetch && response_headers_indicate_sse(&headers);
     let body_capture_policy = match UsageRuntimeAccess::body_capture_policy(state.data.as_ref())
@@ -1194,6 +1256,10 @@ async fn execute_stream_from_frame_stream(
         let mut buffered_body = Vec::new();
         let mut provider_body_truncated = false;
         let mut client_body_truncated = false;
+        let mut private_stream_normalizer =
+            maybe_build_provider_private_stream_normalizer(report_context_owned.as_ref());
+        let mut local_stream_rewriter =
+            maybe_build_stream_response_rewriter(normalized_stream_report_context_owned.as_ref());
         append_stream_capture_bytes(
             &mut provider_buffered_body,
             &provider_prefetched_body_for_report,
@@ -1206,13 +1272,68 @@ async fn execute_stream_from_frame_stream(
             max_stream_body_buffer_bytes,
             &mut client_body_truncated,
         );
-        let mut telemetry: Option<ExecutionTelemetry> = initial_telemetry.clone();
-        let mut usage_stream_telemetry: Option<ExecutionTelemetry> = initial_telemetry;
+        let mut usage_stream_telemetry: Option<ExecutionTelemetry> = initial_telemetry.clone();
+        let mut telemetry: Option<ExecutionTelemetry> = initial_telemetry;
         let reached_eof = initial_reached_eof;
         let mut downstream_dropped = false;
         let mut terminal_failure: Option<StreamFailureReport> = None;
+        if !provider_prefetched_body_for_report.is_empty() {
+            let normalized_prefetched_chunk = if let Some(normalizer) =
+                private_stream_normalizer.as_mut()
+            {
+                match normalizer.push_chunk(&provider_prefetched_body_for_report) {
+                    Ok(normalized_chunk) => Some(normalized_chunk),
+                    Err(err) => {
+                        warn!(
+                            event_name = "stream_execution_prefetch_normalize_restore_failed",
+                            log_type = "ops",
+                            trace_id = %trace_id_owned,
+                            request_id = %request_id_for_report_log,
+                            candidate_id = ?candidate_id_for_report.as_deref(),
+                            error = ?err,
+                            "gateway failed to restore private stream normalization state after prefetch"
+                        );
+                        terminal_failure = Some(build_stream_failure_report(
+                            "execution_runtime_stream_rewrite_error",
+                            format!(
+                                "failed to restore private stream normalization state after prefetch: {err:?}"
+                            ),
+                            502,
+                        ));
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            let replay_chunk = normalized_prefetched_chunk
+                .as_deref()
+                .unwrap_or(provider_prefetched_body_for_report.as_slice());
+            if terminal_failure.is_none() {
+                if let Some(rewriter) = local_stream_rewriter.as_mut() {
+                    if let Err(err) = rewriter.push_chunk(replay_chunk) {
+                        warn!(
+                            event_name = "stream_execution_prefetch_rewrite_restore_failed",
+                            log_type = "ops",
+                            trace_id = %trace_id_owned,
+                            request_id = %request_id_for_report_log,
+                            candidate_id = ?candidate_id_for_report.as_deref(),
+                            error = ?err,
+                            "gateway failed to restore local stream rewrite state after prefetch"
+                        );
+                        terminal_failure = Some(build_stream_failure_report(
+                            "execution_runtime_stream_rewrite_error",
+                            format!(
+                                "failed to restore local stream rewrite state after prefetch: {err:?}"
+                            ),
+                            502,
+                        ));
+                    }
+                }
+            }
+        }
 
-        if !reached_eof {
+        if terminal_failure.is_none() && !reached_eof {
             loop {
                 let next_frame = match next_stream_frame(&mut buffered_frames, &mut lines).await {
                     Ok(frame) => frame,
@@ -1355,7 +1476,6 @@ async fn execute_stream_from_frame_stream(
                             usage_stream_telemetry.as_ref(),
                             &frame_telemetry,
                         );
-                        telemetry = Some(frame_telemetry.clone());
                         if should_refresh_stream_usage {
                             state_for_report.usage_runtime.record_stream_started(
                                 state_for_report.data.as_ref(),
@@ -1363,8 +1483,9 @@ async fn execute_stream_from_frame_stream(
                                 status_code,
                                 Some(&frame_telemetry),
                             );
-                            usage_stream_telemetry = Some(frame_telemetry);
+                            usage_stream_telemetry = Some(frame_telemetry.clone());
                         }
+                        telemetry = Some(frame_telemetry);
                     }
                     StreamFramePayload::Eof { summary } => {
                         stream_terminal_summary = summary;
@@ -1564,50 +1685,39 @@ async fn execute_stream_from_frame_stream(
                 trace_id = %trace_id_owned,
                 "gateway skipped stream report because downstream disconnected before completion"
             );
+            let usage_payload = build_stream_usage_payload(
+                trace_id_owned,
+                report_kind_owned.unwrap_or_default(),
+                report_context_owned,
+                499,
+                headers_for_report,
+                &provider_buffered_body,
+                provider_body_truncated,
+                &buffered_body,
+                client_body_truncated,
+                stream_terminal_summary,
+                telemetry,
+            );
             record_stream_terminal_usage(
                 &state_for_report,
                 &plan_for_report,
-                report_context_owned.as_ref(),
-                &GatewayStreamReportRequest {
-                    trace_id: trace_id_owned.clone(),
-                    report_kind: report_kind_owned.clone().unwrap_or_default(),
-                    report_context: report_context_owned.clone(),
-                    status_code: 499,
-                    headers: headers_for_report.clone(),
-                    provider_body_base64: (!provider_buffered_body.is_empty()).then(|| {
-                        base64::engine::general_purpose::STANDARD.encode(&provider_buffered_body)
-                    }),
-                    provider_body_state: Some(if provider_body_truncated {
-                        UsageBodyCaptureState::Truncated
-                    } else if provider_buffered_body.is_empty() {
-                        UsageBodyCaptureState::None
-                    } else {
-                        UsageBodyCaptureState::Inline
-                    }),
-                    client_body_base64: (!buffered_body.is_empty())
-                        .then(|| base64::engine::general_purpose::STANDARD.encode(&buffered_body)),
-                    client_body_state: Some(if client_body_truncated {
-                        UsageBodyCaptureState::Truncated
-                    } else if buffered_body.is_empty() {
-                        UsageBodyCaptureState::None
-                    } else {
-                        UsageBodyCaptureState::Inline
-                    }),
-                    terminal_summary: stream_terminal_summary.clone(),
-                    telemetry: telemetry.clone(),
-                },
+                usage_payload.report_context.as_ref(),
+                &usage_payload,
                 true,
             );
             record_local_request_candidate_status(
                 &state_for_report,
                 &plan_for_report,
-                report_context_owned.as_ref(),
+                usage_payload.report_context.as_ref(),
                 SchedulerRequestCandidateStatusUpdate {
                     status: RequestCandidateStatus::Cancelled,
                     status_code: Some(499),
                     error_type: Some("downstream_disconnect".to_string()),
                     error_message: Some("client disconnected before stream completion".to_string()),
-                    latency_ms: telemetry.as_ref().and_then(|value| value.elapsed_ms),
+                    latency_ms: usage_payload
+                        .telemetry
+                        .as_ref()
+                        .and_then(|value| value.elapsed_ms),
                     started_at_unix_ms: Some(candidate_started_unix_secs_for_report),
                     finished_at_unix_ms: Some(current_request_candidate_unix_ms()),
                 },
@@ -1622,9 +1732,9 @@ async fn execute_stream_from_frame_stream(
                 &trace_id_owned,
                 &plan_for_report,
                 direct_stream_finalize_kind_owned.as_deref(),
-                report_context_owned.as_ref(),
-                &headers_for_report,
-                telemetry.clone(),
+                report_context_owned,
+                headers_for_report,
+                telemetry,
                 &provider_buffered_body,
                 candidate_started_unix_secs_for_report,
                 failure,
@@ -1633,38 +1743,25 @@ async fn execute_stream_from_frame_stream(
             return;
         }
 
-        let usage_payload = GatewayStreamReportRequest {
-            trace_id: trace_id_owned.clone(),
-            report_kind: report_kind_owned.clone().unwrap_or_default(),
-            report_context: report_context_owned.clone(),
+        let should_submit_report = report_kind_owned.is_some();
+        let usage_payload = build_stream_usage_payload(
+            trace_id_owned.clone(),
+            report_kind_owned.unwrap_or_default(),
+            report_context_owned,
             status_code,
-            headers: headers_for_report.clone(),
-            provider_body_base64: (!provider_buffered_body.is_empty())
-                .then(|| base64::engine::general_purpose::STANDARD.encode(&provider_buffered_body)),
-            provider_body_state: Some(if provider_body_truncated {
-                UsageBodyCaptureState::Truncated
-            } else if provider_buffered_body.is_empty() {
-                UsageBodyCaptureState::None
-            } else {
-                UsageBodyCaptureState::Inline
-            }),
-            client_body_base64: (!buffered_body.is_empty())
-                .then(|| base64::engine::general_purpose::STANDARD.encode(&buffered_body)),
-            client_body_state: Some(if client_body_truncated {
-                UsageBodyCaptureState::Truncated
-            } else if buffered_body.is_empty() {
-                UsageBodyCaptureState::None
-            } else {
-                UsageBodyCaptureState::Inline
-            }),
-            terminal_summary: stream_terminal_summary,
-            telemetry: telemetry.clone(),
-        };
+            headers_for_report,
+            &provider_buffered_body,
+            provider_body_truncated,
+            &buffered_body,
+            client_body_truncated,
+            stream_terminal_summary,
+            telemetry,
+        );
         apply_local_execution_effect(
             &state_for_report,
             LocalExecutionEffectContext {
                 plan: &plan_for_report,
-                report_context: report_context_owned.as_ref(),
+                report_context: usage_payload.report_context.as_ref(),
             },
             LocalExecutionEffect::HealthSuccess(LocalHealthSuccessEffect),
         )
@@ -1673,7 +1770,7 @@ async fn execute_stream_from_frame_stream(
             &state_for_report,
             LocalExecutionEffectContext {
                 plan: &plan_for_report,
-                report_context: report_context_owned.as_ref(),
+                report_context: usage_payload.report_context.as_ref(),
             },
             LocalExecutionEffect::AdaptiveSuccess(LocalAdaptiveSuccessEffect),
         )
@@ -1682,7 +1779,7 @@ async fn execute_stream_from_frame_stream(
             &state_for_report,
             LocalExecutionEffectContext {
                 plan: &plan_for_report,
-                report_context: report_context_owned.as_ref(),
+                report_context: usage_payload.report_context.as_ref(),
             },
             LocalExecutionEffect::PoolSuccessStream {
                 payload: &usage_payload,
@@ -1692,31 +1789,31 @@ async fn execute_stream_from_frame_stream(
         record_stream_terminal_usage(
             &state_for_report,
             &plan_for_report,
-            report_context_owned.as_ref(),
+            usage_payload.report_context.as_ref(),
             &usage_payload,
             false,
         );
         record_local_request_candidate_status(
             &state_for_report,
             &plan_for_report,
-            report_context_owned.as_ref(),
+            usage_payload.report_context.as_ref(),
             SchedulerRequestCandidateStatusUpdate {
                 status: RequestCandidateStatus::Success,
                 status_code: Some(status_code),
                 error_type: None,
                 error_message: None,
-                latency_ms: telemetry.as_ref().and_then(|value| value.elapsed_ms),
+                latency_ms: usage_payload
+                    .telemetry
+                    .as_ref()
+                    .and_then(|value| value.elapsed_ms),
                 started_at_unix_ms: Some(candidate_started_unix_secs_for_report),
                 finished_at_unix_ms: Some(current_request_candidate_unix_ms()),
             },
         )
         .await;
 
-        if let Some(report_kind) = report_kind_owned {
-            let mut report = usage_payload;
-            report.report_kind = report_kind;
-            if let Err(err) = submit_stream_report(&state_for_report, &trace_id_owned, report).await
-            {
+        if should_submit_report {
+            if let Err(err) = submit_stream_report(&state_for_report, usage_payload).await {
                 warn!(
                     event_name = "execution_report_submit_failed",
                     log_type = "ops",
@@ -1740,12 +1837,10 @@ async fn execute_stream_from_frame_stream(
         }
     };
 
-    headers.insert(
-        CONTROL_REQUEST_ID_HEADER.to_string(),
-        request_id.to_string(),
-    );
+    headers.insert(CONTROL_REQUEST_ID_HEADER.to_string(), request_id.clone());
 
     if let Some(candidate_id) = candidate_id
+        .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {

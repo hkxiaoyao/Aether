@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::ai_pipeline::planner::candidate_eligibility::EligibleLocalExecutionCandidate;
 use crate::ai_pipeline::planner::candidate_preparation::{
     resolve_candidate_mapped_model, resolve_candidate_oauth_auth, OauthPreparationContext,
@@ -19,7 +21,7 @@ use super::policy::{
 };
 
 pub(super) struct PreparedSameFormatProviderCandidate {
-    pub(super) transport: GatewayProviderTransportSnapshot,
+    pub(super) transport: Arc<GatewayProviderTransportSnapshot>,
     pub(super) is_antigravity: bool,
     pub(super) is_claude_code: bool,
     pub(super) is_vertex: bool,
@@ -44,7 +46,7 @@ pub(super) async fn prepare_local_same_format_provider_candidate(
     let spec_metadata = local_same_format_provider_spec_metadata(spec);
     let planner_state = PlannerAppState::new(state);
     let candidate = &eligible.candidate;
-    let transport = eligible.transport.clone();
+    let transport = Arc::clone(&eligible.transport);
     let behavior = classify_same_format_provider_request_behavior(&transport, spec_metadata);
 
     if !same_format_provider_transport_supported(

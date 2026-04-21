@@ -206,18 +206,18 @@ pub(crate) async fn maybe_build_local_internal_proxy_response_impl(
                         Json(build_internal_gateway_fallback_plan_payload(None)).into_response(),
                     ));
                 };
-                if let Some(auth_context) = payload.auth_context.clone() {
+                let provided_auth_context = payload.auth_context.is_some();
+                if let Some(auth_context) = payload.auth_context {
                     resolved.auth_context = Some(auth_context);
                     resolved.local_auth_rejection = None;
                 }
-                let auth_context = resolved.auth_context.clone();
+                let auth_context = resolved.auth_context.as_ref();
                 if auth_context
-                    .as_ref()
                     .map(|value| !value.access_allowed)
                     .unwrap_or(true)
                 {
-                    let fallback_auth_context = if payload.auth_context.is_none() {
-                        auth_context.as_ref()
+                    let fallback_auth_context = if !provided_auth_context {
+                        auth_context
                     } else {
                         None
                     };
@@ -239,8 +239,8 @@ pub(crate) async fn maybe_build_local_internal_proxy_response_impl(
                 )
                 .await?
                 else {
-                    let fallback_auth_context = if payload.auth_context.is_none() {
-                        auth_context.as_ref()
+                    let fallback_auth_context = if !provided_auth_context {
+                        auth_context
                     } else {
                         None
                     };
@@ -251,7 +251,7 @@ pub(crate) async fn maybe_build_local_internal_proxy_response_impl(
                         .into_response(),
                     ));
                 };
-                if payload.auth_context.is_some() {
+                if provided_auth_context {
                     local_payload.auth_context = None;
                 }
                 return Ok(Some(Json(local_payload).into_response()));
@@ -308,18 +308,18 @@ pub(crate) async fn maybe_build_local_internal_proxy_response_impl(
                         Json(build_internal_gateway_fallback_plan_payload(None)).into_response(),
                     ));
                 };
-                if let Some(auth_context) = payload.auth_context.clone() {
+                let provided_auth_context = payload.auth_context.is_some();
+                if let Some(auth_context) = payload.auth_context {
                     resolved.auth_context = Some(auth_context);
                     resolved.local_auth_rejection = None;
                 }
-                let auth_context = resolved.auth_context.clone();
+                let auth_context = resolved.auth_context.as_ref();
                 if auth_context
-                    .as_ref()
                     .map(|value| !value.access_allowed)
                     .unwrap_or(true)
                 {
-                    let fallback_auth_context = if payload.auth_context.is_none() {
-                        auth_context.as_ref()
+                    let fallback_auth_context = if !provided_auth_context {
+                        auth_context
                     } else {
                         None
                     };
@@ -339,8 +339,8 @@ pub(crate) async fn maybe_build_local_internal_proxy_response_impl(
                 )
                 .await?
                 else {
-                    let fallback_auth_context = if payload.auth_context.is_none() {
-                        auth_context.as_ref()
+                    let fallback_auth_context = if !provided_auth_context {
+                        auth_context
                     } else {
                         None
                     };
@@ -351,7 +351,7 @@ pub(crate) async fn maybe_build_local_internal_proxy_response_impl(
                         .into_response(),
                     ));
                 };
-                if payload.auth_context.is_some() {
+                if provided_auth_context {
                     local_payload.auth_context = None;
                 }
                 return Ok(Some(Json(local_payload).into_response()));
@@ -406,7 +406,8 @@ pub(crate) async fn maybe_build_local_internal_proxy_response_impl(
                 else {
                     return Ok(Some(build_internal_gateway_proxy_public_response()));
                 };
-                if let Some(auth_context) = payload.auth_context.clone() {
+                let provided_auth_context = payload.auth_context.is_some();
+                if let Some(auth_context) = payload.auth_context {
                     resolved.auth_context = Some(auth_context);
                     resolved.local_auth_rejection = None;
                 }
@@ -421,7 +422,7 @@ pub(crate) async fn maybe_build_local_internal_proxy_response_impl(
                 )
                 .await?
                 {
-                    if payload.auth_context.is_some() {
+                    if provided_auth_context {
                         planned.auth_context = None;
                     }
                     return Ok(Some(Json(planned).into_response()));
@@ -472,7 +473,8 @@ pub(crate) async fn maybe_build_local_internal_proxy_response_impl(
                 else {
                     return Ok(Some(build_internal_gateway_proxy_public_response()));
                 };
-                if let Some(auth_context) = payload.auth_context.clone() {
+                let provided_auth_context = payload.auth_context.is_some();
+                if let Some(auth_context) = payload.auth_context {
                     resolved.auth_context = Some(auth_context);
                     resolved.local_auth_rejection = None;
                 }
@@ -485,7 +487,7 @@ pub(crate) async fn maybe_build_local_internal_proxy_response_impl(
                 )
                 .await?
                 {
-                    if payload.auth_context.is_some() {
+                    if provided_auth_context {
                         planned.auth_context = None;
                     }
                     return Ok(Some(Json(planned).into_response()));
@@ -542,7 +544,7 @@ pub(crate) async fn maybe_build_local_internal_proxy_response_impl(
                 else {
                     return Ok(None);
                 };
-                if let Some(auth_context) = payload.auth_context.clone() {
+                if let Some(auth_context) = payload.auth_context {
                     resolved.auth_context = Some(auth_context);
                     resolved.local_auth_rejection = None;
                 }
@@ -626,7 +628,7 @@ pub(crate) async fn maybe_build_local_internal_proxy_response_impl(
                 else {
                     return Ok(None);
                 };
-                if let Some(auth_context) = payload.auth_context.clone() {
+                if let Some(auth_context) = payload.auth_context {
                     resolved.auth_context = Some(auth_context);
                     resolved.local_auth_rejection = None;
                 }
@@ -683,8 +685,7 @@ pub(crate) async fn maybe_build_local_internal_proxy_response_impl(
                         )));
                     }
                 };
-                let trace_id = payload.trace_id.clone();
-                crate::usage::submit_sync_report(state, &trace_id, payload).await?;
+                crate::usage::submit_sync_report(state, payload).await?;
                 return Ok(Some(Json(json!({ "ok": true })).into_response()));
             }
             Some("report_stream")
@@ -707,8 +708,7 @@ pub(crate) async fn maybe_build_local_internal_proxy_response_impl(
                         )));
                     }
                 };
-                let trace_id = payload.trace_id.clone();
-                crate::usage::submit_stream_report(state, &trace_id, payload).await?;
+                crate::usage::submit_stream_report(state, payload).await?;
                 return Ok(Some(Json(json!({ "ok": true })).into_response()));
             }
             Some("finalize_sync")
@@ -739,16 +739,12 @@ pub(crate) async fn maybe_build_local_internal_proxy_response_impl(
                 };
                 let trace_id = payload.trace_id.clone();
                 if let Some(outcome) = ai_pipeline_api::maybe_build_sync_finalize_outcome(
-                    &trace_id,
+                    trace_id.as_str(),
                     &synthetic_decision,
                     &payload,
                 )? {
                     if let Some(background_report) = outcome.background_report {
-                        crate::usage::spawn_sync_report(
-                            state.clone(),
-                            trace_id.clone(),
-                            background_report,
-                        );
+                        crate::usage::spawn_sync_report(state.clone(), background_report);
                     }
                     let mut response = outcome.response;
                     response.headers_mut().insert(
@@ -761,7 +757,7 @@ pub(crate) async fn maybe_build_local_internal_proxy_response_impl(
                     state,
                     trace_id.as_str(),
                     &synthetic_decision,
-                    &payload,
+                    payload,
                 )
                 .await?
                 {

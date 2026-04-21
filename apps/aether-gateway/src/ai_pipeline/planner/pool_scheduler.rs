@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{btree_map::Entry, BTreeMap, BTreeSet};
 use std::hash::{Hash, Hasher};
 
 use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey;
@@ -123,14 +123,11 @@ async fn read_pool_catalog_key_contexts_by_id(
         if pool_config_for_candidate(candidate).is_none() {
             continue;
         }
-        if provider_type_by_key_id.contains_key(&candidate.candidate.key_id) {
-            continue;
+        let key_id = candidate.candidate.key_id.clone();
+        if let Entry::Vacant(entry) = provider_type_by_key_id.entry(key_id.clone()) {
+            entry.insert(candidate.transport.provider.provider_type.clone());
+            key_ids.push(key_id);
         }
-        provider_type_by_key_id.insert(
-            candidate.candidate.key_id.clone(),
-            candidate.transport.provider.provider_type.clone(),
-        );
-        key_ids.push(candidate.candidate.key_id.clone());
     }
 
     if key_ids.is_empty() {
@@ -324,10 +321,15 @@ fn apply_local_execution_pool_scheduler_with_runtime_map(
     for candidate in candidates {
         let pool_enabled = pool_config_for_candidate(&candidate).is_some();
         let group_key = pool_group_key(&candidate, pool_enabled);
-        if !groups.contains_key(&group_key) {
-            group_order.push(group_key.clone());
+        match groups.entry(group_key) {
+            Entry::Vacant(entry) => {
+                group_order.push(entry.key().clone());
+                entry.insert(vec![candidate]);
+            }
+            Entry::Occupied(mut entry) => {
+                entry.get_mut().push(candidate);
+            }
         }
-        groups.entry(group_key).or_default().push(candidate);
     }
 
     let mut reordered = Vec::new();
@@ -1509,7 +1511,7 @@ mod tests {
             },
             provider_api_format: "openai:chat".to_string(),
             orchestration: LocalExecutionCandidateMetadata::default(),
-            transport: crate::ai_pipeline::GatewayProviderTransportSnapshot {
+            transport: Arc::new(crate::ai_pipeline::GatewayProviderTransportSnapshot {
                 provider: GatewayProviderTransportProvider {
                     id: provider_id.to_string(),
                     name: provider_id.to_string(),
@@ -1558,7 +1560,7 @@ mod tests {
                     decrypted_api_key: "secret".to_string(),
                     decrypted_auth_config: None,
                 },
-            },
+            }),
         }
     }
 }
