@@ -25,12 +25,14 @@ use chrono::Utc;
 use serde_json::Value;
 
 use super::{
-    provider_api_key_usage_contribution, strip_deprecated_usage_display_fields,
-    usage_can_recover_terminal_failure, ProviderApiKeyUsageContribution, ProviderApiKeyUsageDelta,
-    StoredProviderApiKeyUsageSummary, StoredProviderUsageSummary, StoredProviderUsageWindow,
-    StoredRequestUsageAudit, StoredUsageDailySummary, UpsertUsageRecord, UsageAuditListQuery,
-    UsageDailyHeatmapQuery, UsageReadRepository, UsageWriteRepository,
+    api_key_usage_contribution, provider_api_key_usage_contribution,
+    strip_deprecated_usage_display_fields, usage_can_recover_terminal_failure,
+    ApiKeyUsageContribution, ApiKeyUsageDelta, ProviderApiKeyUsageContribution,
+    ProviderApiKeyUsageDelta, StoredProviderApiKeyUsageSummary, StoredProviderUsageSummary,
+    StoredProviderUsageWindow, StoredRequestUsageAudit, StoredUsageDailySummary, UpsertUsageRecord,
+    UsageAuditListQuery, UsageDailyHeatmapQuery, UsageReadRepository, UsageWriteRepository,
 };
+use crate::repository::auth::InMemoryAuthApiKeySnapshotRepository;
 use crate::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
 use crate::DataLayerError;
 
@@ -39,6 +41,7 @@ pub struct InMemoryUsageReadRepository {
     by_request_id: RwLock<BTreeMap<String, StoredRequestUsageAudit>>,
     detached_bodies: RwLock<BTreeMap<String, Value>>,
     provider_usage_windows: RwLock<Vec<StoredProviderUsageWindow>>,
+    auth_api_keys: Option<Arc<InMemoryAuthApiKeySnapshotRepository>>,
     provider_catalog: Option<Arc<InMemoryProviderCatalogReadRepository>>,
 }
 
@@ -56,6 +59,7 @@ impl InMemoryUsageReadRepository {
             by_request_id: RwLock::new(by_request_id),
             detached_bodies: RwLock::new(BTreeMap::new()),
             provider_usage_windows: RwLock::new(Vec::new()),
+            auth_api_keys: None,
             provider_catalog: None,
         }
     }
@@ -107,6 +111,7 @@ impl InMemoryUsageReadRepository {
             by_request_id: RwLock::new(by_request_id),
             detached_bodies: RwLock::new(detached_bodies),
             provider_usage_windows: RwLock::new(Vec::new()),
+            auth_api_keys: None,
             provider_catalog: None,
         }
     }
@@ -119,8 +124,17 @@ impl InMemoryUsageReadRepository {
             by_request_id: self.by_request_id,
             detached_bodies: self.detached_bodies,
             provider_usage_windows: RwLock::new(items.into_iter().collect()),
+            auth_api_keys: self.auth_api_keys,
             provider_catalog: self.provider_catalog,
         }
+    }
+
+    pub fn with_auth_api_key_repository(
+        mut self,
+        repository: Arc<InMemoryAuthApiKeySnapshotRepository>,
+    ) -> Self {
+        self.auth_api_keys = Some(repository);
+        self
     }
 
     pub fn with_provider_catalog_repository(
@@ -162,6 +176,31 @@ fn accumulate_provider_api_key_usage_contribution(
     entry.total_response_time_ms = entry
         .total_response_time_ms
         .saturating_add(contribution.total_response_time_ms);
+    entry.last_used_at_unix_secs = match (
+        entry.last_used_at_unix_secs,
+        contribution.last_used_at_unix_secs,
+    ) {
+        (Some(existing), Some(candidate)) => Some(existing.max(candidate)),
+        (None, Some(candidate)) => Some(candidate),
+        (existing, None) => existing,
+    };
+}
+
+fn accumulate_api_key_usage_contribution(
+    aggregates: &mut BTreeMap<String, ApiKeyUsageContribution>,
+    contribution: ApiKeyUsageContribution,
+) {
+    let entry = aggregates
+        .entry(contribution.api_key_id.clone())
+        .or_insert_with(|| ApiKeyUsageContribution {
+            api_key_id: contribution.api_key_id.clone(),
+            ..ApiKeyUsageContribution::default()
+        });
+    entry.total_requests = entry
+        .total_requests
+        .saturating_add(contribution.total_requests);
+    entry.total_tokens = entry.total_tokens.saturating_add(contribution.total_tokens);
+    entry.total_cost_usd += contribution.total_cost_usd;
     entry.last_used_at_unix_secs = match (
         entry.last_used_at_unix_secs,
         contribution.last_used_at_unix_secs,
@@ -2407,6 +2446,44 @@ impl UsageWriteRepository for InMemoryUsageReadRepository {
         };
 
         by_request_id.insert(stored.request_id.clone(), stored.clone());
+        if let Some(auth_api_keys) = self.auth_api_keys.as_ref() {
+            let before_contribution = existing.as_ref().and_then(api_key_usage_contribution);
+            let after_contribution = api_key_usage_contribution(&stored);
+
+            match (before_contribution.as_ref(), after_contribution.as_ref()) {
+                (Some(before), Some(after)) if before.api_key_id == after.api_key_id => {
+                    let delta = ApiKeyUsageDelta::between(before, after);
+                    auth_api_keys.apply_usage_stats_delta(before.api_key_id.as_str(), &delta, None);
+                }
+                _ => {
+                    if let Some(before) = before_contribution.as_ref() {
+                        let delta = ApiKeyUsageDelta::removal(before);
+                        let recomputed_last_used_at_unix_secs = by_request_id
+                            .values()
+                            .filter_map(|item| {
+                                item.api_key_id
+                                    .as_deref()
+                                    .filter(|api_key_id| *api_key_id == before.api_key_id.as_str())
+                                    .map(|_| item.created_at_unix_ms)
+                            })
+                            .max();
+                        auth_api_keys.apply_usage_stats_delta(
+                            before.api_key_id.as_str(),
+                            &delta,
+                            recomputed_last_used_at_unix_secs,
+                        );
+                    }
+                    if let Some(after) = after_contribution.as_ref() {
+                        let delta = ApiKeyUsageDelta::addition(after);
+                        auth_api_keys.apply_usage_stats_delta(
+                            after.api_key_id.as_str(),
+                            &delta,
+                            None,
+                        );
+                    }
+                }
+            }
+        }
         if let Some(provider_catalog) = self.provider_catalog.as_ref() {
             let before_contribution = existing
                 .as_ref()
@@ -2450,6 +2527,23 @@ impl UsageWriteRepository for InMemoryUsageReadRepository {
         Ok(stored)
     }
 
+    async fn rebuild_api_key_usage_stats(&self) -> Result<u64, DataLayerError> {
+        let Some(auth_api_keys) = self.auth_api_keys.as_ref() else {
+            return Ok(0);
+        };
+
+        let by_request_id = self.by_request_id.read().expect("usage repository lock");
+        let mut aggregates = BTreeMap::new();
+        for usage in by_request_id.values() {
+            let Some(contribution) = api_key_usage_contribution(usage) else {
+                continue;
+            };
+            accumulate_api_key_usage_contribution(&mut aggregates, contribution);
+        }
+        auth_api_keys.rebuild_usage_stats(&aggregates);
+        Ok(aggregates.len() as u64)
+    }
+
     async fn rebuild_provider_api_key_usage_stats(&self) -> Result<u64, DataLayerError> {
         let Some(provider_catalog) = self.provider_catalog.as_ref() else {
             return Ok(0);
@@ -2473,6 +2567,10 @@ mod tests {
     use std::sync::Arc;
 
     use super::InMemoryUsageReadRepository;
+    use crate::repository::auth::{
+        AuthApiKeyReadRepository, InMemoryAuthApiKeySnapshotRepository,
+        StoredAuthApiKeyExportRecord, StoredAuthApiKeySnapshot,
+    };
     use crate::repository::provider_catalog::{
         InMemoryProviderCatalogReadRepository, ProviderCatalogReadRepository,
         ProviderCatalogWriteRepository, StoredProviderCatalogKey, StoredProviderCatalogProvider,
@@ -4028,6 +4126,67 @@ mod tests {
         ))
     }
 
+    fn sample_auth_api_key_repository(
+        api_key_ids: &[&str],
+    ) -> Arc<InMemoryAuthApiKeySnapshotRepository> {
+        let snapshots = api_key_ids.iter().map(|api_key_id| {
+            (
+                Some(format!("hash-{api_key_id}")),
+                StoredAuthApiKeySnapshot::new(
+                    "user-1".to_string(),
+                    "alice".to_string(),
+                    Some("alice@example.com".to_string()),
+                    "user".to_string(),
+                    "local".to_string(),
+                    true,
+                    false,
+                    None,
+                    None,
+                    None,
+                    (*api_key_id).to_string(),
+                    Some(format!("Key {api_key_id}")),
+                    true,
+                    false,
+                    false,
+                    Some(120),
+                    Some(8),
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .expect("snapshot should build"),
+            )
+        });
+        let export_records = api_key_ids.iter().map(|api_key_id| {
+            StoredAuthApiKeyExportRecord::new(
+                "user-1".to_string(),
+                (*api_key_id).to_string(),
+                format!("hash-{api_key_id}"),
+                Some(format!("enc-{api_key_id}")),
+                Some(format!("Key {api_key_id}")),
+                None,
+                None,
+                None,
+                Some(120),
+                Some(8),
+                None,
+                true,
+                None,
+                false,
+                0,
+                0,
+                0.0,
+                false,
+            )
+            .expect("export record should build")
+        });
+        Arc::new(
+            InMemoryAuthApiKeySnapshotRepository::seed(snapshots)
+                .with_export_records(export_records),
+        )
+    }
+
     #[tokio::test]
     async fn upsert_syncs_linked_provider_key_stats_without_double_counting_request_count() {
         let provider_catalog = sample_provider_catalog_repository(&["provider-key-1"]);
@@ -4076,6 +4235,50 @@ mod tests {
         assert_eq!(key.total_cost_usd, 0.75);
         assert_eq!(key.total_response_time_ms, Some(240));
         assert_eq!(key.last_used_at_unix_secs, Some(1_711_100_000));
+    }
+
+    #[tokio::test]
+    async fn upsert_syncs_linked_api_key_stats_without_double_counting_request_count() {
+        let auth_api_keys = sample_auth_api_key_repository(&["api-key-1"]);
+        let repository = InMemoryUsageReadRepository::default()
+            .with_auth_api_key_repository(Arc::clone(&auth_api_keys));
+
+        repository
+            .upsert(UpsertUsageRecord {
+                api_key_id: Some("api-key-1".to_string()),
+                total_tokens: Some(100),
+                total_cost_usd: Some(0.5),
+                created_at_unix_ms: Some(1_711_100_000),
+                updated_at_unix_secs: 1_711_100_000,
+                ..sample_upsert_usage_record("req-api-key-1")
+            })
+            .await
+            .expect("pending upsert should succeed");
+        repository
+            .upsert(UpsertUsageRecord {
+                api_key_id: Some("api-key-1".to_string()),
+                status: "completed".to_string(),
+                billing_status: "settled".to_string(),
+                total_tokens: Some(180),
+                total_cost_usd: Some(0.75),
+                created_at_unix_ms: Some(1_711_100_000),
+                updated_at_unix_secs: 1_711_100_010,
+                finalized_at_unix_secs: Some(1_711_100_011),
+                ..sample_upsert_usage_record("req-api-key-1")
+            })
+            .await
+            .expect("completed upsert should succeed");
+
+        let key = auth_api_keys
+            .list_export_api_keys_by_ids(&["api-key-1".to_string()])
+            .await
+            .expect("key list should succeed")
+            .into_iter()
+            .next()
+            .expect("api key should exist");
+        assert_eq!(key.total_requests, 1);
+        assert_eq!(key.total_tokens, 180);
+        assert_eq!(key.total_cost_usd, 0.75);
     }
 
     #[tokio::test]
@@ -4147,6 +4350,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn upsert_moves_linked_api_key_stats_when_key_assignment_changes() {
+        let auth_api_keys = sample_auth_api_key_repository(&["api-key-a", "api-key-b"]);
+        let repository = InMemoryUsageReadRepository::default()
+            .with_auth_api_key_repository(Arc::clone(&auth_api_keys));
+
+        repository
+            .upsert(UpsertUsageRecord {
+                api_key_id: Some("api-key-a".to_string()),
+                status: "completed".to_string(),
+                billing_status: "settled".to_string(),
+                total_tokens: Some(120),
+                total_cost_usd: Some(0.4),
+                created_at_unix_ms: Some(1_711_200_000),
+                updated_at_unix_secs: 1_711_200_000,
+                finalized_at_unix_secs: Some(1_711_200_001),
+                ..sample_upsert_usage_record("req-api-move-1")
+            })
+            .await
+            .expect("first upsert should succeed");
+        repository
+            .upsert(UpsertUsageRecord {
+                api_key_id: Some("api-key-b".to_string()),
+                status: "completed".to_string(),
+                billing_status: "settled".to_string(),
+                total_tokens: Some(140),
+                total_cost_usd: Some(0.6),
+                created_at_unix_ms: Some(1_711_200_000),
+                updated_at_unix_secs: 1_711_200_010,
+                finalized_at_unix_secs: Some(1_711_200_011),
+                ..sample_upsert_usage_record("req-api-move-1")
+            })
+            .await
+            .expect("moved upsert should succeed");
+
+        let keys = auth_api_keys
+            .list_export_api_keys_by_ids(&["api-key-a".to_string(), "api-key-b".to_string()])
+            .await
+            .expect("key list should succeed");
+        let key_a = keys
+            .iter()
+            .find(|key| key.api_key_id == "api-key-a")
+            .expect("key a should exist");
+        let key_b = keys
+            .iter()
+            .find(|key| key.api_key_id == "api-key-b")
+            .expect("key b should exist");
+
+        assert_eq!(key_a.total_requests, 0);
+        assert_eq!(key_a.total_tokens, 0);
+        assert_eq!(key_a.total_cost_usd, 0.0);
+
+        assert_eq!(key_b.total_requests, 1);
+        assert_eq!(key_b.total_tokens, 140);
+        assert_eq!(key_b.total_cost_usd, 0.6);
+    }
+
+    #[tokio::test]
     async fn rebuild_provider_key_usage_stats_resets_linked_catalog_to_current_usage() {
         let provider_catalog = sample_provider_catalog_repository(&["provider-key-1"]);
         let mut stale_key = provider_catalog
@@ -4194,5 +4454,73 @@ mod tests {
         assert_eq!(key.total_cost_usd, 0.24);
         assert_eq!(key.total_response_time_ms, Some(840));
         assert_eq!(key.last_used_at_unix_secs, Some(1_711_300_250));
+    }
+
+    #[tokio::test]
+    async fn rebuild_api_key_usage_stats_resets_linked_auth_export_records_to_current_usage() {
+        let auth_api_keys = sample_auth_api_key_repository(&["api-key-1"]);
+        let mut stale_key = auth_api_keys
+            .list_export_api_keys_by_ids(&["api-key-1".to_string()])
+            .await
+            .expect("key list should succeed")
+            .into_iter()
+            .next()
+            .expect("api key should exist");
+        stale_key.total_requests = 99;
+        stale_key.total_tokens = 9_999;
+        stale_key.total_cost_usd = 42.0;
+        let auth_api_keys = Arc::new(
+            InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+                Some("hash-api-key-1".to_string()),
+                StoredAuthApiKeySnapshot::new(
+                    "user-1".to_string(),
+                    "alice".to_string(),
+                    Some("alice@example.com".to_string()),
+                    "user".to_string(),
+                    "local".to_string(),
+                    true,
+                    false,
+                    None,
+                    None,
+                    None,
+                    "api-key-1".to_string(),
+                    Some("Key api-key-1".to_string()),
+                    true,
+                    false,
+                    false,
+                    Some(120),
+                    Some(8),
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .expect("snapshot should build"),
+            )])
+            .with_export_records(vec![stale_key]),
+        );
+
+        let repository = InMemoryUsageReadRepository::seed(vec![
+            sample_usage("req-1", 1_711_300_000),
+            sample_usage("req-2", 1_711_300_250),
+        ])
+        .with_auth_api_key_repository(Arc::clone(&auth_api_keys));
+
+        let rebuilt = repository
+            .rebuild_api_key_usage_stats()
+            .await
+            .expect("rebuild should succeed");
+        assert_eq!(rebuilt, 1);
+
+        let key = auth_api_keys
+            .list_export_api_keys_by_ids(&["api-key-1".to_string()])
+            .await
+            .expect("key list should succeed")
+            .into_iter()
+            .next()
+            .expect("api key should exist");
+        assert_eq!(key.total_requests, 2);
+        assert_eq!(key.total_tokens, 300);
+        assert_eq!(key.total_cost_usd, 0.24);
     }
 }

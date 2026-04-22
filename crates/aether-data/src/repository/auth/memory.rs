@@ -9,6 +9,7 @@ use super::types::{
     StandaloneApiKeyExportListQuery, StoredAuthApiKeyExportRecord, StoredAuthApiKeySnapshot,
     UpdateStandaloneApiKeyBasicRecord, UpdateUserApiKeyBasicRecord,
 };
+use crate::repository::usage::{ApiKeyUsageContribution, ApiKeyUsageDelta};
 use crate::DataLayerError;
 
 #[derive(Debug, Default)]
@@ -110,6 +111,70 @@ impl InMemoryAuthApiKeySnapshotRepository {
             .get(api_key_id)
             .copied()
             .unwrap_or(0)
+    }
+
+    pub(crate) fn apply_usage_stats_delta(
+        &self,
+        api_key_id: &str,
+        delta: &ApiKeyUsageDelta,
+        _recomputed_last_used_at_unix_secs: Option<u64>,
+    ) {
+        let mut index = self
+            .index
+            .write()
+            .expect("auth api key snapshot repository lock");
+        let Some(record) = index.export_by_api_key_id.get_mut(api_key_id) else {
+            return;
+        };
+
+        record.total_requests = apply_i64_delta_to_u64(record.total_requests, delta.total_requests);
+        record.total_tokens = apply_i64_delta_to_u64(record.total_tokens, delta.total_tokens);
+        record.total_cost_usd = apply_f64_delta(record.total_cost_usd, delta.total_cost_usd);
+    }
+
+    pub(crate) fn rebuild_usage_stats(
+        &self,
+        contributions: &BTreeMap<String, ApiKeyUsageContribution>,
+    ) {
+        let mut index = self
+            .index
+            .write()
+            .expect("auth api key snapshot repository lock");
+        for record in index.export_by_api_key_id.values_mut() {
+            record.total_requests = 0;
+            record.total_tokens = 0;
+            record.total_cost_usd = 0.0;
+        }
+
+        for (api_key_id, contribution) in contributions {
+            let Some(record) = index.export_by_api_key_id.get_mut(api_key_id) else {
+                continue;
+            };
+            record.total_requests = clamp_i64_to_u64(contribution.total_requests);
+            record.total_tokens = clamp_i64_to_u64(contribution.total_tokens);
+            record.total_cost_usd = contribution.total_cost_usd.max(0.0);
+        }
+    }
+}
+
+fn clamp_i64_to_u64(value: i64) -> u64 {
+    u64::try_from(value).unwrap_or_default()
+}
+
+fn apply_i64_delta_to_u64(current: u64, delta: i64) -> u64 {
+    clamp_i64_to_u64(
+        i64::try_from(current)
+            .unwrap_or(i64::MAX)
+            .saturating_add(delta),
+    )
+}
+
+fn apply_f64_delta(current: f64, delta: f64) -> f64 {
+    let next = current + delta;
+    if next.is_finite() {
+        next.max(0.0)
+    } else {
+        current.max(0.0)
     }
 }
 

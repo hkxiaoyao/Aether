@@ -277,7 +277,7 @@ mod tests {
             .into_iter()
             .map(|item| item.version)
             .collect::<Vec<_>>();
-        assert_eq!(versions, vec![20260422110000]);
+        assert_eq!(versions, vec![20260422110000, 20260422120000]);
     }
 
     #[test]
@@ -289,7 +289,7 @@ mod tests {
         .into_iter()
         .map(|item| item.version)
         .collect::<Vec<_>>();
-        assert!(versions.is_empty());
+        assert_eq!(versions, vec![20260422120000]);
     }
 
     #[derive(Debug)]
@@ -508,9 +508,35 @@ mod tests {
 
         query(
             r#"
+            INSERT INTO public.api_keys (
+                id,
+                user_id,
+                key_hash,
+                name,
+                total_requests,
+                total_tokens,
+                total_cost_usd
+            ) VALUES (
+                'api-key-backfill-1',
+                'user-backfill-1',
+                'hash-backfill-1',
+                'Alice CLI',
+                77,
+                7777,
+                77.77
+            )
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("api key fixture should insert");
+
+        query(
+            r#"
             INSERT INTO public.usage (
                 id,
                 user_id,
+                api_key_id,
                 request_id,
                 provider_name,
                 model,
@@ -536,6 +562,7 @@ mod tests {
             ) VALUES (
                 'usage-backfill-1',
                 'user-backfill-1',
+                'api-key-backfill-1',
                 'req-backfill-1',
                 'openai',
                 'gpt-4o-mini',
@@ -568,8 +595,9 @@ mod tests {
         let pending_before = pending_backfills(&pool)
             .await
             .expect("pending backfills should load");
-        assert_eq!(pending_before.len(), 1);
+        assert_eq!(pending_before.len(), 2);
         assert_eq!(pending_before[0].version, 20260422110000);
+        assert_eq!(pending_before[1].version, 20260422120000);
 
         run_backfills(&pool)
             .await
@@ -585,7 +613,46 @@ mod tests {
                 .fetch_all(&pool)
                 .await
                 .expect("applied backfill versions should load");
-        assert_eq!(applied_versions, vec![20260422110000]);
+        assert_eq!(applied_versions, vec![20260422110000, 20260422120000]);
+
+        let api_key_total_requests: i64 = query_scalar(
+            "SELECT COALESCE(total_requests, 0)::BIGINT FROM public.api_keys WHERE id = 'api-key-backfill-1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("api key total requests should load");
+        assert_eq!(api_key_total_requests, 1);
+
+        let api_key_total_tokens: i64 = query_scalar(
+            "SELECT COALESCE(total_tokens, 0)::BIGINT FROM public.api_keys WHERE id = 'api-key-backfill-1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("api key total tokens should load");
+        assert_eq!(api_key_total_tokens, 150);
+
+        let api_key_total_cost: f64 = query_scalar(
+            "SELECT COALESCE(CAST(total_cost_usd AS DOUBLE PRECISION), 0) FROM public.api_keys WHERE id = 'api-key-backfill-1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("api key total cost should load");
+        assert_eq!(api_key_total_cost, 1.25);
+
+        let api_key_last_used_at_unix_secs: Option<i64> = query_scalar(
+            "SELECT CAST(EXTRACT(EPOCH FROM last_used_at) AS BIGINT) FROM public.api_keys WHERE id = 'api-key-backfill-1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("api key last used should load");
+        assert_eq!(
+            api_key_last_used_at_unix_secs,
+            Some(
+                chrono::DateTime::parse_from_rfc3339("2024-05-06T07:08:09Z")
+                    .expect("expected last used timestamp should parse")
+                    .timestamp(),
+            )
+        );
 
         let expected_finalized_unix_secs =
             chrono::DateTime::parse_from_rfc3339("2024-05-06T07:18:09Z")

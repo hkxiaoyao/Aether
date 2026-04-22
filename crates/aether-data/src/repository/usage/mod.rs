@@ -27,6 +27,67 @@ pub use memory::InMemoryUsageReadRepository;
 pub use sql::SqlxUsageReadRepository;
 
 #[derive(Debug, Clone, PartialEq, Default)]
+pub(crate) struct ApiKeyUsageContribution {
+    pub api_key_id: String,
+    pub total_requests: i64,
+    pub total_tokens: i64,
+    pub total_cost_usd: f64,
+    pub last_used_at_unix_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub(crate) struct ApiKeyUsageDelta {
+    pub total_requests: i64,
+    pub total_tokens: i64,
+    pub total_cost_usd: f64,
+    pub candidate_last_used_at_unix_secs: Option<u64>,
+    pub removed_last_used_at_unix_secs: Option<u64>,
+}
+
+impl ApiKeyUsageDelta {
+    pub(crate) fn between(
+        before: &ApiKeyUsageContribution,
+        after: &ApiKeyUsageContribution,
+    ) -> Self {
+        Self {
+            total_requests: after.total_requests - before.total_requests,
+            total_tokens: after.total_tokens - before.total_tokens,
+            total_cost_usd: after.total_cost_usd - before.total_cost_usd,
+            candidate_last_used_at_unix_secs: after.last_used_at_unix_secs,
+            removed_last_used_at_unix_secs: None,
+        }
+    }
+
+    pub(crate) fn addition(after: &ApiKeyUsageContribution) -> Self {
+        Self {
+            total_requests: after.total_requests,
+            total_tokens: after.total_tokens,
+            total_cost_usd: after.total_cost_usd,
+            candidate_last_used_at_unix_secs: after.last_used_at_unix_secs,
+            removed_last_used_at_unix_secs: None,
+        }
+    }
+
+    pub(crate) fn removal(before: &ApiKeyUsageContribution) -> Self {
+        Self {
+            total_requests: -before.total_requests,
+            total_tokens: -before.total_tokens,
+            total_cost_usd: -before.total_cost_usd,
+            candidate_last_used_at_unix_secs: None,
+            removed_last_used_at_unix_secs: before.last_used_at_unix_secs,
+        }
+    }
+
+    pub(crate) fn is_noop(&self) -> bool {
+        self.total_requests == 0
+            && self.total_tokens == 0
+            && self.total_cost_usd == 0.0
+            && self.candidate_last_used_at_unix_secs.is_none()
+            && self.removed_last_used_at_unix_secs.is_none()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
 pub(crate) struct ProviderApiKeyUsageContribution {
     pub key_id: String,
     pub request_count: i64,
@@ -200,13 +261,36 @@ pub(crate) fn provider_api_key_usage_contribution(
     })
 }
 
+pub(crate) fn api_key_usage_contribution(
+    usage: &StoredRequestUsageAudit,
+) -> Option<ApiKeyUsageContribution> {
+    let api_key_id = usage
+        .api_key_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?
+        .to_string();
+
+    Some(ApiKeyUsageContribution {
+        api_key_id,
+        total_requests: 1,
+        total_tokens: i64::try_from(usage.total_tokens).unwrap_or(i64::MAX),
+        total_cost_usd: if usage.total_cost_usd.is_finite() {
+            usage.total_cost_usd.max(0.0)
+        } else {
+            0.0
+        },
+        last_used_at_unix_secs: Some(usage.created_at_unix_ms),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        incoming_usage_can_recover_terminal_failure, provider_api_key_usage_contribution,
-        provider_api_key_usage_is_error, provider_api_key_usage_is_success,
-        strip_deprecated_usage_display_fields, usage_can_recover_terminal_failure,
-        StoredRequestUsageAudit, UpsertUsageRecord,
+        api_key_usage_contribution, incoming_usage_can_recover_terminal_failure,
+        provider_api_key_usage_contribution, provider_api_key_usage_is_error,
+        provider_api_key_usage_is_success, strip_deprecated_usage_display_fields,
+        usage_can_recover_terminal_failure, StoredRequestUsageAudit, UpsertUsageRecord,
     };
 
     #[test]
@@ -424,6 +508,56 @@ mod tests {
         assert_eq!(contribution.total_tokens, 20);
         assert_eq!(contribution.total_cost_usd, 0.25);
         assert_eq!(contribution.total_response_time_ms, 120);
+        assert_eq!(contribution.last_used_at_unix_secs, Some(123));
+    }
+
+    #[test]
+    fn api_key_usage_contribution_tracks_request_totals() {
+        let usage = StoredRequestUsageAudit::new(
+            "usage-1".to_string(),
+            "request-1".to_string(),
+            Some("user-1".to_string()),
+            Some("api-key-1".to_string()),
+            None,
+            None,
+            "OpenAI".to_string(),
+            "gpt-5".to_string(),
+            None,
+            Some("provider-1".to_string()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            false,
+            12,
+            8,
+            20,
+            0.25,
+            0.25,
+            Some(200),
+            None,
+            None,
+            Some(120),
+            None,
+            "completed".to_string(),
+            "settled".to_string(),
+            123,
+            124,
+            Some(125),
+        )
+        .expect("usage should build");
+
+        let contribution = api_key_usage_contribution(&usage).expect("contribution should exist");
+        assert_eq!(contribution.api_key_id, "api-key-1");
+        assert_eq!(contribution.total_requests, 1);
+        assert_eq!(contribution.total_tokens, 20);
+        assert_eq!(contribution.total_cost_usd, 0.25);
         assert_eq!(contribution.last_used_at_unix_secs, Some(123));
     }
 }

@@ -33,11 +33,11 @@ use std::io::{Read, Write};
 use uuid::Uuid;
 
 use super::{
-    incoming_usage_can_recover_terminal_failure, provider_api_key_usage_contribution,
-    strip_deprecated_usage_display_fields, ProviderApiKeyUsageDelta,
-    StoredProviderApiKeyUsageSummary, StoredProviderUsageSummary, StoredRequestUsageAudit,
-    StoredUsageDailySummary, UpsertUsageRecord, UsageAuditListQuery, UsageDailyHeatmapQuery,
-    UsageReadRepository, UsageWriteRepository,
+    api_key_usage_contribution, incoming_usage_can_recover_terminal_failure,
+    provider_api_key_usage_contribution, strip_deprecated_usage_display_fields, ApiKeyUsageDelta,
+    ProviderApiKeyUsageDelta, StoredProviderApiKeyUsageSummary, StoredProviderUsageSummary,
+    StoredRequestUsageAudit, StoredUsageDailySummary, UpsertUsageRecord, UsageAuditListQuery,
+    UsageDailyHeatmapQuery, UsageReadRepository, UsageWriteRepository,
 };
 use crate::postgres::PostgresTransactionRunner;
 use crate::{
@@ -1452,6 +1452,72 @@ FROM provider_api_keys
 WHERE id = ANY($1::TEXT[])
   AND COALESCE(request_count, 0) > 0
 ORDER BY id ASC
+"#;
+
+const APPLY_API_KEY_USAGE_DELTA_SQL: &str = r#"
+UPDATE api_keys
+SET
+  total_requests = GREATEST(COALESCE(total_requests, 0) + $2, 0),
+  total_tokens = GREATEST(COALESCE(total_tokens, 0) + $3, 0),
+  total_cost_usd = CAST(
+    GREATEST(CAST(COALESCE(total_cost_usd, 0) AS DOUBLE PRECISION) + $4, 0) AS NUMERIC(20,8)
+  ),
+  last_used_at = CASE
+    WHEN $5::double precision IS NOT NULL THEN CASE
+      WHEN last_used_at IS NULL THEN TO_TIMESTAMP($5::double precision)
+      ELSE GREATEST(last_used_at, TO_TIMESTAMP($5::double precision))
+    END
+    WHEN $6::double precision IS NOT NULL
+      AND last_used_at IS NOT NULL
+      AND EXTRACT(EPOCH FROM last_used_at)::BIGINT = $6::BIGINT
+    THEN (
+      SELECT MAX(created_at)
+      FROM "usage"
+      WHERE api_key_id = $1
+    )
+    ELSE last_used_at
+  END
+WHERE id = $1
+"#;
+
+const RESET_API_KEY_USAGE_STATS_SQL: &str = r#"
+UPDATE api_keys
+SET
+  total_requests = 0,
+  total_tokens = 0,
+  total_cost_usd = 0,
+  last_used_at = NULL
+"#;
+
+const REBUILD_API_KEY_USAGE_STATS_SQL: &str = r#"
+WITH aggregated AS (
+  SELECT
+    api_key_id,
+    COUNT(*)::INTEGER AS total_requests,
+    COALESCE(SUM(
+      GREATEST(
+        COALESCE(
+          total_tokens,
+          COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)
+        ),
+        0
+      )::BIGINT
+    ), 0)::BIGINT AS total_tokens,
+    COALESCE(SUM(COALESCE(total_cost_usd, 0)), 0)::NUMERIC(20,8) AS total_cost_usd,
+    MAX(created_at) AS last_used_at
+  FROM "usage"
+  WHERE api_key_id IS NOT NULL
+    AND BTRIM(api_key_id) <> ''
+  GROUP BY api_key_id
+)
+UPDATE api_keys
+SET
+  total_requests = aggregated.total_requests,
+  total_tokens = aggregated.total_tokens,
+  total_cost_usd = aggregated.total_cost_usd,
+  last_used_at = aggregated.last_used_at
+FROM aggregated
+WHERE api_keys.id = aggregated.api_key_id
 "#;
 
 const APPLY_PROVIDER_API_KEY_USAGE_DELTA_SQL: &str = r#"
@@ -7660,11 +7726,48 @@ ORDER BY "usage".user_id ASC
                     stored.output_price_per_1m = settlement_pricing_snapshot.output_price_per_1m;
                     stored.request_metadata = request_metadata_value;
 
-                    let before_contribution = previous_usage
+                    let before_api_key_contribution =
+                        previous_usage.as_ref().and_then(api_key_usage_contribution);
+                    let after_api_key_contribution = api_key_usage_contribution(&stored);
+                    match (
+                        before_api_key_contribution.as_ref(),
+                        after_api_key_contribution.as_ref(),
+                    ) {
+                        (Some(before), Some(after)) if before.api_key_id == after.api_key_id => {
+                            let delta = ApiKeyUsageDelta::between(before, after);
+                            apply_api_key_usage_delta_in_tx(tx, before.api_key_id.as_str(), &delta)
+                                .await?;
+                        }
+                        _ => {
+                            if let Some(before) = before_api_key_contribution.as_ref() {
+                                let delta = ApiKeyUsageDelta::removal(before);
+                                apply_api_key_usage_delta_in_tx(
+                                    tx,
+                                    before.api_key_id.as_str(),
+                                    &delta,
+                                )
+                                .await?;
+                            }
+                            if let Some(after) = after_api_key_contribution.as_ref() {
+                                let delta = ApiKeyUsageDelta::addition(after);
+                                apply_api_key_usage_delta_in_tx(
+                                    tx,
+                                    after.api_key_id.as_str(),
+                                    &delta,
+                                )
+                                .await?;
+                            }
+                        }
+                    }
+
+                    let before_provider_contribution = previous_usage
                         .as_ref()
                         .and_then(provider_api_key_usage_contribution);
-                    let after_contribution = provider_api_key_usage_contribution(&stored);
-                    match (before_contribution.as_ref(), after_contribution.as_ref()) {
+                    let after_provider_contribution = provider_api_key_usage_contribution(&stored);
+                    match (
+                        before_provider_contribution.as_ref(),
+                        after_provider_contribution.as_ref(),
+                    ) {
                         (Some(before), Some(after)) if before.key_id == after.key_id => {
                             let delta = ProviderApiKeyUsageDelta::between(before, after);
                             apply_provider_api_key_usage_delta_in_tx(
@@ -7675,7 +7778,7 @@ ORDER BY "usage".user_id ASC
                             .await?;
                         }
                         _ => {
-                            if let Some(before) = before_contribution.as_ref() {
+                            if let Some(before) = before_provider_contribution.as_ref() {
                                 let delta = ProviderApiKeyUsageDelta::removal(before);
                                 apply_provider_api_key_usage_delta_in_tx(
                                     tx,
@@ -7684,7 +7787,7 @@ ORDER BY "usage".user_id ASC
                                 )
                                 .await?;
                             }
-                            if let Some(after) = after_contribution.as_ref() {
+                            if let Some(after) = after_provider_contribution.as_ref() {
                                 let delta = ProviderApiKeyUsageDelta::addition(after);
                                 apply_provider_api_key_usage_delta_in_tx(
                                     tx,
@@ -7697,6 +7800,25 @@ ORDER BY "usage".user_id ASC
                     }
                     Ok(stored)
                 }) as BoxFuture<'_, Result<StoredRequestUsageAudit, DataLayerError>>
+            })
+            .await
+    }
+
+    pub async fn rebuild_api_key_usage_stats(&self) -> Result<u64, DataLayerError> {
+        self.tx_runner
+            .run_read_write(|tx| {
+                Box::pin(async move {
+                    sqlx::query(RESET_API_KEY_USAGE_STATS_SQL)
+                        .execute(&mut **tx)
+                        .await
+                        .map_postgres_err()?;
+                    let rows_affected = sqlx::query(REBUILD_API_KEY_USAGE_STATS_SQL)
+                        .execute(&mut **tx)
+                        .await
+                        .map_postgres_err()?
+                        .rows_affected();
+                    Ok(rows_affected)
+                }) as BoxFuture<'_, Result<u64, DataLayerError>>
             })
             .await
     }
@@ -7947,6 +8069,10 @@ impl UsageWriteRepository for SqlxUsageReadRepository {
         Self::upsert(self, usage).await
     }
 
+    async fn rebuild_api_key_usage_stats(&self) -> Result<u64, DataLayerError> {
+        Self::rebuild_api_key_usage_stats(self).await
+    }
+
     async fn rebuild_provider_api_key_usage_stats(&self) -> Result<u64, DataLayerError> {
         Self::rebuild_provider_api_key_usage_stats(self).await
     }
@@ -7971,6 +8097,50 @@ async fn lock_usage_request_id_in_tx(
 ) -> Result<(), DataLayerError> {
     sqlx::query(LOCK_USAGE_REQUEST_ID_SQL)
         .bind(request_id)
+        .execute(&mut **tx)
+        .await
+        .map_postgres_err()?;
+    Ok(())
+}
+
+async fn apply_api_key_usage_delta_in_tx(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    api_key_id: &str,
+    delta: &ApiKeyUsageDelta,
+) -> Result<(), DataLayerError> {
+    if api_key_id.trim().is_empty() {
+        return Ok(());
+    }
+    if delta.is_noop() {
+        return Ok(());
+    }
+
+    let total_cost_usd_delta = if delta.total_cost_usd.is_finite() {
+        delta.total_cost_usd
+    } else {
+        0.0
+    };
+
+    sqlx::query(APPLY_API_KEY_USAGE_DELTA_SQL)
+        .bind(api_key_id)
+        .bind(i32::try_from(delta.total_requests).map_err(|_| {
+            DataLayerError::UnexpectedValue(format!(
+                "api_keys.total_requests delta exceeds i32: {}",
+                delta.total_requests
+            ))
+        })?)
+        .bind(delta.total_tokens)
+        .bind(total_cost_usd_delta)
+        .bind(
+            delta
+                .candidate_last_used_at_unix_secs
+                .map(|value| value as f64),
+        )
+        .bind(
+            delta
+                .removed_last_used_at_unix_secs
+                .map(|value| value as f64),
+        )
         .execute(&mut **tx)
         .await
         .map_postgres_err()?;
@@ -9464,6 +9634,16 @@ mod tests {
         assert!(super::LOCK_USAGE_REQUEST_ID_SQL.contains("hashtext($1)::BIGINT"));
         assert!(include_str!("sql.rs")
             .contains("lock_usage_request_id_in_tx(tx, &usage.request_id).await?;"));
+    }
+
+    #[test]
+    fn usage_sql_rebuild_matches_online_api_key_usage_semantics() {
+        assert!(super::REBUILD_API_KEY_USAGE_STATS_SQL.contains("COUNT(*)::INTEGER"));
+        assert!(super::REBUILD_API_KEY_USAGE_STATS_SQL.contains("COALESCE("));
+        assert!(super::REBUILD_API_KEY_USAGE_STATS_SQL.contains("total_tokens,"));
+        assert!(super::REBUILD_API_KEY_USAGE_STATS_SQL
+            .contains("COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)"));
+        assert!(super::REBUILD_API_KEY_USAGE_STATS_SQL.contains("AND BTRIM(api_key_id) <> ''"));
     }
 
     #[test]

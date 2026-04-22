@@ -8,7 +8,7 @@ use tracing::{error, info, warn};
 
 static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 static BASELINE_V2_SQL: &str = include_str!("../bootstrap/20260413020000_baseline_v2.sql");
-const BASELINE_V2_CUTOFF_VERSION: i64 = 20260422110000;
+const BASELINE_V2_CUTOFF_VERSION: i64 = 20260422120000;
 const MIGRATIONS_TABLE_EXISTS_SQL: &str =
     "SELECT to_regclass('public._sqlx_migrations') IS NOT NULL";
 const PUBLIC_BASE_TABLE_COUNT_SQL: &str = r#"
@@ -586,6 +586,28 @@ mod tests {
             .await
     }
 
+    async fn column_exists(
+        pool: &PgPool,
+        table_name: &str,
+        column_name: &str,
+    ) -> Result<bool, sqlx::Error> {
+        query_scalar::<_, bool>(
+            r#"
+SELECT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = $1
+      AND column_name = $2
+)
+"#,
+        )
+        .bind(table_name)
+        .bind(column_name)
+        .fetch_one(pool)
+        .await
+    }
+
     #[test]
     fn baseline_migration_restores_search_path_for_sqlx_bookkeeping() {
         let baseline = MIGRATOR
@@ -639,6 +661,7 @@ mod tests {
                 20260418000000,
                 20260421000000,
                 20260422110000,
+                20260422120000,
             ]
         );
     }
@@ -671,6 +694,8 @@ mod tests {
         assert!(BASELINE_V2_SQL.contains("idx_schema_backfills_applied_at"));
         assert!(BASELINE_V2_SQL.contains("ALTER TABLE public.stats_hourly"));
         assert!(BASELINE_V2_SQL.contains("response_time_sum_ms double precision"));
+        assert!(BASELINE_V2_SQL.contains("CREATE TABLE IF NOT EXISTS public.api_keys"));
+        assert!(BASELINE_V2_SQL.contains("total_tokens bigint DEFAULT '0'::bigint NOT NULL"));
         assert!(
             BASELINE_V2_SQL.contains("CREATE TABLE IF NOT EXISTS public.stats_user_daily_provider")
         );
@@ -764,6 +789,7 @@ mod tests {
                 20260418000000,
                 20260421000000,
                 20260422110000,
+                20260422120000,
             ]
         );
     }
@@ -813,6 +839,9 @@ mod tests {
         assert!(table_exists(&pool, "usage")
             .await
             .expect("usage lookup should succeed"));
+        assert!(column_exists(&pool, "api_keys", "total_tokens")
+            .await
+            .expect("api_keys.total_tokens lookup should succeed"));
 
         let applied_count: i64 =
             query_scalar("SELECT COUNT(*)::BIGINT FROM public._sqlx_migrations")

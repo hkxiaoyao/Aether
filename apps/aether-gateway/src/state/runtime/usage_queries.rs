@@ -4,6 +4,14 @@ use usage::{StoredUsageDailySummary, UsageDailyHeatmapQuery};
 
 impl AppState {
     #[allow(dead_code)]
+    pub(crate) async fn rebuild_api_key_usage_stats(&self) -> Result<u64, GatewayError> {
+        self.data
+            .rebuild_api_key_usage_stats()
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
+    #[allow(dead_code)]
     pub(crate) async fn rebuild_provider_api_key_usage_stats(&self) -> Result<u64, GatewayError> {
         self.data
             .rebuild_provider_api_key_usage_stats()

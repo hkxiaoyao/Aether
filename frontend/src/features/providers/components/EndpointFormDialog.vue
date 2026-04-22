@@ -481,6 +481,9 @@
                             <SelectItem value="rename">
                               重命名
                             </SelectItem>
+                            <SelectItem value="append">
+                              追加
+                            </SelectItem>
                             <SelectItem value="insert">
                               插入
                             </SelectItem>
@@ -550,7 +553,29 @@
                             @update:model-value="(v) => updateEndpointBodyRuleField(endpoint.id, index, 'to', v)"
                           />
                         </template>
-                        <template v-else-if="rule.action === 'insert' || rule.action === 'append'">
+                        <template v-else-if="rule.action === 'append'">
+                          <Input
+                            :model-value="rule.path"
+                            placeholder="数组路径（如 messages）"
+                            size="sm"
+                            class="flex-[2] min-w-0 h-7 text-xs"
+                            @update:model-value="(v) => updateEndpointBodyRuleField(endpoint.id, index, 'path', v)"
+                          />
+                          <span class="text-muted-foreground text-xs">+=</span>
+                          <Input
+                            :model-value="rule.value"
+                            placeholder="值 (JSON)"
+                            size="sm"
+                            class="flex-[3] min-w-0 h-7 text-xs"
+                            @update:model-value="(v) => updateEndpointBodyRuleField(endpoint.id, index, 'value', v)"
+                          />
+                          <CheckCircle
+                            class="w-4 h-4 shrink-0"
+                            :class="getBodySetValueValidation(rule) === true ? 'text-green-600' : getBodySetValueValidation(rule) === false ? 'text-destructive' : 'text-muted-foreground/40'"
+                            :title="getBodySetValueValidationTip(rule)"
+                          />
+                        </template>
+                        <template v-else-if="rule.action === 'insert'">
                           <Input
                             :model-value="rule.path"
                             placeholder="数组路径（如 messages）"
@@ -560,10 +585,10 @@
                           />
                           <Input
                             :model-value="rule.index"
-                            placeholder="末尾"
+                            placeholder="位置"
                             size="sm"
                             class="w-14 h-7 text-xs shrink-0"
-                            title="插入位置（留空=追加到末尾）"
+                            title="插入位置（支持负数）"
                             @update:model-value="(v) => updateEndpointBodyRuleField(endpoint.id, index, 'index', v)"
                           />
                           <Input
@@ -609,6 +634,14 @@
                             class="w-12 h-7 text-xs shrink-0 font-mono"
                             title="正则标志：i=忽略大小写 m=多行 s=dotall"
                             @update:model-value="(v) => updateEndpointBodyRuleField(endpoint.id, index, 'flags', v)"
+                          />
+                          <Input
+                            :model-value="rule.count"
+                            placeholder="全部"
+                            size="sm"
+                            class="w-14 h-7 text-xs shrink-0"
+                            title="替换次数；留空=默认全部，0=全部"
+                            @update:model-value="(v) => updateEndpointBodyRuleField(endpoint.id, index, 'count', v)"
                           />
                           <CheckCircle
                             class="w-4 h-4 shrink-0"
@@ -843,6 +876,7 @@ interface EditableBodyRule {
   pattern: string  // regex_replace 用
   replacement: string // regex_replace 用
   flags: string    // regex_replace 用（i/m/s）
+  count: string    // regex_replace 用（空=默认全部；0=全部）
   style: string    // name_style 用（snake_case/camelCase/PascalCase/kebab-case/capitalize）
   condition: EditableConditionNode | null
 }
@@ -1349,6 +1383,7 @@ function emptyBodyRule(action: BodyRuleAction = 'set'): EditableBodyRule {
     pattern: '',
     replacement: '',
     flags: '',
+    count: '',
     style: '',
     condition: null,
   }
@@ -1380,14 +1415,21 @@ function initEndpointEditState(endpoint: ProviderEndpoint): EndpointEditState {
       } else if (rule.action === 'rename') {
         bodyRules.push({ ...emptyBodyRule('rename'), from: rule.from, to: rule.to, condition: conditionToEditable(rule.condition) })
       } else if (rule.action === 'append') {
-        // 前端将 append 统一展示为 insert（index 留空），保存时再根据 index 是否为空转回 append
         const { value } = initBodyRuleSetValueForEditor(rule.value)
-        bodyRules.push({ ...emptyBodyRule('insert'), path: rule.path || '', value, index: '', condition: conditionToEditable(rule.condition) })
+        bodyRules.push({ ...emptyBodyRule('append'), path: rule.path || '', value, condition: conditionToEditable(rule.condition) })
       } else if (rule.action === 'insert') {
         const { value } = initBodyRuleSetValueForEditor(rule.value)
         bodyRules.push({ ...emptyBodyRule('insert'), path: rule.path || '', value, index: String(rule.index ?? ''), condition: conditionToEditable(rule.condition) })
       } else if (rule.action === 'regex_replace') {
-        bodyRules.push({ ...emptyBodyRule('regex_replace'), path: rule.path || '', pattern: rule.pattern || '', replacement: rule.replacement || '', flags: rule.flags || '', condition: conditionToEditable(rule.condition) })
+        bodyRules.push({
+          ...emptyBodyRule('regex_replace'),
+          path: rule.path || '',
+          pattern: rule.pattern || '',
+          replacement: rule.replacement || '',
+          flags: rule.flags || '',
+          count: rule.count === undefined || rule.count === null ? '' : String(rule.count),
+          condition: conditionToEditable(rule.condition),
+        })
       } else if (rule.action === 'name_style') {
         bodyRules.push({ ...emptyBodyRule('name_style'), path: rule.path || '', style: rule.style || 'capitalize', condition: conditionToEditable(rule.condition) })
       }
@@ -1621,7 +1663,7 @@ function updateEndpointBodyRuleAction(endpointId: string, index: number, action:
 }
 
 // 更新请求体规则字段
-function updateEndpointBodyRuleField(endpointId: string, index: number, field: 'path' | 'value' | 'from' | 'to' | 'index' | 'pattern' | 'replacement' | 'flags' | 'style', value: string) {
+function updateEndpointBodyRuleField(endpointId: string, index: number, field: 'path' | 'value' | 'from' | 'to' | 'index' | 'pattern' | 'replacement' | 'flags' | 'count' | 'style', value: string) {
   const rules = getEndpointEditBodyRules(endpointId)
   if (rules[index]) {
     rules[index][field] = value
@@ -1827,6 +1869,14 @@ function getBodySetValueValidationTip(rule: EditableBodyRule): string {
   }
 }
 
+function isStrictIntegerString(value: string): boolean {
+  return /^-?\d+$/.test(value.trim())
+}
+
+function isStrictNonNegativeIntegerString(value: string): boolean {
+  return /^\d+$/.test(value.trim())
+}
+
 // 判断请求体规则是否有效（必填字段已填写）
 function isBodyRuleEffective(r: EditableBodyRule): boolean {
   switch (r.action) {
@@ -1835,9 +1885,10 @@ function isBodyRuleEffective(r: EditableBodyRule): boolean {
       return !!r.path.trim()
     case 'rename':
       return !!(r.from.trim() && r.to.trim())
-    case 'insert':
     case 'append':
       return !!r.path.trim()
+    case 'insert':
+      return !!(r.path.trim() && r.index.trim())
     case 'regex_replace':
       return !!(r.path.trim() && r.pattern.trim())
     case 'name_style':
@@ -1896,13 +1947,21 @@ function _formatBodyRuleLabel(rule: EditableBodyRule): string {
   } else if (rule.action === 'rename') {
     if (!rule.from || !rule.to) return '(未设置)'
     return `${rule.from}→${rule.to}`
-  } else if (rule.action === 'insert' || rule.action === 'append') {
+  } else if (rule.action === 'append') {
+    if (!rule.path) return '(未设置)'
+    return `${rule.path}[]+=${rule.value || '...'}`
+  } else if (rule.action === 'insert') {
     if (!rule.path) return '(未设置)'
     const idx = rule.index?.trim() || '末尾'
     return `${rule.path}[${idx}]+=${rule.value || '...'}`
   } else if (rule.action === 'regex_replace') {
     if (!rule.path || !rule.pattern) return '(未设置)'
-    return `${rule.path}: s/${rule.pattern}/${rule.replacement || ''}/`
+    const flags = rule.flags.trim()
+    const count = rule.count.trim()
+    return `${rule.path}: s/${rule.pattern}/${rule.replacement || ''}/${flags}${count ? ` ×${count}` : ''}`
+  } else if (rule.action === 'name_style') {
+    if (!rule.path || !rule.style) return '(未设置)'
+    return `${rule.path}→${rule.style}`
   }
   return '(未知)'
 }
@@ -1928,10 +1987,8 @@ function hasBodyRulesChanges(endpoint: ProviderEndpoint): boolean {
       if (edited.path !== original.path) return true
     } else if (edited.action === 'rename' && original.action === 'rename') {
       if (edited.from !== original.from || edited.to !== original.to) return true
-    } else if (edited.action === 'insert' && original.action === 'append') {
-      // append 加载时被标准化为 insert（index 为空），比对时需跨 action 匹配
+    } else if (edited.action === 'append' && original.action === 'append') {
       const baseline = initBodyRuleSetValueForEditor(original.value)
-      if (edited.index.trim() !== '') return true  // 加了 index → 已修改
       if (edited.path !== original.path) return true
       if (edited.value !== baseline.value) return true
     } else if (edited.action === 'insert' && original.action === 'insert') {
@@ -1944,6 +2001,7 @@ function hasBodyRulesChanges(endpoint: ProviderEndpoint): boolean {
       if (edited.pattern !== (original.pattern ?? '')) return true
       if (edited.replacement !== (original.replacement ?? '')) return true
       if (edited.flags !== (original.flags ?? '')) return true
+      if (edited.count !== (original.count === undefined || original.count === null ? '' : String(original.count))) return true
     } else if (edited.action === 'name_style' && original.action === 'name_style') {
       if (edited.path !== (original.path ?? '')) return true
       if (edited.style !== (original.style ?? '')) return true
@@ -1967,18 +2025,16 @@ function rulesToBodyRules(rules: EditableBodyRule[]): BodyRule[] | null {
       result.push({ action: 'drop', path: rule.path.trim(), ...(condition ? { condition } : {}) })
     } else if (rule.action === 'rename' && rule.from.trim() && rule.to.trim()) {
       result.push({ action: 'rename', from: rule.from.trim(), to: rule.to.trim(), ...(condition ? { condition } : {}) })
-    } else if ((rule.action === 'insert' || rule.action === 'append') && rule.path.trim()) {
+    } else if (rule.action === 'append' && rule.path.trim()) {
       let value: unknown = rule.value
       try { value = restoreOriginalPlaceholder(JSON.parse(prepareValueForJsonParse(rule.value.trim()))) } catch { value = rule.value }
-      const indexStr = rule.index.trim()
-      if (indexStr === '') {
-        // 索引留空 → append 到末尾
-        result.push({ action: 'append', path: rule.path.trim(), value, ...(condition ? { condition } : {}) })
-      } else {
-        const idx = parseInt(indexStr, 10)
-        if (isNaN(idx)) continue
-        result.push({ action: 'insert', path: rule.path.trim(), index: idx, value, ...(condition ? { condition } : {}) })
-      }
+      result.push({ action: 'append', path: rule.path.trim(), value, ...(condition ? { condition } : {}) })
+    } else if (rule.action === 'insert' && rule.path.trim()) {
+      let value: unknown = rule.value
+      try { value = restoreOriginalPlaceholder(JSON.parse(prepareValueForJsonParse(rule.value.trim()))) } catch { value = rule.value }
+      if (!isStrictIntegerString(rule.index)) continue
+      const idx = parseInt(rule.index.trim(), 10)
+      result.push({ action: 'insert', path: rule.path.trim(), index: idx, value, ...(condition ? { condition } : {}) })
     } else if (rule.action === 'regex_replace' && rule.path.trim() && rule.pattern.trim()) {
       const entry: BodyRuleRegexReplace = {
         action: 'regex_replace',
@@ -1986,6 +2042,7 @@ function rulesToBodyRules(rules: EditableBodyRule[]): BodyRule[] | null {
         pattern: rule.pattern,
         replacement: rule.replacement || '',
         ...(rule.flags.trim() ? { flags: rule.flags.trim() } : {}),
+        ...(isStrictNonNegativeIntegerString(rule.count) ? { count: parseInt(rule.count.trim(), 10) } : {}),
       }
       result.push({ ...entry, ...(condition ? { condition } : {}) })
     } else if (rule.action === 'name_style' && rule.path.trim() && rule.style.trim()) {
@@ -2014,11 +2071,17 @@ function getBodyValidationErrorForEndpoint(endpointId: string): string | null {
       if (fromErr) return `${prefix}${fromErr}`
       const toErr = validateBodyRenameToForEndpoint(endpointId, rule.to, i)
       if (toErr) return `${prefix}${toErr}`
-    } else if (rule.action === 'insert' || rule.action === 'append') {
+    } else if (rule.action === 'append') {
+      const pathErr = validateBodyRulePathForEndpoint(endpointId, rule.path, i)
+      if (pathErr) return `${prefix}${pathErr}`
+      const valueErr = validateBodySetValue(rule)
+      if (valueErr) return `${prefix}${valueErr}`
+    } else if (rule.action === 'insert') {
       const pathErr = validateBodyRulePathForEndpoint(endpointId, rule.path, i)
       if (pathErr) return `${prefix}${pathErr}`
       const indexStr = rule.index.trim()
-      if (indexStr !== '' && isNaN(parseInt(indexStr, 10))) return `${prefix}位置必须为整数或留空`
+      if (!indexStr) return `${prefix}插入位置不能为空`
+      if (!isStrictIntegerString(indexStr)) return `${prefix}位置必须为整数`
       const valueErr = validateBodySetValue(rule)
       if (valueErr) return `${prefix}${valueErr}`
     } else if (rule.action === 'regex_replace') {
@@ -2036,6 +2099,10 @@ function getBodyValidationErrorForEndpoint(endpointId: string): string | null {
         for (const f of flags) {
           if (!validFlags.has(f)) return `${prefix}flags 仅允许 i/m/s，非法字符: ${f}`
         }
+      }
+      const count = rule.count.trim()
+      if (count) {
+        if (!isStrictNonNegativeIntegerString(count)) return `${prefix}替换次数必须是大于等于 0 的整数`
       }
     } else if (rule.action === 'name_style') {
       if (!rule.path.trim()) return `${prefix}路径不能为空`

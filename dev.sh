@@ -152,6 +152,7 @@ export HTTP_MAX_CONNECTIONS=${HTTP_MAX_CONNECTIONS:-20}
 export HTTP_KEEPALIVE_CONNECTIONS=${HTTP_KEEPALIVE_CONNECTIONS:-5}
 
 GATEWAY_PID=""
+GATEWAY_LOG_DIR=""
 GATEWAY_LOG_FILE=""
 STARTUP_WAIT_EARLY_EXIT=false
 
@@ -165,9 +166,21 @@ cleanup() {
     if [ -n "${GATEWAY_LOG_FILE}" ] && [ -f "${GATEWAY_LOG_FILE}" ]; then
         rm -f "${GATEWAY_LOG_FILE}"
     fi
+    if [ -n "${GATEWAY_LOG_DIR}" ] && [ -d "${GATEWAY_LOG_DIR}" ]; then
+        rmdir "${GATEWAY_LOG_DIR}" >/dev/null 2>&1 || true
+    fi
 }
 
 trap cleanup EXIT
+
+create_gateway_log_file() {
+    local tmp_root="${TMPDIR:-/tmp}"
+    tmp_root="${tmp_root%/}"
+
+    GATEWAY_LOG_DIR="$(mktemp -d "${tmp_root}/aether-dev-startup.XXXXXX")"
+    GATEWAY_LOG_FILE="${GATEWAY_LOG_DIR}/gateway.log"
+    : > "${GATEWAY_LOG_FILE}"
+}
 
 print_startup_failure_hint() {
     local log_file="$1"
@@ -283,7 +296,7 @@ if ! preflight_dev_infra; then
 fi
 
 GATEWAY_ARGS=(--app-port "${APP_PORT}")
-GATEWAY_LOG_FILE="$(mktemp "${TMPDIR:-/tmp}/aether-dev-startup.XXXXXX.log")"
+create_gateway_log_file
 echo "=> 启动 aether-gateway (Rust frontdoor: 0.0.0.0:${APP_PORT})..."
 echo "=> 日志过滤: ${RUST_LOG} (需要更详细日志可用: RUST_LOG=aether_gateway=debug ./dev.sh)"
 if command -v script >/dev/null 2>&1; then
@@ -304,4 +317,14 @@ if ! wait_for_startup "${GATEWAY_PID}" "${GATEWAY_STARTUP_TIMEOUT_SECONDS}" "aet
     exit 1
 fi
 
-wait "${GATEWAY_PID}"
+if wait "${GATEWAY_PID}"; then
+    exit 0
+else
+    gateway_exit_code=$?
+fi
+
+if [ "${gateway_exit_code}" -ne 130 ] && [ "${gateway_exit_code}" -ne 143 ]; then
+    echo "=> aether-gateway 运行失败并已退出，请检查上面的日志。"
+    print_startup_failure_hint "${GATEWAY_LOG_FILE}"
+fi
+exit "${gateway_exit_code}"

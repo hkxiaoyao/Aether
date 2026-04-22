@@ -166,6 +166,7 @@ CREATE TABLE IF NOT EXISTS public.api_keys (
     key_encrypted text,
     name character varying(100),
     total_requests integer DEFAULT 0,
+    total_tokens bigint DEFAULT '0'::bigint NOT NULL,
     total_cost_usd numeric(20,8) DEFAULT '0'::double precision,
     is_standalone boolean DEFAULT false NOT NULL,
     allowed_providers json,
