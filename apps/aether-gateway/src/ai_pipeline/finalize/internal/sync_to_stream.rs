@@ -388,7 +388,7 @@ fn resolve_openai_cli_finish_reason(output: &[Value]) -> String {
 
 fn standardized_usage_from_openai_usage(value: &Value) -> Option<StandardizedUsage> {
     let usage = value.as_object()?;
-    let input_tokens = usage
+    let mut input_tokens = usage
         .get("input_tokens")
         .or_else(|| usage.get("prompt_tokens"))
         .and_then(Value::as_i64)
@@ -428,6 +428,9 @@ fn standardized_usage_from_openai_usage(value: &Value) -> Option<StandardizedUsa
             .saturating_add(cache_creation_tokens)
             .saturating_add(cache_read_tokens),
     );
+    if input_tokens == 0 && total_tokens > output_tokens {
+        input_tokens = total_tokens.saturating_sub(output_tokens);
+    }
     let mut standardized_usage = StandardizedUsage::new();
     standardized_usage.input_tokens = input_tokens;
     standardized_usage.output_tokens = output_tokens;
@@ -443,10 +446,26 @@ fn standardized_usage_from_openai_usage(value: &Value) -> Option<StandardizedUsa
 mod tests {
     use serde_json::json;
 
-    use super::maybe_bridge_standard_sync_json_to_stream;
+    use super::{maybe_bridge_standard_sync_json_to_stream, standardized_usage_from_openai_usage};
 
     fn utf8(bytes: Vec<u8>) -> String {
         String::from_utf8(bytes).expect("utf8 should decode")
+    }
+
+    #[test]
+    fn openai_sync_usage_derives_missing_input_tokens_from_total() {
+        let usage = standardized_usage_from_openai_usage(&json!({
+            "output_tokens": 177,
+            "total_tokens": 20_612,
+            "input_tokens_details": {
+                "cached_tokens": 19_840,
+            },
+        }))
+        .expect("usage should parse");
+
+        assert_eq!(usage.input_tokens, 20_435);
+        assert_eq!(usage.output_tokens, 177);
+        assert_eq!(usage.cache_read_tokens, 19_840);
     }
 
     #[test]

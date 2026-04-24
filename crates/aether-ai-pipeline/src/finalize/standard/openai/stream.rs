@@ -1823,6 +1823,22 @@ mod tests {
     }
 
     #[test]
+    fn openai_usage_derives_missing_input_tokens_from_total() {
+        let usage = canonical_usage_from_openai_usage(Some(&json!({
+            "output_tokens": 177,
+            "total_tokens": 20_612,
+            "input_tokens_details": {
+                "cached_tokens": 19_840,
+            },
+        })))
+        .expect("usage should parse");
+
+        assert_eq!(usage.input_tokens, 20_435);
+        assert_eq!(usage.output_tokens, 177);
+        assert_eq!(usage.cache_read_tokens, 19_840);
+    }
+
+    #[test]
     fn openai_cli_client_emitter_emits_doc_like_text_events() {
         let mut emitter = OpenAICliClientEmitter::default();
         let start = CanonicalStreamFrame {

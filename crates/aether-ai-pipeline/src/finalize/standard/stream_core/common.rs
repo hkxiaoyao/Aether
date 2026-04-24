@@ -89,7 +89,7 @@ pub fn resolve_identity(
 
 pub fn canonical_usage_from_openai_usage(value: Option<&Value>) -> Option<CanonicalUsage> {
     let usage = value?.as_object()?;
-    let input_tokens = usage
+    let mut input_tokens = usage
         .get("input_tokens")
         .or_else(|| usage.get("prompt_tokens"))
         .and_then(Value::as_u64)
@@ -129,6 +129,9 @@ pub fn canonical_usage_from_openai_usage(value: Option<&Value>) -> Option<Canoni
             .saturating_add(cache_creation_tokens)
             .saturating_add(cache_read_tokens),
     );
+    if input_tokens == 0 && total_tokens > output_tokens {
+        input_tokens = total_tokens.saturating_sub(output_tokens);
+    }
     Some(CanonicalUsage {
         input_tokens,
         output_tokens,
