@@ -619,14 +619,7 @@ fn should_skip_direct_finalize_prefetch(
     has_private_stream_normalizer: bool,
     has_local_stream_rewriter: bool,
 ) -> bool {
-    if direct_stream_finalize_kind.is_none()
-        || has_private_stream_normalizer
-        || has_local_stream_rewriter
-    {
-        return false;
-    }
-
-    if !provider_api_format.eq_ignore_ascii_case(client_api_format) {
+    if direct_stream_finalize_kind.is_none() {
         return false;
     }
 
@@ -635,11 +628,35 @@ fn should_skip_direct_finalize_prefetch(
         .filter(|value| !value.is_empty())
         .unwrap_or_default()
         .to_ascii_lowercase();
+    if content_type.contains("text/event-stream") {
+        return true;
+    }
+
+    if has_private_stream_normalizer || has_local_stream_rewriter {
+        return false;
+    }
+
+    if !provider_api_format.eq_ignore_ascii_case(client_api_format) {
+        return false;
+    }
+
     if content_type.is_empty() {
         return true;
     }
 
     !(content_type.contains("json") || content_type.ends_with("+json"))
+}
+
+fn should_probe_success_failover_before_stream(headers: &BTreeMap<String, String>) -> bool {
+    let content_type = headers
+        .get("content-type")
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
+    content_type.contains("json") || content_type.ends_with("+json")
 }
 
 async fn probe_local_stream_success_failover_text<R>(
@@ -712,7 +729,7 @@ async fn execute_stream_from_frame_stream(
     };
     let mut buffered_frames = VecDeque::new();
     let mut stream_terminal_summary: Option<ExecutionStreamTerminalSummary> = None;
-    if status_code == 200 {
+    if status_code == 200 && should_probe_success_failover_before_stream(&headers) {
         let success_probe_text =
             probe_local_stream_success_failover_text(&mut buffered_frames, &mut lines).await?;
         if should_retry_next_local_candidate_stream(
@@ -2131,7 +2148,10 @@ mod tests {
     use serde_json::{json, Value};
     use tokio::sync::{watch, Notify};
 
-    use super::{execute_execution_runtime_stream, should_skip_direct_finalize_prefetch};
+    use super::{
+        execute_execution_runtime_stream, should_probe_success_failover_before_stream,
+        should_skip_direct_finalize_prefetch,
+    };
     use crate::control::GatewayControlDecision;
     use crate::tunnel::{tunnel_protocol, TunnelProxyConn};
     use crate::AppState;
@@ -2195,14 +2215,27 @@ mod tests {
     }
 
     #[test]
-    fn keeps_prefetch_for_cross_format_or_rewritten_streams() {
-        assert!(!should_skip_direct_finalize_prefetch(
+    fn skips_prefetch_for_event_streams_even_when_cross_format_or_rewritten() {
+        assert!(should_skip_direct_finalize_prefetch(
             Some("claude_cli_sync_finalize"),
             Some("text/event-stream"),
             "openai:chat",
             "claude:cli",
             false,
             true,
+        ));
+    }
+
+    #[test]
+    fn skips_success_failover_probe_for_event_streams() {
+        assert!(!should_probe_success_failover_before_stream(
+            &BTreeMap::from([(
+                "content-type".to_string(),
+                "text/event-stream; charset=utf-8".to_string(),
+            )])
+        ));
+        assert!(should_probe_success_failover_before_stream(
+            &BTreeMap::from([("content-type".to_string(), "application/json".to_string(),)])
         ));
     }
 

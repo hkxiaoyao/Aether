@@ -60,7 +60,7 @@ pub(crate) fn build_direct_execution_frame_stream(
         let mut stream_terminal_observer = StreamingStandardTerminalObserver::default();
         let mut observer_buffered = Vec::new();
 
-        if !should_treat_upstream_response_as_stream(&headers, &observer_context) {
+        if should_buffer_non_stream_response(&headers, &observer_context) {
             let original_headers = headers.clone();
             match buffer_non_sse_upstream_body(response, started_at).await {
                 Ok(buffered) => {
@@ -402,6 +402,20 @@ fn should_treat_upstream_response_as_stream(
         .is_some_and(|value| value.eq_ignore_ascii_case(crate::ai_pipeline::KIRO_ENVELOPE_NAME))
 }
 
+fn should_buffer_non_stream_response(
+    headers: &BTreeMap<String, String>,
+    report_context: &Value,
+) -> bool {
+    if should_treat_upstream_response_as_stream(headers, report_context) {
+        return false;
+    }
+
+    headers
+        .get("content-length")
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .is_some()
+}
+
 async fn buffer_non_sse_upstream_body(
     response: DirectUpstreamResponse,
     started_at: Instant,
@@ -662,7 +676,10 @@ mod tests {
     use serde_json::Value;
     use tokio::sync::watch;
 
-    use super::{build_direct_execution_frame_stream, should_treat_upstream_response_as_stream};
+    use super::{
+        build_direct_execution_frame_stream, should_buffer_non_stream_response,
+        should_treat_upstream_response_as_stream,
+    };
     use crate::execution_runtime::transport::{
         execute_stream_plan_via_local_tunnel, DirectSyncExecutionRuntime, DirectUpstreamResponse,
     };
@@ -689,6 +706,26 @@ mod tests {
 
         assert!(should_treat_upstream_response_as_stream(
             &headers,
+            &report_context
+        ));
+    }
+
+    #[test]
+    fn buffers_non_sse_response_only_when_content_length_is_known() {
+        let report_context = serde_json::json!({
+            "provider_api_format": "openai:chat",
+            "client_api_format": "openai:chat",
+        });
+
+        assert!(!should_buffer_non_stream_response(
+            &BTreeMap::from([("content-type".into(), "application/json".into())]),
+            &report_context
+        ));
+        assert!(should_buffer_non_stream_response(
+            &BTreeMap::from([
+                ("content-type".into(), "application/json".into()),
+                ("content-length".into(), "128".into()),
+            ]),
             &report_context
         ));
     }
