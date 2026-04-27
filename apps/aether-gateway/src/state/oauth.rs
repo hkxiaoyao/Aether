@@ -10,7 +10,8 @@ use super::super::provider_transport;
 use crate::provider_key_auth::provider_key_is_oauth_managed;
 use aether_admin::provider::quota as admin_provider_quota_pure;
 use aether_contracts::{
-    ExecutionPlan, ExecutionTimeouts, RequestBody, EXECUTION_REQUEST_FOLLOW_REDIRECTS_HEADER,
+    ExecutionPlan, ExecutionTimeouts, ProxySnapshot, RequestBody,
+    EXECUTION_REQUEST_FOLLOW_REDIRECTS_HEADER,
 };
 use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
@@ -68,6 +69,69 @@ fn oauth_metadata_refresh_token_fingerprint(metadata: Option<&Value>) -> Option<
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(secret_fingerprint)
+}
+
+fn local_oauth_request_refresh_token_fingerprint(
+    request: &provider_transport::LocalOAuthHttpRequest,
+) -> (Option<String>, Option<usize>) {
+    if let Some(json_body) = request.json_body.as_ref() {
+        return json_body
+            .as_object()
+            .and_then(|object| object.get("refresh_token"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| (Some(secret_fingerprint(value)), Some(value.len())))
+            .unwrap_or((None, None));
+    }
+
+    let Some(body_bytes) = request.body_bytes.as_ref() else {
+        return (None, None);
+    };
+    for (key, value) in url::form_urlencoded::parse(body_bytes) {
+        if key == "refresh_token" {
+            let value = value.trim();
+            if !value.is_empty() {
+                return (Some(secret_fingerprint(value)), Some(value.len()));
+            }
+        }
+    }
+    (None, None)
+}
+
+fn local_oauth_log_excerpt(body: &str) -> String {
+    let body = body.trim();
+    if body.is_empty() {
+        return "-".to_string();
+    }
+    body.chars().take(300).collect()
+}
+
+fn local_oauth_proxy_is_tunnel(proxy: Option<&ProxySnapshot>) -> bool {
+    let Some(proxy) = proxy else {
+        return false;
+    };
+    if proxy.enabled == Some(false) {
+        return false;
+    }
+    proxy
+        .mode
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|mode| mode.eq_ignore_ascii_case("tunnel"))
+}
+
+fn local_oauth_proxy_extra_string<'a>(
+    proxy: Option<&'a ProxySnapshot>,
+    key: &str,
+) -> Option<&'a str> {
+    proxy?
+        .extra
+        .as_ref()
+        .and_then(|extra| extra.get(key))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
 }
 
 fn secret_fingerprint(value: &str) -> String {
@@ -1188,11 +1252,17 @@ impl AppState {
                 body_ref: None,
             }
         };
+        let proxy_snapshot = self
+            .resolve_transport_proxy_snapshot_with_tunnel_affinity(transport)
+            .await;
+        let proxy_is_tunnel = local_oauth_proxy_is_tunnel(proxy_snapshot.as_ref());
         let mut headers = request.headers.clone();
-        headers.insert(
-            EXECUTION_REQUEST_FOLLOW_REDIRECTS_HEADER.to_string(),
-            "true".to_string(),
-        );
+        if !proxy_is_tunnel {
+            headers.insert(
+                EXECUTION_REQUEST_FOLLOW_REDIRECTS_HEADER.to_string(),
+                "true".to_string(),
+            );
+        }
         let plan = ExecutionPlan {
             request_id: request.request_id.to_string(),
             candidate_id: None,
@@ -1216,9 +1286,7 @@ impl AppState {
             client_api_format: "provider_oauth:local_refresh".to_string(),
             provider_api_format: "provider_oauth:local_refresh".to_string(),
             model_name: Some(provider_type.to_string()),
-            proxy: self
-                .resolve_transport_proxy_snapshot_with_tunnel_affinity(transport)
-                .await,
+            proxy: proxy_snapshot,
             tls_profile: None,
             timeouts: Some(ExecutionTimeouts {
                 connect_ms: Some(LOCAL_OAUTH_HTTP_TIMEOUT_MS),
@@ -1229,6 +1297,50 @@ impl AppState {
                 ..ExecutionTimeouts::default()
             }),
         };
+        let (request_refresh_token_fingerprint, request_refresh_token_len) =
+            local_oauth_request_refresh_token_fingerprint(request);
+        tracing::info!(
+            key_id = %transport.key.id,
+            provider_id = %transport.provider.id,
+            endpoint_id = %transport.endpoint.id,
+            provider_type,
+            request_id = %request.request_id,
+            method = %plan.method,
+            token_url = %plan.url,
+            content_type = plan.content_type.as_deref().unwrap_or("-"),
+            body_bytes_len = ?request.body_bytes.as_ref().map(Vec::len),
+            json_body_present = request.json_body.is_some(),
+            request_refresh_token_fingerprint = request_refresh_token_fingerprint
+                .as_deref()
+                .unwrap_or("-"),
+            request_refresh_token_len = ?request_refresh_token_len,
+            proxy_node_id = ?plan.proxy.as_ref().and_then(|proxy| proxy.node_id.as_deref()),
+            proxy_mode = plan.proxy.as_ref().and_then(|proxy| proxy.mode.as_deref()).unwrap_or("-"),
+            proxy_enabled = ?plan.proxy.as_ref().and_then(|proxy| proxy.enabled),
+            proxy_url_present = plan
+                .proxy
+                .as_ref()
+                .and_then(|proxy| proxy.url.as_deref())
+                .map(str::trim)
+                .is_some_and(|value| !value.is_empty()),
+            proxy_is_tunnel,
+            tunnel_base_url_present = local_oauth_proxy_extra_string(
+                plan.proxy.as_ref(),
+                "tunnel_base_url"
+            )
+            .is_some(),
+            tunnel_owner_instance_id = local_oauth_proxy_extra_string(
+                plan.proxy.as_ref(),
+                "tunnel_owner_instance_id"
+            )
+            .unwrap_or("-"),
+            follow_redirects = plan
+                .headers
+                .get(EXECUTION_REQUEST_FOLLOW_REDIRECTS_HEADER)
+                .map(String::as_str)
+                .unwrap_or("-"),
+            "gateway local oauth execution request prepared"
+        );
         let result =
             crate::execution_runtime::execute_execution_runtime_sync_plan(self, None, &plan)
                 .await
@@ -1242,9 +1354,38 @@ impl AppState {
                         },
                     },
                 )?;
+        let response_body_text = local_oauth_execution_body_text(&result);
+        if (200..300).contains(&result.status_code) {
+            tracing::info!(
+                key_id = %transport.key.id,
+                provider_id = %transport.provider.id,
+                endpoint_id = %transport.endpoint.id,
+                provider_type,
+                request_id = %request.request_id,
+                status_code = result.status_code,
+                request_refresh_token_fingerprint = request_refresh_token_fingerprint
+                    .as_deref()
+                    .unwrap_or("-"),
+                "gateway local oauth execution response received"
+            );
+        } else {
+            tracing::warn!(
+                key_id = %transport.key.id,
+                provider_id = %transport.provider.id,
+                endpoint_id = %transport.endpoint.id,
+                provider_type,
+                request_id = %request.request_id,
+                status_code = result.status_code,
+                request_refresh_token_fingerprint = request_refresh_token_fingerprint
+                    .as_deref()
+                    .unwrap_or("-"),
+                body_excerpt = %local_oauth_log_excerpt(response_body_text.as_str()),
+                "gateway local oauth execution response returned error"
+            );
+        }
         Ok(provider_transport::LocalOAuthHttpResponse {
             status_code: result.status_code,
-            body_text: local_oauth_execution_body_text(&result),
+            body_text: response_body_text,
         })
     }
 
