@@ -13,7 +13,7 @@ use crate::ai_pipeline::planner::candidate_metadata::{
     build_local_execution_candidate_metadata_for_candidate, LocalExecutionCandidateMetadataParts,
 };
 use crate::ai_pipeline::planner::candidate_resolution::{
-    extract_pool_sticky_session_token, filter_and_rank_local_execution_candidates,
+    extract_pool_sticky_session_token, resolve_and_rank_local_execution_candidates,
     SkippedLocalExecutionCandidate,
 };
 use crate::ai_pipeline::planner::decision_input::{
@@ -153,7 +153,7 @@ async fn materialize_local_openai_image_candidate_attempts(
         input.required_capabilities.as_ref(),
         LocalCandidatePersistencePolicyKind::ImageDecision,
     );
-    let (candidates, skipped_candidates) = filter_and_rank_local_execution_candidates(
+    let (candidates, skipped_candidates) = resolve_and_rank_local_execution_candidates(
         state,
         candidates,
         api_format,

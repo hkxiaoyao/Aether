@@ -18,7 +18,7 @@ use crate::ai_pipeline::planner::candidate_metadata::{
     LocalExecutionCandidateMetadataParts,
 };
 use crate::ai_pipeline::planner::candidate_resolution::{
-    extract_pool_sticky_session_token, filter_and_rank_local_execution_candidates,
+    extract_pool_sticky_session_token, resolve_and_rank_local_execution_candidates,
     SkippedLocalExecutionCandidate,
 };
 use crate::ai_pipeline::planner::candidate_source::auth_snapshot_allows_cross_format_candidate;
@@ -230,7 +230,7 @@ pub(crate) async fn materialize_local_openai_responses_candidate_attempts(
             }
         }
     }
-    let (candidates, skipped_candidates) = filter_and_rank_local_execution_candidates(
+    let (candidates, skipped_candidates) = resolve_and_rank_local_execution_candidates(
         planner_state,
         candidates,
         spec_metadata.api_format,

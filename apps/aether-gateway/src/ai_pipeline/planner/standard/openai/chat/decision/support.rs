@@ -14,7 +14,7 @@ use crate::ai_pipeline::planner::candidate_metadata::{
     LocalExecutionCandidateMetadataParts,
 };
 use crate::ai_pipeline::planner::candidate_resolution::{
-    extract_pool_sticky_session_token, filter_and_rank_local_execution_candidates,
+    extract_pool_sticky_session_token, resolve_and_rank_local_execution_candidates,
     SkippedLocalExecutionCandidate,
 };
 use crate::ai_pipeline::planner::materialization_policy::{
@@ -130,7 +130,7 @@ pub(crate) async fn materialize_local_openai_chat_candidate_attempts(
         input.required_capabilities.as_ref(),
         LocalCandidatePersistencePolicyKind::OpenAiChatDecision,
     );
-    let (candidates, skipped_candidates) = filter_and_rank_local_execution_candidates(
+    let (candidates, skipped_candidates) = resolve_and_rank_local_execution_candidates(
         planner_state,
         candidates,
         "openai:chat",

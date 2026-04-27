@@ -447,8 +447,8 @@ fn ai_pipeline_planner_separates_local_candidate_resolution_from_ranking() {
         "candidate_resolution.rs should rank eligible candidates before applying pool-internal account scheduling"
     );
     for pattern in [
-        "pub(crate) async fn filter_and_rank_local_execution_candidates(",
-        "pub(crate) async fn filter_and_rank_local_execution_candidates_without_transport_pair_gate(",
+        "pub(crate) async fn resolve_and_rank_local_execution_candidates(",
+        "pub(crate) async fn resolve_and_rank_local_execution_candidates_without_transport_pair_gate(",
         "pub(crate) async fn read_candidate_transport_snapshot(",
     ] {
         assert!(
@@ -475,7 +475,7 @@ fn ai_pipeline_planner_separates_local_candidate_resolution_from_ranking() {
     for forbidden in [
         "struct SkippedLocalExecutionCandidate",
         "async fn current_local_execution_candidate_skip_reason(",
-        "pub(crate) async fn filter_and_rank_local_execution_candidates(",
+        "pub(crate) async fn resolve_and_rank_local_execution_candidates(",
         "resolve_transport_proxy_snapshot_with_tunnel_affinity",
     ] {
         assert!(
@@ -499,7 +499,7 @@ fn ai_pipeline_planner_separates_local_candidate_resolution_from_ranking() {
     for forbidden in [
         "apply_scheduler_candidate_ranking",
         "rank_eligible_local_execution_candidates",
-        "filter_and_rank_local_execution_candidates",
+        "resolve_and_rank_local_execution_candidates",
     ] {
         assert!(
             !candidate_affinity_cache.contains(forbidden),
@@ -524,7 +524,7 @@ fn ai_pipeline_planner_separates_local_candidate_resolution_from_ranking() {
     for forbidden in [
         "apply_scheduler_candidate_ranking",
         "rank_eligible_local_execution_candidates",
-        "filter_and_rank_local_execution_candidates",
+        "resolve_and_rank_local_execution_candidates",
     ] {
         assert!(
             !candidate_transport_ranking_facts.contains(forbidden),
@@ -1326,7 +1326,7 @@ fn ai_pipeline_specialized_files_attempts_consume_eligible_local_candidates_with
     );
     assert!(
         specialized_files_support
-            .contains("filter_and_rank_local_execution_candidates_without_transport_pair_gate("),
+            .contains("resolve_and_rank_local_execution_candidates_without_transport_pair_gate("),
         "specialized files support should source runtime gating from candidate_resolution"
     );
     assert!(

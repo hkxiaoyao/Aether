@@ -14,7 +14,7 @@ use crate::ai_pipeline::planner::candidate_metadata::{
     build_local_execution_candidate_metadata,
     build_local_execution_candidate_metadata_for_candidate, LocalExecutionCandidateMetadataParts,
 };
-use crate::ai_pipeline::planner::candidate_resolution::filter_and_rank_local_execution_candidates_without_transport_pair_gate;
+use crate::ai_pipeline::planner::candidate_resolution::resolve_and_rank_local_execution_candidates_without_transport_pair_gate;
 use crate::ai_pipeline::planner::decision_input::{
     build_local_authenticated_decision_input, resolve_local_authenticated_decision_input,
 };
@@ -90,7 +90,7 @@ pub(super) async fn materialize_local_gemini_files_candidate_attempts(
         )
         .await?;
     let (candidates, skipped_candidates) =
-        filter_and_rank_local_execution_candidates_without_transport_pair_gate(
+        resolve_and_rank_local_execution_candidates_without_transport_pair_gate(
             planner_state,
             candidates,
             GEMINI_FILES_CLIENT_API_FORMAT,

@@ -37,7 +37,7 @@ impl SkippedLocalExecutionCandidate {
     }
 }
 
-pub(crate) async fn filter_and_rank_local_execution_candidates(
+pub(crate) async fn resolve_and_rank_local_execution_candidates(
     state: PlannerAppState<'_>,
     candidates: Vec<SchedulerMinimalCandidateSelectionCandidate>,
     client_api_format: &str,
@@ -50,7 +50,7 @@ pub(crate) async fn filter_and_rank_local_execution_candidates(
     Vec<SkippedLocalExecutionCandidate>,
 ) {
     let requested_model = requested_model.trim();
-    filter_and_rank_local_execution_candidates_with_gate(
+    resolve_and_rank_local_execution_candidates_with_gate(
         state,
         candidates,
         client_api_format,
@@ -70,7 +70,7 @@ pub(crate) async fn filter_and_rank_local_execution_candidates(
     .await
 }
 
-pub(crate) async fn filter_and_rank_local_execution_candidates_without_transport_pair_gate(
+pub(crate) async fn resolve_and_rank_local_execution_candidates_without_transport_pair_gate(
     state: PlannerAppState<'_>,
     candidates: Vec<SchedulerMinimalCandidateSelectionCandidate>,
     client_api_format: &str,
@@ -83,7 +83,7 @@ pub(crate) async fn filter_and_rank_local_execution_candidates_without_transport
     Vec<SkippedLocalExecutionCandidate>,
 ) {
     let requested_model = requested_model.map(str::trim);
-    filter_and_rank_local_execution_candidates_with_gate(
+    resolve_and_rank_local_execution_candidates_with_gate(
         state,
         candidates,
         client_api_format,
@@ -102,7 +102,7 @@ pub(crate) async fn filter_and_rank_local_execution_candidates_without_transport
     .await
 }
 
-async fn filter_and_rank_local_execution_candidates_with_gate<F>(
+async fn resolve_and_rank_local_execution_candidates_with_gate<F>(
     state: PlannerAppState<'_>,
     candidates: Vec<SchedulerMinimalCandidateSelectionCandidate>,
     client_api_format: &str,

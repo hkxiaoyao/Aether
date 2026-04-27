@@ -197,7 +197,7 @@ mod tests {
     use super::super::candidate_affinity_cache::remember_scheduler_affinity_for_candidate;
     use super::super::candidate_transport_ranking_facts::resolve_cached_candidate_transport_ranking_facts;
     use super::{PlannerAppState, SchedulerMinimalCandidateSelectionCandidate};
-    use crate::ai_pipeline::planner::candidate_resolution::filter_and_rank_local_execution_candidates;
+    use crate::ai_pipeline::planner::candidate_resolution::resolve_and_rank_local_execution_candidates;
     use crate::data::auth::GatewayAuthApiKeySnapshot;
     use crate::data::GatewayDataState;
     use crate::tunnel::TunnelAttachmentRecord;
@@ -997,7 +997,7 @@ mod tests {
             .expect("state should build")
             .with_data_state_for_tests(data_state);
 
-        let (ranked, skipped) = filter_and_rank_local_execution_candidates(
+        let (ranked, skipped) = resolve_and_rank_local_execution_candidates(
             PlannerAppState::new(&state),
             vec![
                 sample_priority_candidate(
@@ -1074,7 +1074,7 @@ mod tests {
             .expect("state should build")
             .with_data_state_for_tests(data_state);
 
-        let (ranked, skipped) = filter_and_rank_local_execution_candidates(
+        let (ranked, skipped) = resolve_and_rank_local_execution_candidates(
             PlannerAppState::new(&state),
             vec![
                 sample_priority_candidate(
@@ -1147,7 +1147,7 @@ mod tests {
             .expect("state should build")
             .with_data_state_for_tests(data_state);
 
-        let (ranked, skipped) = filter_and_rank_local_execution_candidates(
+        let (ranked, skipped) = resolve_and_rank_local_execution_candidates(
             PlannerAppState::new(&state),
             vec![
                 sample_priority_candidate(
@@ -1207,7 +1207,7 @@ mod tests {
             .expect("state should build")
             .with_data_state_for_tests(data_state);
 
-        let (ranked, skipped) = filter_and_rank_local_execution_candidates(
+        let (ranked, skipped) = resolve_and_rank_local_execution_candidates(
             PlannerAppState::new(&state),
             vec![
                 sample_priority_candidate(
@@ -1287,7 +1287,7 @@ mod tests {
             .expect("state should build")
             .with_data_state_for_tests(data_state);
 
-        let (ranked, skipped) = filter_and_rank_local_execution_candidates(
+        let (ranked, skipped) = resolve_and_rank_local_execution_candidates(
             PlannerAppState::new(&state),
             vec![
                 sample_priority_candidate(
@@ -1365,7 +1365,7 @@ mod tests {
             &cached_candidate,
         );
 
-        let (ranked, skipped) = filter_and_rank_local_execution_candidates(
+        let (ranked, skipped) = resolve_and_rank_local_execution_candidates(
             PlannerAppState::new(&state),
             vec![
                 sample_priority_candidate(
@@ -1449,7 +1449,7 @@ mod tests {
             &cached_candidate,
         );
 
-        let (ranked, skipped) = filter_and_rank_local_execution_candidates(
+        let (ranked, skipped) = resolve_and_rank_local_execution_candidates(
             PlannerAppState::new(&state),
             vec![
                 cached_candidate,
@@ -1550,7 +1550,7 @@ mod tests {
             &cached_candidate,
         );
 
-        let (ranked, skipped) = filter_and_rank_local_execution_candidates(
+        let (ranked, skipped) = resolve_and_rank_local_execution_candidates(
             PlannerAppState::new(&state),
             vec![
                 cached_candidate,
@@ -1651,7 +1651,7 @@ mod tests {
             &cached_candidate,
         );
 
-        let (ranked, skipped) = filter_and_rank_local_execution_candidates(
+        let (ranked, skipped) = resolve_and_rank_local_execution_candidates(
             PlannerAppState::new(&state),
             vec![
                 cached_candidate,
