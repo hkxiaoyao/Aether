@@ -952,20 +952,25 @@ async fn gateway_marks_claude_cli_cross_format_runtime_miss_when_format_conversi
             .headers()
             .get(LOCAL_EXECUTION_RUNTIME_MISS_REASON_HEADER)
             .and_then(|value| value.to_str().ok()),
-        Some("candidate_list_empty")
+        Some("all_candidates_skipped")
     );
     let response_json: serde_json::Value = response.json().await.expect("body should parse");
     assert_eq!(response_json["error"]["type"], "http_error");
     assert_eq!(
         response_json["error"]["message"],
-        "没有可用提供商支持模型 gpt-5.4 的同步请求"
+        "找到 1 个支持模型 gpt-5.4 的候选提供商，但本次同步请求全部不可用：格式转换未启用 2 次"
     );
 
     let stored_candidates = request_candidate_repository
         .list_by_request_id("trace-claude-cli-openai-local-miss-123")
         .await
         .expect("request candidate trace should read");
-    assert!(stored_candidates.is_empty());
+    assert_eq!(stored_candidates.len(), 1);
+    assert_eq!(stored_candidates[0].status, RequestCandidateStatus::Skipped);
+    assert_eq!(
+        stored_candidates[0].skip_reason.as_deref(),
+        Some("format_conversion_disabled")
+    );
     assert_eq!(*public_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();

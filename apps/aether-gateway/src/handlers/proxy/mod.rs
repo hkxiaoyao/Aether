@@ -1610,6 +1610,7 @@ fn local_execution_runtime_miss_skip_reason_label(reason: &str) -> &str {
         "auth_snapshot_missing" => "API Key 本地执行配置缺失",
         "endpoint_api_format_changed" => "端点 API 格式已变更",
         "endpoint_inactive" => "端点未启用",
+        "format_conversion_disabled" => "格式转换未启用",
         "key_api_format_disabled" => "API Key 未启用该 API 格式",
         "key_inactive" => "API Key 未启用",
         "key_model_disabled" => "API Key 未允许该模型",

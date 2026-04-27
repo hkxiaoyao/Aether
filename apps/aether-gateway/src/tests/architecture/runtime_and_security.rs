@@ -370,14 +370,18 @@ fn scheduler_candidate_runtime_paths_depend_on_scheduler_core_and_state_trait() 
     }
 
     let affinity = read_workspace_file("apps/aether-gateway/src/scheduler/candidate/affinity.rs");
+    let ranking = read_workspace_file("apps/aether-gateway/src/scheduler/candidate/ranking.rs");
+    let resolution =
+        read_workspace_file("apps/aether-gateway/src/scheduler/candidate/resolution.rs");
+    let candidate_runtime_path_source = format!("{affinity}\n{ranking}\n{resolution}");
     assert!(
         affinity.contains("SchedulerRuntimeState"),
         "candidate/affinity.rs should depend on SchedulerRuntimeState"
     );
     assert!(
-        affinity.contains("aether_scheduler_core::{")
-            && affinity.contains("SchedulerAffinityTarget"),
-        "candidate/affinity.rs should depend on core SchedulerAffinityTarget"
+        candidate_runtime_path_source.contains("aether_scheduler_core::{")
+            && candidate_runtime_path_source.contains("SchedulerAffinityTarget"),
+        "scheduler candidate runtime path should depend on core SchedulerAffinityTarget"
     );
     for pattern in [
         "candidate_affinity_hash",
@@ -385,21 +389,21 @@ fn scheduler_candidate_runtime_paths_depend_on_scheduler_core_and_state_trait() 
         "candidate_key",
     ] {
         assert!(
-            affinity.contains(pattern),
-            "candidate/affinity.rs should depend on core affinity helper {pattern}"
+            candidate_runtime_path_source.contains(pattern),
+            "scheduler candidate runtime path should depend on core affinity helper {pattern}"
         );
     }
     assert!(
-        !affinity.contains("use crate::AppState"),
-        "candidate/affinity.rs should not depend on AppState directly"
+        !candidate_runtime_path_source.contains("use crate::AppState"),
+        "scheduler candidate runtime path should not depend on AppState directly"
     );
     assert!(
-        !affinity.contains("crate::cache::SchedulerAffinityTarget"),
-        "candidate/affinity.rs should not depend on gateway-local SchedulerAffinityTarget"
+        !candidate_runtime_path_source.contains("crate::cache::SchedulerAffinityTarget"),
+        "scheduler candidate runtime path should not depend on gateway-local SchedulerAffinityTarget"
     );
     assert!(
-        !affinity.contains("use sha2::{Digest, Sha256};"),
-        "candidate/affinity.rs should not own affinity hashing implementation anymore"
+        !candidate_runtime_path_source.contains("use sha2::{Digest, Sha256};"),
+        "scheduler candidate runtime path should not own affinity hashing implementation anymore"
     );
     for pattern in [
         "fn compare_affinity_order(",

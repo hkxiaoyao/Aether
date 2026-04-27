@@ -1570,13 +1570,13 @@ async fn gateway_records_failed_usage_when_all_local_claude_cli_candidates_are_s
             .headers()
             .get(LOCAL_EXECUTION_RUNTIME_MISS_REASON_HEADER)
             .and_then(|value| value.to_str().ok()),
-        Some("candidate_list_empty")
+        Some("all_candidates_skipped")
     );
     let body_json: serde_json::Value = response.json().await.expect("body should parse");
     assert_eq!(body_json["error"]["type"], "http_error");
     assert_eq!(
         body_json["error"]["message"],
-        "没有可用提供商支持模型 gpt-5.4 的同步请求"
+        "找到 1 个支持模型 gpt-5.4 的候选提供商，但本次同步请求全部不可用：格式转换未启用 2 次"
     );
 
     let stored_usage = wait_for_usage_status(
@@ -1610,12 +1610,12 @@ async fn gateway_records_failed_usage_when_all_local_claude_cli_candidates_are_s
     );
     assert_eq!(
         stored_usage.routing_local_execution_runtime_miss_reason(),
-        Some("candidate_list_empty")
+        Some("all_candidates_skipped")
     );
     assert_eq!(
         stored_usage.error_message.as_deref(),
         Some(
-            "没有可用提供商支持模型 gpt-5.4 的同步请求。请检查模型映射、端点启用状态和 API Key 权限（原因代码: candidate_list_empty）"
+            "找到 1 个支持模型 gpt-5.4 的候选提供商，但本次同步请求全部不可用：格式转换未启用 2 次（原因代码: all_candidates_skipped）"
         )
     );
     assert_eq!(
@@ -1656,7 +1656,12 @@ async fn gateway_records_failed_usage_when_all_local_claude_cli_candidates_are_s
         .list_by_request_id("trace-claude-cli-usage-local-miss-123")
         .await
         .expect("request candidate trace should read");
-    assert!(stored_candidates.is_empty());
+    assert_eq!(stored_candidates.len(), 1);
+    assert_eq!(stored_candidates[0].status, RequestCandidateStatus::Skipped);
+    assert_eq!(
+        stored_candidates[0].skip_reason.as_deref(),
+        Some("format_conversion_disabled")
+    );
     assert_eq!(stored_usage.routing_candidate_id(), None);
     assert_eq!(*public_hits.lock().expect("mutex should lock"), 0);
 
@@ -1878,7 +1883,7 @@ async fn gateway_keeps_failed_usage_request_capture_lightweight_for_large_local_
             .headers()
             .get(LOCAL_EXECUTION_RUNTIME_MISS_REASON_HEADER)
             .and_then(|value| value.to_str().ok()),
-        Some("candidate_list_empty")
+        Some("all_candidates_skipped")
     );
 
     let stored_usage = wait_for_usage_status(
@@ -1914,7 +1919,12 @@ async fn gateway_keeps_failed_usage_request_capture_lightweight_for_large_local_
         .list_by_request_id("trace-claude-cli-usage-local-miss-large-123")
         .await
         .expect("request candidate trace should read");
-    assert!(stored_candidates.is_empty());
+    assert_eq!(stored_candidates.len(), 1);
+    assert_eq!(stored_candidates[0].status, RequestCandidateStatus::Skipped);
+    assert_eq!(
+        stored_candidates[0].skip_reason.as_deref(),
+        Some("format_conversion_disabled")
+    );
 
     gateway_handle.abort();
     execution_runtime_handle.abort();
