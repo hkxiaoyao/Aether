@@ -84,6 +84,8 @@ const LOCAL_EXECUTION_LOOP_DETECTED_DETAIL: &str =
 const AUTH_API_KEY_CONCURRENCY_LIMIT_REACHED_DETAIL: &str =
     "当前 API Key 并发请求数已达上限，请稍后重试";
 const EXECUTION_PATH_TUNNEL_AFFINITY_FORWARD: &str = "tunnel_affinity_forward";
+const MANAGEMENT_TOKEN_PREFIX: &str = "ae-";
+const LEGACY_MANAGEMENT_TOKEN_PREFIX: &str = "ae_";
 
 fn local_execution_outcome_label(outcome: &LocalExecutionRequestOutcome) -> &'static str {
     match outcome {
@@ -113,7 +115,10 @@ fn extract_management_token_bearer(headers: &http::HeaderMap) -> Option<String> 
         .or_else(|| header.strip_prefix("bearer "))?
         .trim()
         .to_string();
-    (!token.is_empty() && token.starts_with("ae_")).then_some(token)
+    (!token.is_empty()
+        && (token.starts_with(MANAGEMENT_TOKEN_PREFIX)
+            || token.starts_with(LEGACY_MANAGEMENT_TOKEN_PREFIX)))
+    .then_some(token)
 }
 
 fn hash_management_token(value: &str) -> String {

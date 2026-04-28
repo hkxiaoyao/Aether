@@ -6825,10 +6825,12 @@ async fn gateway_handles_users_me_management_token_writes_locally_without_proxyi
         .to_string();
     assert_eq!(create_payload["message"], "Management Token 创建成功");
     assert_eq!(create_payload["data"]["name"], "writer-token");
-    assert!(create_payload["token"]
-        .as_str()
-        .unwrap_or_default()
-        .starts_with("ae_"));
+    let created_token = create_payload["token"].as_str().unwrap_or_default();
+    let created_token_random = created_token.strip_prefix("ae-").unwrap_or_default();
+    assert_eq!(created_token_random.len(), 32);
+    assert!(created_token_random
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric()));
 
     let update_response = client
         .put(format!(
@@ -6901,10 +6903,12 @@ async fn gateway_handles_users_me_management_token_writes_locally_without_proxyi
         .await
         .expect("json body should parse");
     assert_eq!(regenerate_payload["message"], "Token 已重新生成");
-    assert!(regenerate_payload["token"]
-        .as_str()
-        .unwrap_or_default()
-        .starts_with("ae_"));
+    let regenerated_token = regenerate_payload["token"].as_str().unwrap_or_default();
+    let regenerated_token_random = regenerated_token.strip_prefix("ae-").unwrap_or_default();
+    assert_eq!(regenerated_token_random.len(), 32);
+    assert!(regenerated_token_random
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric()));
 
     let delete_response = client
         .delete(format!(
