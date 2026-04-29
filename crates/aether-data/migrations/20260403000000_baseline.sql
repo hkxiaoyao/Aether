@@ -464,7 +464,7 @@ CREATE TABLE IF NOT EXISTS public.payment_orders (
 
 CREATE TABLE IF NOT EXISTS public.provider_api_keys (
     id character varying(36) NOT NULL,
-    api_key text NOT NULL,
+    api_key text,
     name character varying(100) NOT NULL,
     note character varying(500),
     internal_priority integer DEFAULT 50,
@@ -495,6 +495,7 @@ CREATE TABLE IF NOT EXISTS public.provider_api_keys (
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     provider_id character varying(36) NOT NULL,
     api_formats json,
+    auth_type_by_format json,
     rate_multipliers json,
     health_by_format jsonb,
     circuit_breaker_by_format jsonb,

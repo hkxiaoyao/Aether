@@ -119,6 +119,8 @@ mod tests {
                 auth_type: "bearer".to_string(),
                 is_active: true,
                 api_formats: Some(vec!["claude:messages".to_string()]),
+                auth_type_by_format: None,
+
                 allowed_models: None,
                 capabilities: None,
                 rate_multipliers: None,

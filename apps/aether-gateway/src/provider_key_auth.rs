@@ -26,6 +26,7 @@ pub(crate) enum ProviderKeyRuntimeAuthKind {
     ApiKey,
     Bearer,
     ServiceAccount,
+    Mixed,
     Unknown,
 }
 
@@ -35,6 +36,7 @@ impl ProviderKeyRuntimeAuthKind {
             Self::ApiKey => "api_key",
             Self::Bearer => "bearer",
             Self::ServiceAccount => "service_account",
+            Self::Mixed => "mixed",
             Self::Unknown => "unknown",
         }
     }
@@ -88,6 +90,13 @@ fn key_has_auth_config(key: &StoredProviderCatalogKey) -> bool {
         .is_some_and(|value| !value.is_empty())
 }
 
+fn key_has_auth_type_overrides(key: &StoredProviderCatalogKey) -> bool {
+    key.auth_type_by_format
+        .as_ref()
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|items| !items.is_empty())
+}
+
 fn provider_uses_bearer_oauth_runtime(provider_type: &str) -> bool {
     matches!(
         provider_type.trim().to_ascii_lowercase().as_str(),
@@ -129,11 +138,17 @@ pub(crate) fn provider_key_auth_semantics(
             }
         }
         ProviderKeyCredentialKind::ServiceAccount => ProviderKeyRuntimeAuthKind::ServiceAccount,
-        ProviderKeyCredentialKind::RawSecret => match auth_type.as_str() {
-            "bearer" => ProviderKeyRuntimeAuthKind::Bearer,
-            "api_key" => ProviderKeyRuntimeAuthKind::ApiKey,
-            _ => ProviderKeyRuntimeAuthKind::Unknown,
-        },
+        ProviderKeyCredentialKind::RawSecret => {
+            if key_has_auth_type_overrides(key) {
+                ProviderKeyRuntimeAuthKind::Mixed
+            } else {
+                match auth_type.as_str() {
+                    "bearer" => ProviderKeyRuntimeAuthKind::Bearer,
+                    "api_key" => ProviderKeyRuntimeAuthKind::ApiKey,
+                    _ => ProviderKeyRuntimeAuthKind::Unknown,
+                }
+            }
+        }
     };
 
     ProviderKeyAuthSemantics {

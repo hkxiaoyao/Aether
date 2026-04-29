@@ -42,6 +42,45 @@ pub(crate) fn normalize_api_format_json_object_keys(
     Ok(Some(serde_json::Value::Object(normalized)))
 }
 
+pub(crate) fn normalize_auth_type_by_format(
+    value: Option<serde_json::Value>,
+    field_name: &str,
+    api_formats: &[String],
+) -> Result<Option<serde_json::Value>, String> {
+    let Some(value) = normalize_json_like_object(value, field_name)? else {
+        return Ok(None);
+    };
+    let serde_json::Value::Object(map) = value else {
+        return Ok(Some(value));
+    };
+    let allowed = api_formats.iter().cloned().collect::<BTreeSet<_>>();
+    let mut normalized = serde_json::Map::new();
+    for (key, value) in map {
+        let canonical = crate::ai_pipeline::normalize_api_format_alias(&key);
+        if !allowed.is_empty() && !allowed.contains(&canonical) {
+            return Err(format!("{field_name} 包含未选择的 API 格式: {canonical}"));
+        }
+        let Some(auth_type) = value
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return Err(format!("{field_name}.{canonical} 必须是字符串"));
+        };
+        let auth_type = match auth_type.to_ascii_lowercase().as_str() {
+            "api_key" | "apikey" | "api-key" => "api_key",
+            "bearer" | "bearer_token" | "bearer-token" | "authorization" => "bearer",
+            _ => return Err(format!("{field_name}.{canonical} 仅支持 api_key / bearer")),
+        };
+        normalized.insert(canonical, serde_json::Value::String(auth_type.to_string()));
+    }
+    if normalized.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(serde_json::Value::Object(normalized)))
+    }
+}
+
 pub(crate) fn normalize_auth_type(value: Option<&str>) -> Result<String, String> {
     let auth_type = value.unwrap_or("api_key").trim().to_ascii_lowercase();
     match auth_type.as_str() {
@@ -111,7 +150,7 @@ fn normalize_json_like_object(
 mod tests {
     use super::{
         normalize_api_format_json_object_keys, normalize_api_format_list, normalize_auth_type,
-        normalize_pool_advanced_config, validate_vertex_api_formats,
+        normalize_auth_type_by_format, normalize_pool_advanced_config, validate_vertex_api_formats,
     };
     use serde_json::json;
 
@@ -176,6 +215,28 @@ mod tests {
                 "claude:messages": 2,
                 "gemini:generate_content": 3,
                 "openai:video": 4
+            }))
+        );
+    }
+
+    #[test]
+    fn normalize_auth_type_by_format_accepts_per_format_bearer_override() {
+        assert_eq!(
+            normalize_auth_type_by_format(
+                Some(json!({
+                    "claude:messages": "bearer",
+                    "gemini:generate_content": "api-key"
+                })),
+                "auth_type_by_format",
+                &[
+                    "claude:messages".to_string(),
+                    "gemini:generate_content".to_string(),
+                ],
+            )
+            .expect("auth map should normalize"),
+            Some(json!({
+                "claude:messages": "bearer",
+                "gemini:generate_content": "api_key"
             }))
         );
     }

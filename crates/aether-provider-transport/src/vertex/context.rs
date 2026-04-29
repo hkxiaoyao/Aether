@@ -1,5 +1,6 @@
 use url::Url;
 
+use super::super::auth::resolve_local_auth_type_for_transport_format;
 use super::super::snapshot::GatewayProviderTransportSnapshot;
 
 const VERTEX_AI_HOST: &str = "aiplatform.googleapis.com";
@@ -32,10 +33,7 @@ pub fn is_vertex_api_key_transport_context(transport: &GatewayProviderTransportS
         .trim()
         .eq_ignore_ascii_case(super::PROVIDER_TYPE)
     {
-        return transport
-            .key
-            .auth_type
-            .trim()
+        return resolve_local_auth_type_for_transport_format(transport)
             .eq_ignore_ascii_case("api_key");
     }
 
@@ -48,11 +46,7 @@ pub fn is_vertex_api_key_transport_context(transport: &GatewayProviderTransportS
         return false;
     }
 
-    transport
-        .key
-        .auth_type
-        .trim()
-        .eq_ignore_ascii_case("api_key")
+    resolve_local_auth_type_for_transport_format(transport).eq_ignore_ascii_case("api_key")
 }
 
 pub fn uses_vertex_api_key_query_auth(
@@ -117,6 +111,8 @@ mod tests {
                 auth_type: "api_key".to_string(),
                 is_active: true,
                 api_formats: Some(vec!["gemini:generate_content".to_string()]),
+                auth_type_by_format: None,
+
                 allowed_models: None,
                 capabilities: None,
                 rate_multipliers: None,

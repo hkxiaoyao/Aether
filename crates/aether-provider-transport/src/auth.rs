@@ -230,7 +230,7 @@ fn merge_comma_header_values(left: Option<&str>, right: Option<&str>) -> Option<
 pub fn resolve_local_openai_bearer_auth(
     transport: &GatewayProviderTransportSnapshot,
 ) -> Option<(String, String)> {
-    let auth_type = transport.key.auth_type.trim().to_ascii_lowercase();
+    let auth_type = resolve_local_auth_type_for_transport_format(transport);
     if !matches!(auth_type.as_str(), "api_key" | "bearer") {
         return None;
     }
@@ -242,7 +242,7 @@ pub fn resolve_local_openai_bearer_auth(
 pub fn resolve_local_standard_auth(
     transport: &GatewayProviderTransportSnapshot,
 ) -> Option<(String, String)> {
-    let auth_type = transport.key.auth_type.trim().to_ascii_lowercase();
+    let auth_type = resolve_local_auth_type_for_transport_format(transport);
     let secret = resolved_local_secret(transport)?;
 
     match auth_type.as_str() {
@@ -255,7 +255,7 @@ pub fn resolve_local_standard_auth(
 pub fn resolve_local_gemini_auth(
     transport: &GatewayProviderTransportSnapshot,
 ) -> Option<(String, String)> {
-    let auth_type = transport.key.auth_type.trim().to_ascii_lowercase();
+    let auth_type = resolve_local_auth_type_for_transport_format(transport);
     let secret = resolved_local_secret(transport)?;
 
     match auth_type.as_str() {
@@ -263,6 +263,30 @@ pub fn resolve_local_gemini_auth(
         "bearer" => Some(("authorization".to_string(), format!("Bearer {secret}"))),
         _ => None,
     }
+}
+
+pub(crate) fn resolve_local_auth_type_for_transport_format(
+    transport: &GatewayProviderTransportSnapshot,
+) -> String {
+    let default_auth_type = transport.key.auth_type.trim().to_ascii_lowercase();
+    let api_format = aether_ai_formats::normalize_api_format_alias(&transport.endpoint.api_format);
+    let Some(overrides) = transport
+        .key
+        .auth_type_by_format
+        .as_ref()
+        .and_then(serde_json::Value::as_object)
+    else {
+        return default_auth_type;
+    };
+
+    overrides
+        .get(&api_format)
+        .or_else(|| overrides.get(transport.endpoint.api_format.trim()))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+        .filter(|value| matches!(value.as_str(), "api_key" | "bearer"))
+        .unwrap_or(default_auth_type)
 }
 
 fn resolved_local_secret(transport: &GatewayProviderTransportSnapshot) -> Option<&str> {
@@ -322,6 +346,8 @@ mod tests {
                 auth_type: "bearer".to_string(),
                 is_active: true,
                 api_formats: None,
+                auth_type_by_format: None,
+
                 allowed_models: None,
                 capabilities: None,
                 rate_multipliers: None,
@@ -444,6 +470,15 @@ mod tests {
     }
 
     #[test]
+    fn local_standard_auth_rejects_empty_secret() {
+        let mut transport = sample_transport();
+        transport.key.auth_type = "api_key".to_string();
+        transport.key.decrypted_api_key = String::new();
+
+        assert!(resolve_local_standard_auth(&transport).is_none());
+    }
+
+    #[test]
     fn local_openai_bearer_auth_maps_api_key_to_bearer_authorization() {
         let mut transport = sample_transport();
         transport.key.auth_type = "api_key".to_string();
@@ -464,6 +499,37 @@ mod tests {
         assert_eq!(
             resolve_local_openai_bearer_auth(&transport),
             Some(("authorization".to_string(), "Bearer sk-openai".to_string(),))
+        );
+    }
+
+    #[test]
+    fn local_standard_auth_uses_format_auth_type_override() {
+        let mut transport = sample_transport();
+        transport.key.auth_type = "api_key".to_string();
+        transport.key.auth_type_by_format = Some(serde_json::json!({
+            "claude:messages": "bearer"
+        }));
+        transport.key.decrypted_api_key = "sk-claude".to_string();
+
+        assert_eq!(
+            resolve_local_standard_auth(&transport),
+            Some(("authorization".to_string(), "Bearer sk-claude".to_string(),))
+        );
+    }
+
+    #[test]
+    fn local_gemini_auth_falls_back_to_default_when_other_format_is_overridden() {
+        let mut transport = sample_transport();
+        transport.endpoint.api_format = "gemini:generate_content".to_string();
+        transport.key.auth_type = "api_key".to_string();
+        transport.key.auth_type_by_format = Some(serde_json::json!({
+            "claude:messages": "bearer"
+        }));
+        transport.key.decrypted_api_key = "sk-gemini".to_string();
+
+        assert_eq!(
+            super::resolve_local_gemini_auth(&transport),
+            Some(("x-goog-api-key".to_string(), "sk-gemini".to_string(),))
         );
     }
 }

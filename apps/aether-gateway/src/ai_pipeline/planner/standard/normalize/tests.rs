@@ -59,6 +59,8 @@ fn sample_transport(base_url: &str, api_format: &str) -> GatewayProviderTranspor
             auth_type: "oauth".to_string(),
             is_active: true,
             api_formats: Some(vec![api_format.to_string()]),
+            auth_type_by_format: None,
+
             allowed_models: None,
             capabilities: None,
             rate_multipliers: None,

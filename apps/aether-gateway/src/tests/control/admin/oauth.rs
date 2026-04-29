@@ -421,9 +421,14 @@ async fn gateway_handles_admin_provider_oauth_device_poll_locally_with_trusted_a
         persisted.proxy,
         Some(json!({"node_id": "proxy-node-kiro", "enabled": true}))
     );
-    let decrypted_api_key =
-        decrypt_python_fernet_ciphertext(DEVELOPMENT_ENCRYPTION_KEY, &persisted.encrypted_api_key)
-            .expect("api key should decrypt");
+    let decrypted_api_key = decrypt_python_fernet_ciphertext(
+        DEVELOPMENT_ENCRYPTION_KEY,
+        persisted
+            .encrypted_api_key
+            .as_deref()
+            .expect("api key should be present"),
+    )
+    .expect("api key should decrypt");
     assert_eq!(decrypted_api_key, expected_access_token);
     let decrypted_auth_config = decrypt_python_fernet_ciphertext(
         DEVELOPMENT_ENCRYPTION_KEY,
@@ -729,9 +734,14 @@ async fn gateway_revalidates_kiro_device_poll_via_idc_refresh_and_backfills_emai
         persisted.proxy,
         Some(json!({"node_id": "proxy-node-kiro", "enabled": true}))
     );
-    let decrypted_api_key =
-        decrypt_python_fernet_ciphertext(DEVELOPMENT_ENCRYPTION_KEY, &persisted.encrypted_api_key)
-            .expect("api key should decrypt");
+    let decrypted_api_key = decrypt_python_fernet_ciphertext(
+        DEVELOPMENT_ENCRYPTION_KEY,
+        persisted
+            .encrypted_api_key
+            .as_deref()
+            .expect("api key should be present"),
+    )
+    .expect("api key should decrypt");
     assert_eq!(decrypted_api_key, expected_refreshed_access_token);
     let decrypted_auth_config = decrypt_python_fernet_ciphertext(
         DEVELOPMENT_ENCRYPTION_KEY,
@@ -1473,9 +1483,14 @@ async fn gateway_batch_imports_admin_provider_oauth_locally_with_trusted_admin_p
         persisted.proxy,
         Some(json!({"node_id": "proxy-node-batch-import", "enabled": true}))
     );
-    let decrypted_api_key =
-        decrypt_python_fernet_ciphertext(DEVELOPMENT_ENCRYPTION_KEY, &persisted.encrypted_api_key)
-            .expect("api key should decrypt");
+    let decrypted_api_key = decrypt_python_fernet_ciphertext(
+        DEVELOPMENT_ENCRYPTION_KEY,
+        persisted
+            .encrypted_api_key
+            .as_deref()
+            .expect("api key should be present"),
+    )
+    .expect("api key should decrypt");
     assert_eq!(decrypted_api_key, "batch-imported-codex-access-token");
 
     gateway_handle.abort();
@@ -1919,9 +1934,14 @@ async fn gateway_completes_admin_provider_oauth_key_locally_with_trusted_admin_p
         .await
         .expect("keys should load");
     let persisted = reloaded.first().expect("persisted key should exist");
-    let decrypted_api_key =
-        decrypt_python_fernet_ciphertext(DEVELOPMENT_ENCRYPTION_KEY, &persisted.encrypted_api_key)
-            .expect("api key should decrypt");
+    let decrypted_api_key = decrypt_python_fernet_ciphertext(
+        DEVELOPMENT_ENCRYPTION_KEY,
+        persisted
+            .encrypted_api_key
+            .as_deref()
+            .expect("api key should be present"),
+    )
+    .expect("api key should decrypt");
     assert_eq!(decrypted_api_key, "new-codex-access-token");
     let decrypted_auth_config = decrypt_python_fernet_ciphertext(
         DEVELOPMENT_ENCRYPTION_KEY,
@@ -2104,9 +2124,14 @@ async fn gateway_completes_admin_provider_oauth_provider_locally_with_trusted_ad
         persisted.proxy,
         Some(json!({"node_id": "proxy-node-codex-oauth", "enabled": true}))
     );
-    let decrypted_api_key =
-        decrypt_python_fernet_ciphertext(DEVELOPMENT_ENCRYPTION_KEY, &persisted.encrypted_api_key)
-            .expect("api key should decrypt");
+    let decrypted_api_key = decrypt_python_fernet_ciphertext(
+        DEVELOPMENT_ENCRYPTION_KEY,
+        persisted
+            .encrypted_api_key
+            .as_deref()
+            .expect("api key should be present"),
+    )
+    .expect("api key should decrypt");
     assert_eq!(decrypted_api_key, "provider-codex-access-token");
     let decrypted_auth_config = decrypt_python_fernet_ciphertext(
         DEVELOPMENT_ENCRYPTION_KEY,
@@ -2275,9 +2300,14 @@ async fn gateway_imports_admin_provider_oauth_refresh_token_locally_with_trusted
         persisted.proxy,
         Some(json!({"node_id": "proxy-node-codex-import", "enabled": true}))
     );
-    let decrypted_api_key =
-        decrypt_python_fernet_ciphertext(DEVELOPMENT_ENCRYPTION_KEY, &persisted.encrypted_api_key)
-            .expect("api key should decrypt");
+    let decrypted_api_key = decrypt_python_fernet_ciphertext(
+        DEVELOPMENT_ENCRYPTION_KEY,
+        persisted
+            .encrypted_api_key
+            .as_deref()
+            .expect("api key should be present"),
+    )
+    .expect("api key should decrypt");
     assert_eq!(decrypted_api_key, "imported-codex-access-token");
     let decrypted_auth_config = decrypt_python_fernet_ciphertext(
         DEVELOPMENT_ENCRYPTION_KEY,
@@ -2452,9 +2482,14 @@ async fn gateway_imports_admin_provider_oauth_refresh_token_over_active_expired_
     );
     assert_eq!(persisted.oauth_invalid_at_unix_secs, None);
     assert_eq!(persisted.oauth_invalid_reason, None);
-    let decrypted_api_key =
-        decrypt_python_fernet_ciphertext(DEVELOPMENT_ENCRYPTION_KEY, &persisted.encrypted_api_key)
-            .expect("api key should decrypt");
+    let decrypted_api_key = decrypt_python_fernet_ciphertext(
+        DEVELOPMENT_ENCRYPTION_KEY,
+        persisted
+            .encrypted_api_key
+            .as_deref()
+            .expect("api key should be present"),
+    )
+    .expect("api key should decrypt");
     assert_eq!(decrypted_api_key, "imported-expired-codex-access-token");
     let decrypted_auth_config = decrypt_python_fernet_ciphertext(
         DEVELOPMENT_ENCRYPTION_KEY,
@@ -4105,7 +4140,10 @@ async fn gateway_refreshes_admin_provider_oauth_key_locally_with_trusted_admin_p
         .expect("refreshed key should exist");
     let decrypted_api_key = decrypt_python_fernet_ciphertext(
         DEVELOPMENT_ENCRYPTION_KEY,
-        stored_key.encrypted_api_key.as_str(),
+        stored_key
+            .encrypted_api_key
+            .as_deref()
+            .expect("api key should be present"),
     )
     .expect("refreshed api key should decrypt");
     assert_eq!(decrypted_api_key, "refreshed-codex-access-token");

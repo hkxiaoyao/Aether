@@ -61,6 +61,7 @@ pub struct GatewayProviderTransportKey {
     pub auth_type: String,
     pub is_active: bool,
     pub api_formats: Option<Vec<String>>,
+    pub auth_type_by_format: Option<serde_json::Value>,
     pub allowed_models: Option<Vec<String>>,
     pub capabilities: Option<serde_json::Value>,
     pub rate_multipliers: Option<serde_json::Value>,
@@ -386,6 +387,8 @@ mod tests {
                         "openai:chat".to_string(),
                         "openai:responses".to_string(),
                     ]),
+                    auth_type_by_format: None,
+
                     allowed_models: Some(vec!["gpt-4.1".to_string(), "gpt-4.1-mini".to_string(),]),
                     capabilities: Some(serde_json::json!({"cache_1h": true})),
                     rate_multipliers: Some(serde_json::json!({"openai:chat": 0.8})),
@@ -399,6 +402,31 @@ mod tests {
                     ),
                 },
             }
+        );
+    }
+
+    #[tokio::test]
+    async fn reads_snapshot_when_provider_key_api_key_is_null() {
+        let mut key = sample_key();
+        key.auth_type = "service_account".to_string();
+        key.encrypted_api_key = None;
+        let state = TestSnapshotSource::new(
+            vec![sample_provider()],
+            vec![sample_endpoint()],
+            vec![key],
+            Some(DEVELOPMENT_ENCRYPTION_KEY.to_string()),
+        );
+
+        let snapshot =
+            read_provider_transport_snapshot(&state, "provider-1", "endpoint-1", "key-1")
+                .await
+                .expect("snapshot should read")
+                .expect("snapshot should exist");
+
+        assert_eq!(snapshot.key.decrypted_api_key, "");
+        assert_eq!(
+            snapshot.key.decrypted_auth_config.as_deref(),
+            Some("{\"refresh_token\":\"rt-1\",\"project\":\"demo\"}")
         );
     }
 

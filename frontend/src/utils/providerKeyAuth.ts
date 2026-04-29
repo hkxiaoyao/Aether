@@ -38,12 +38,13 @@ export function getProviderCredentialKind(
 
 export function getProviderRuntimeAuthKind(
   input: ProviderKeyAuthCarrier,
-): 'api_key' | 'bearer' | 'service_account' | 'unknown' {
+): 'api_key' | 'bearer' | 'service_account' | 'mixed' | 'unknown' {
   const runtimeAuthKind = normalizeText(input.runtime_auth_kind)
   if (
     runtimeAuthKind === 'api_key'
     || runtimeAuthKind === 'bearer'
     || runtimeAuthKind === 'service_account'
+    || runtimeAuthKind === 'mixed'
   ) {
     return runtimeAuthKind
   }
@@ -90,11 +91,13 @@ export function canEditOAuthCredential(input: ProviderKeyAuthCarrier): boolean {
 export function getProviderAuthLabel(input: ProviderKeyAuthCarrier): string {
   if (isOAuthManagedCredential(input)) return 'OAuth'
   if (isServiceAccountCredential(input)) return '服务账号'
+  if (getProviderRuntimeAuthKind(input) === 'mixed') return '混合'
   return getProviderRuntimeAuthKind(input) === 'bearer' ? 'Bearer' : 'API Key'
 }
 
 export function getProviderMaskedSecretLabel(input: ProviderKeyAuthCarrier): string {
   if (isOAuthManagedCredential(input)) return '[OAuth Token]'
   if (isServiceAccountCredential(input)) return '[Service Account]'
+  if (getProviderRuntimeAuthKind(input) === 'mixed') return '[Key]'
   return getProviderRuntimeAuthKind(input) === 'bearer' ? '[Bearer Token]' : '[Key]'
 }

@@ -14,89 +14,38 @@ AS $$
   END
 $$;
 
-DO $$
-DECLARE
-  conflict_summary text;
-BEGIN
-  SELECT string_agg(
-    DISTINCT provider_id::text || ':' || canonical_api_format,
-    ', ' ORDER BY provider_id::text || ':' || canonical_api_format
-  )
-  INTO conflict_summary
-  FROM (
-    SELECT
-      left_endpoint.provider_id,
-      public.aether_canonical_api_format_alias(left_endpoint.api_format) AS canonical_api_format
-    FROM public.provider_endpoints AS left_endpoint
-    INNER JOIN public.provider_endpoints AS right_endpoint
-      ON right_endpoint.provider_id = left_endpoint.provider_id
-     AND right_endpoint.id > left_endpoint.id
-     AND public.aether_canonical_api_format_alias(right_endpoint.api_format)
-       = public.aether_canonical_api_format_alias(left_endpoint.api_format)
-    WHERE left_endpoint.api_format IN ('openai:responses', 'openai:cli', 'openai:responses:compact', 'openai:compact', 'claude:messages', 'claude:chat', 'claude:cli', 'gemini:generate_content', 'gemini:chat', 'gemini:cli')
-      AND right_endpoint.api_format IN ('openai:responses', 'openai:cli', 'openai:responses:compact', 'openai:compact', 'claude:messages', 'claude:chat', 'claude:cli', 'gemini:generate_content', 'gemini:chat', 'gemini:cli')
-      AND (
-        left_endpoint.base_url IS DISTINCT FROM right_endpoint.base_url
-        OR left_endpoint.custom_path IS DISTINCT FROM right_endpoint.custom_path
-        OR left_endpoint.max_retries IS DISTINCT FROM right_endpoint.max_retries
-        OR left_endpoint.header_rules::jsonb IS DISTINCT FROM right_endpoint.header_rules::jsonb
-        OR left_endpoint.body_rules::jsonb IS DISTINCT FROM right_endpoint.body_rules::jsonb
-        OR left_endpoint.config::jsonb IS DISTINCT FROM right_endpoint.config::jsonb
-        OR left_endpoint.proxy IS DISTINCT FROM right_endpoint.proxy
-        OR left_endpoint.format_acceptance_config::jsonb IS DISTINCT FROM right_endpoint.format_acceptance_config::jsonb
-      )
-  ) AS conflicts;
+ALTER TABLE IF EXISTS public.provider_endpoints
+  DROP CONSTRAINT IF EXISTS uq_provider_api_format;
 
-  IF conflict_summary IS NOT NULL THEN
-    RAISE EXCEPTION
-      'Cannot normalize OpenAI/Claude/Gemini provider_endpoints because transport fields differ for: %',
-      conflict_summary;
-  END IF;
-END $$;
+CREATE INDEX IF NOT EXISTS idx_provider_endpoints_provider_api_format
+  ON public.provider_endpoints USING btree (provider_id, api_format);
 
-WITH grouped AS (
+ALTER TABLE IF EXISTS public.provider_api_keys
+  ADD COLUMN IF NOT EXISTS auth_type_by_format json;
+
+ALTER TABLE IF EXISTS public.provider_api_keys
+  ALTER COLUMN api_key DROP NOT NULL;
+
+WITH normalized AS (
   SELECT
     id,
-    provider_id,
-    api_format,
-    public.aether_canonical_api_format_alias(api_format) AS canonical_api_format,
-    ROW_NUMBER() OVER (
-      PARTITION BY provider_id, public.aether_canonical_api_format_alias(api_format)
-      ORDER BY
-        CASE
-          WHEN api_format = public.aether_canonical_api_format_alias(api_format) THEN 0
-          ELSE 1
-        END,
-        created_at ASC,
-        id ASC
-    ) AS rank
+    public.aether_canonical_api_format_alias(api_format) AS canonical_api_format
   FROM public.provider_endpoints
   WHERE api_format IN ('openai:responses', 'openai:cli', 'openai:responses:compact', 'openai:compact', 'claude:messages', 'claude:chat', 'claude:cli', 'gemini:generate_content', 'gemini:chat', 'gemini:cli')
-),
-survivors AS (
-  SELECT *
-  FROM grouped
-  WHERE rank = 1
-),
-retired AS (
-  UPDATE public.provider_endpoints AS endpoint
-  SET
-    is_active = FALSE,
-    updated_at = NOW()
-  FROM grouped
-  WHERE endpoint.id = grouped.id
-    AND grouped.rank > 1
-  RETURNING endpoint.id
 )
 UPDATE public.provider_endpoints AS endpoint
 SET
-  api_format = survivors.canonical_api_format,
-  api_family = SPLIT_PART(survivors.canonical_api_format, ':', 1),
-  endpoint_kind = SUBSTRING(survivors.canonical_api_format FROM POSITION(':' IN survivors.canonical_api_format) + 1),
+  api_format = normalized.canonical_api_format,
+  api_family = SPLIT_PART(normalized.canonical_api_format, ':', 1),
+  endpoint_kind = SUBSTRING(normalized.canonical_api_format FROM POSITION(':' IN normalized.canonical_api_format) + 1),
   updated_at = NOW()
-FROM survivors
-WHERE endpoint.id = survivors.id
-  AND endpoint.api_format IS DISTINCT FROM survivors.canonical_api_format;
+FROM normalized
+WHERE endpoint.id = normalized.id
+  AND (
+    endpoint.api_format IS DISTINCT FROM normalized.canonical_api_format
+    OR endpoint.api_family IS DISTINCT FROM SPLIT_PART(normalized.canonical_api_format, ':', 1)
+    OR endpoint.endpoint_kind IS DISTINCT FROM SUBSTRING(normalized.canonical_api_format FROM POSITION(':' IN normalized.canonical_api_format) + 1)
+  );
 
 WITH expanded AS (
   SELECT

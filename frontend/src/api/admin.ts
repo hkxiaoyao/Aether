@@ -173,6 +173,7 @@ export interface ProviderKeyExport {
   rate_multipliers?: Record<string, number> | null
   internal_priority?: number
   global_priority_by_format?: Record<string, number> | null
+  auth_type_by_format?: Record<string, 'api_key' | 'bearer'> | null
   rpm_limit?: number | null
   allowed_models?: string[] | null
   capabilities?: Record<string, boolean>

@@ -1124,7 +1124,7 @@ impl AppState {
             return Ok(());
         };
 
-        latest_key.encrypted_api_key = encrypted_api_key;
+        latest_key.encrypted_api_key = Some(encrypted_api_key);
         latest_key.encrypted_auth_config = encrypted_auth_config;
         latest_key.is_active = true;
         latest_key.expires_at_unix_secs = entry.expires_at_unix_secs;

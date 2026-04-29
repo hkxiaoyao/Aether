@@ -736,6 +736,266 @@ SELECT EXISTS (
     }
 
     #[test]
+    fn provider_api_keys_api_key_is_nullable() {
+        let baseline_migration = MIGRATOR
+            .iter()
+            .find(|migration| migration.version == 20260403000000)
+            .expect("baseline migration should be embedded");
+        let normalization_migration = MIGRATOR
+            .iter()
+            .find(|migration| migration.version == 20260428000000)
+            .expect("api format normalization migration should be embedded");
+
+        assert!(baseline_migration.sql.contains("api_key text,"));
+        assert!(!baseline_migration.sql.contains("api_key text NOT NULL"));
+        assert!(BASELINE_V2_SQL.contains("api_key text,"));
+        assert!(!BASELINE_V2_SQL.contains("api_key text NOT NULL"));
+        assert!(normalization_migration
+            .sql
+            .contains("ALTER COLUMN api_key DROP NOT NULL"));
+    }
+
+    #[test]
+    fn normalized_endpoint_formats_do_not_require_unique_provider_format_pairs() {
+        let normalization_migration = MIGRATOR
+            .iter()
+            .find(|migration| migration.version == 20260428000000)
+            .expect("api format normalization migration should be embedded");
+
+        assert!(normalization_migration
+            .sql
+            .contains("DROP CONSTRAINT IF EXISTS uq_provider_api_format"));
+        assert!(normalization_migration
+            .sql
+            .contains("idx_provider_endpoints_provider_api_format"));
+        assert!(!BASELINE_V2_SQL.contains("uq_provider_api_format"));
+        assert!(BASELINE_V2_SQL.contains("idx_provider_endpoints_provider_api_format"));
+    }
+
+    #[tokio::test]
+    async fn api_format_normalization_migration_preserves_duplicate_endpoint_transports() {
+        let Some(server) = ManagedPostgresServer::try_start()
+            .await
+            .expect("postgres migration test should start or skip")
+        else {
+            return;
+        };
+        let pool = PgPool::connect(server.database_url())
+            .await
+            .expect("pool should connect");
+        let normalization_migration = MIGRATOR
+            .iter()
+            .find(|migration| migration.version == 20260428000000)
+            .expect("api format normalization migration should be embedded");
+
+        sqlx::raw_sql(
+            r#"
+CREATE TABLE public.provider_endpoints (
+  id text PRIMARY KEY,
+  provider_id text NOT NULL,
+  api_format text NOT NULL,
+  api_family text,
+  endpoint_kind text,
+  base_url text NOT NULL,
+  max_retries integer,
+  is_active boolean DEFAULT true NOT NULL,
+  custom_path text,
+  config json,
+  created_at timestamp with time zone DEFAULT now() NOT NULL,
+  updated_at timestamp with time zone DEFAULT now() NOT NULL,
+  proxy jsonb,
+  header_rules json,
+  format_acceptance_config json,
+  body_rules json
+);
+
+ALTER TABLE ONLY public.provider_endpoints
+  ADD CONSTRAINT uq_provider_api_format UNIQUE (provider_id, api_format);
+
+CREATE TABLE public.provider_api_keys (
+  id text PRIMARY KEY,
+  api_formats json,
+  updated_at timestamp with time zone DEFAULT now() NOT NULL,
+  rate_multipliers json,
+  global_priority_by_format json,
+  health_by_format jsonb,
+  circuit_breaker_by_format jsonb
+);
+
+CREATE TABLE public.api_keys (
+  id text PRIMARY KEY,
+  allowed_api_formats json,
+  updated_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+CREATE TABLE public.users (
+  id text PRIMARY KEY,
+  allowed_api_formats json,
+  updated_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+CREATE TABLE public.models (
+  id text PRIMARY KEY,
+  provider_model_mappings jsonb,
+  updated_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+INSERT INTO public.provider_endpoints (
+  id,
+  provider_id,
+  api_format,
+  api_family,
+  endpoint_kind,
+  base_url,
+  custom_path,
+  max_retries,
+  header_rules,
+  body_rules,
+  config,
+  proxy,
+  format_acceptance_config
+) VALUES
+  (
+    'endpoint-claude-chat',
+    'provider-conflict',
+    'claude:chat',
+    'claude',
+    'chat',
+    'https://claude-chat.example',
+    '/v1/messages',
+    2,
+    '{"x-channel":"chat"}'::json,
+    '{"mode":"chat"}'::json,
+    '{"transport":"chat"}'::json,
+    '{"url":"http://proxy-chat"}'::jsonb,
+    '{"accept":"chat"}'::json
+  ),
+  (
+    'endpoint-claude-cli',
+    'provider-conflict',
+    'claude:cli',
+    'claude',
+    'cli',
+    'https://claude-cli.example',
+    '/v1/messages',
+    3,
+    '{"x-channel":"cli"}'::json,
+    '{"mode":"cli"}'::json,
+    '{"transport":"cli"}'::json,
+    '{"url":"http://proxy-cli"}'::jsonb,
+    '{"accept":"cli"}'::json
+  );
+
+INSERT INTO public.provider_api_keys (
+  id,
+  api_formats,
+  rate_multipliers,
+  global_priority_by_format,
+  health_by_format,
+  circuit_breaker_by_format
+) VALUES (
+  'provider-key',
+  '["claude:chat","claude:cli","openai:cli","openai:responses"]'::json,
+  '{"claude:chat":1,"openai:compact":2}'::json,
+  '{"gemini:cli":3}'::json,
+  '{"openai:cli":{"health_score":0.9}}'::jsonb,
+  '{"openai:compact":{"open":false}}'::jsonb
+);
+
+INSERT INTO public.api_keys (id, allowed_api_formats)
+VALUES ('api-key', '["gemini:chat","gemini:cli"]'::json);
+
+INSERT INTO public.users (id, allowed_api_formats)
+VALUES ('user', '["openai:compact","openai:responses:compact"]'::json);
+
+INSERT INTO public.models (id, provider_model_mappings)
+VALUES (
+  'model',
+  '[{"api_formats":["claude:chat","claude:cli","gemini:chat"]}]'::jsonb
+);
+"#,
+        )
+        .execute(&pool)
+        .await
+        .expect("fixture schema should be created");
+
+        sqlx::raw_sql(&normalization_migration.sql)
+            .execute(&pool)
+            .await
+            .expect("api format normalization migration should preserve duplicate endpoints");
+
+        let endpoint_rows = sqlx::query_as::<_, (String, String, Option<String>, Option<String>)>(
+            r#"
+SELECT id, api_format, api_family, endpoint_kind
+FROM public.provider_endpoints
+WHERE provider_id = 'provider-conflict'
+ORDER BY id
+"#,
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("endpoint rows should be readable");
+        assert_eq!(
+            endpoint_rows,
+            vec![
+                (
+                    "endpoint-claude-chat".to_string(),
+                    "claude:messages".to_string(),
+                    Some("claude".to_string()),
+                    Some("messages".to_string())
+                ),
+                (
+                    "endpoint-claude-cli".to_string(),
+                    "claude:messages".to_string(),
+                    Some("claude".to_string()),
+                    Some("messages".to_string())
+                ),
+            ]
+        );
+
+        let base_urls = sqlx::query_as::<_, (String,)>(
+            r#"
+SELECT base_url
+FROM public.provider_endpoints
+WHERE provider_id = 'provider-conflict'
+ORDER BY id
+"#,
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("endpoint transport rows should be readable")
+        .into_iter()
+        .map(|(base_url,)| base_url)
+        .collect::<Vec<_>>();
+        assert_eq!(
+            base_urls,
+            vec![
+                "https://claude-chat.example".to_string(),
+                "https://claude-cli.example".to_string()
+            ]
+        );
+
+        let provider_key_formats: serde_json::Value = query_scalar(
+            "SELECT api_formats::jsonb FROM public.provider_api_keys WHERE id = 'provider-key'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("provider key formats should be readable");
+        assert_eq!(
+            provider_key_formats,
+            serde_json::json!(["claude:messages", "openai:responses"])
+        );
+
+        let provider_format_constraint_count: i64 = query_scalar(
+            "SELECT COUNT(*)::BIGINT FROM pg_constraint WHERE conname = 'uq_provider_api_format'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("constraint count should be readable");
+        assert_eq!(provider_format_constraint_count, 0);
+    }
+
+    #[test]
     fn deprecation_migration_and_baseline_mark_legacy_usage_columns() {
         let settlement_migration = MIGRATOR
             .iter()

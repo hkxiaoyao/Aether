@@ -106,19 +106,29 @@ pub(crate) fn masked_catalog_api_key(state: &AppState, key: &StoredProviderCatal
     match key.auth_type.trim() {
         "service_account" | "vertex_ai" => "[Service Account]".to_string(),
         "oauth" => "[OAuth Token]".to_string(),
-        _ => decrypt_catalog_secret_with_fallbacks(state.encryption_key(), &key.encrypted_api_key)
-            .map(|value| {
-                if value.len() <= 12 {
-                    format!("{value}***")
-                } else {
-                    format!(
-                        "{}***{}",
-                        &value[..8],
-                        &value[value.len().saturating_sub(4)..]
-                    )
-                }
-            })
-            .unwrap_or_else(|| "***ERROR***".to_string()),
+        _ => {
+            let Some(ciphertext) = key
+                .encrypted_api_key
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            else {
+                return "[未设置]".to_string();
+            };
+            decrypt_catalog_secret_with_fallbacks(state.encryption_key(), ciphertext)
+                .map(|value| {
+                    if value.len() <= 12 {
+                        format!("{value}***")
+                    } else {
+                        format!(
+                            "{}***{}",
+                            &value[..8],
+                            &value[value.len().saturating_sub(4)..]
+                        )
+                    }
+                })
+                .unwrap_or_else(|| "***ERROR***".to_string())
+        }
     }
 }
 
@@ -1267,6 +1277,10 @@ pub(crate) fn build_admin_provider_key_response(
     );
     payload.insert("api_key_plain".to_string(), serde_json::Value::Null);
     payload.insert("auth_type".to_string(), json!(key.auth_type));
+    payload.insert(
+        "auth_type_by_format".to_string(),
+        json!(key.auth_type_by_format),
+    );
     payload.insert(
         "credential_kind".to_string(),
         json!(auth_semantics.credential_kind().as_str()),

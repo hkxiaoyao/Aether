@@ -2848,7 +2848,9 @@ fn retired_api_format_occurrences_are_whitelisted() {
         "crates/aether-ai-formats/src/matrix.rs",
         "crates/aether-ai-formats/src/registry.rs",
         "crates/aether-ai-pipeline/src/conversion/registry.rs",
+        "crates/aether-data/src/migrate.rs",
         "crates/aether-usage-runtime/src/report.rs",
+        "frontend/src/api/endpoints/types/__tests__/api-format.spec.ts",
     ];
     let allowed = allowed_paths
         .into_iter()

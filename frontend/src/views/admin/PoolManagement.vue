@@ -1892,6 +1892,7 @@ watch(searchQuery, () => {
 function normalizeAuthTypeForEdit(key: PoolKeyDetail): EndpointAPIKey['auth_type'] {
   if (isOAuthManagedCredential(key)) return 'oauth'
   if (isServiceAccountCredential(key)) return 'service_account'
+  if ((key.auth_type || '').trim().toLowerCase() === 'bearer') return 'bearer'
   return 'api_key'
 }
 
@@ -1903,6 +1904,7 @@ function toEndpointApiKey(key: PoolKeyDetail): EndpointAPIKey {
     api_formats: key.api_formats || [],
     api_key_masked: getProviderMaskedSecretLabel(key),
     auth_type: normalizeAuthTypeForEdit(key),
+    auth_type_by_format: key.auth_type_by_format ?? null,
     credential_kind: key.credential_kind ?? null,
     runtime_auth_kind: key.runtime_auth_kind ?? null,
     oauth_managed: key.oauth_managed ?? undefined,

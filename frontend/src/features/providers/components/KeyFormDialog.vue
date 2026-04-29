@@ -32,83 +32,43 @@
             data-1p-ignore="true"
           />
         </div>
-        <div v-if="showAuthTypeSelector">
-          <Label :for="authTypeSelectId">认证类型</Label>
-          <Select
-            v-model="form.auth_type"
-          >
-            <SelectTrigger :id="authTypeSelectId">
-              <SelectValue placeholder="选择认证类型" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="api_key">
-                API Key
-              </SelectItem>
-              <SelectItem value="service_account">
-                Service Account
-              </SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
-        <div v-else>
+        <div>
           <Label :for="apiKeyInputId">
-            {{ form.auth_type === 'service_account' ? 'Service Account JSON' : 'API 密钥' }}
-            {{ editingKey ? '' : '*' }}
+            {{ authSecretLabel }}
+            {{ authSecretRequiredMark }}
           </Label>
-          <Input
-            :id="apiKeyInputId"
-            v-model="form.api_key"
-            :name="apiKeyFieldName"
-            masked
-            :required="!editingKey"
-            :placeholder="editingKey ? editingKey.api_key_masked : 'sk-...'"
-          />
+          <template v-if="form.auth_type === 'service_account'">
+            <JsonImportInput
+              v-model="form.auth_config_text"
+              :disabled="saving"
+              :reset-key="formNonce"
+              accept=".json,.txt,application/json,text/plain"
+              :multiple="false"
+              drop-title="拖入 Service Account JSON 或点击选择"
+              drop-hint="支持 .json / .txt，单文件导入"
+              :manual-placeholder="editingKey ? '留空表示不修改，或粘贴完整的 Service Account JSON' : '粘贴完整的 Service Account JSON'"
+              :manual-description="serviceAccountDescription"
+              textarea-class="min-h-[160px] font-mono text-xs break-all !rounded-xl"
+              @error="handleServiceAccountImportError"
+            />
+          </template>
+          <template v-else>
+            <Input
+              :id="apiKeyInputId"
+              v-model="form.api_key"
+              :name="apiKeyFieldName"
+              masked
+              :required="false"
+              :placeholder="editingKey ? editingKey.api_key_masked : authSecretPlaceholder"
+            />
+          </template>
           <p
-            v-if="editingKey && form.auth_type === 'api_key'"
+            v-if="editingKey && isRawSecretAuthType(form.auth_type)"
             class="text-xs text-muted-foreground mt-1"
           >
             留空表示不修改
           </p>
         </div>
-      </div>
-
-      <!-- API 密钥 / Service Account JSON -->
-      <div v-if="showAuthTypeSelector || form.auth_type === 'service_account'">
-        <Label :for="apiKeyInputId">
-          {{ form.auth_type === 'service_account' ? 'Service Account JSON' : 'API 密钥' }}
-          {{ editingKey ? '' : '*' }}
-        </Label>
-        <template v-if="form.auth_type === 'service_account'">
-          <JsonImportInput
-            v-model="form.auth_config_text"
-            :disabled="saving"
-            :reset-key="formNonce"
-            accept=".json,.txt,application/json,text/plain"
-            :multiple="false"
-            drop-title="拖入 Service Account JSON 或点击选择"
-            drop-hint="支持 .json / .txt，单文件导入"
-            :manual-placeholder="editingKey ? '留空表示不修改，或粘贴完整的 Service Account JSON' : '粘贴完整的 Service Account JSON'"
-            :manual-description="serviceAccountDescription"
-            textarea-class="min-h-[160px] font-mono text-xs break-all !rounded-xl"
-            @error="handleServiceAccountImportError"
-          />
-        </template>
-        <template v-else>
-          <Input
-            :id="apiKeyInputId"
-            v-model="form.api_key"
-            :name="apiKeyFieldName"
-            masked
-            :required="!editingKey"
-            :placeholder="editingKey ? editingKey.api_key_masked : 'sk-...'"
-          />
-        </template>
-        <p
-          v-if="editingKey && form.auth_type === 'api_key'"
-          class="text-xs text-muted-foreground mt-1"
-        >
-          留空表示不修改
-        </p>
       </div>
 
       <!-- 备注 -->
@@ -121,9 +81,36 @@
         />
       </div>
 
-      <!-- API 格式选择 -->
+      <!-- API 格式 & 认证方式 -->
       <div v-if="visibleApiFormats.length > 0">
         <Label class="mb-1.5 block">支持的 API 格式 *</Label>
+        <!-- 默认认证方式（单个格式可在下方覆盖） -->
+        <div
+          v-if="showAuthTypeSelector"
+          class="flex gap-2 mb-2"
+        >
+          <button
+            v-for="option in authTypeOptions"
+            :key="option.value"
+            type="button"
+            class="flex items-center gap-1.5 px-3 py-1.5 rounded-md border text-sm transition-colors"
+            :class="form.auth_type === option.value
+              ? 'bg-primary/10 border-primary/50 text-primary'
+              : 'bg-muted/30 border-border text-muted-foreground hover:border-muted-foreground/40'"
+            @click="form.auth_type = option.value"
+          >
+            <span
+              class="w-3.5 h-3.5 rounded-full border-2 flex items-center justify-center shrink-0"
+              :class="form.auth_type === option.value ? 'border-primary' : 'border-muted-foreground/40'"
+            >
+              <span
+                v-if="form.auth_type === option.value"
+                class="w-1.5 h-1.5 rounded-full bg-primary"
+              />
+            </span>
+            {{ option.label }}
+          </button>
+        </div>
         <div class="grid grid-cols-2 gap-2">
           <div
             v-for="format in visibleApiFormats"
@@ -143,10 +130,29 @@
               >
                 <span v-if="form.api_formats.includes(format)">✓</span>
               </span>
-              <span
-                class="text-sm whitespace-nowrap"
-                :class="form.api_formats.includes(format) ? 'text-primary' : 'text-muted-foreground'"
-              >{{ formatApiFormat(format) }}</span>
+              <div class="min-w-0">
+                <span
+                  class="block text-sm truncate"
+                  :class="form.api_formats.includes(format) ? 'text-primary' : 'text-muted-foreground'"
+                >{{ formatApiFormat(format) }}</span>
+                <button
+                  type="button"
+                  class="mt-0.5 inline-flex max-w-full items-center rounded border px-1.5 py-0.5 text-[10px] leading-none transition-colors"
+                  :class="[
+                    form.api_formats.includes(format)
+                      ? 'border-primary/20 bg-primary/10 text-primary'
+                      : 'border-border bg-background/60 text-muted-foreground',
+                    canOverrideFormatAuth(format)
+                      ? 'cursor-pointer hover:border-primary/40 hover:bg-primary/15'
+                      : 'cursor-default'
+                  ]"
+                  :aria-disabled="!canOverrideFormatAuth(format)"
+                  :title="formatAuthMethodTitle(format)"
+                  @click="handleFormatAuthBadgeClick(format, $event)"
+                >
+                  {{ formatAuthMethodLabel(format) }}
+                </button>
+              </div>
             </div>
             <div
               class="flex items-center shrink-0 ml-2 text-xs text-muted-foreground gap-1"
@@ -331,7 +337,7 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, watch } from 'vue'
-import { Dialog, Button, Input, Label, Switch, Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui'
+import { Dialog, Button, Input, Label, Switch } from '@/components/ui'
 import { Key, SquarePen } from 'lucide-vue-next'
 import { useToast } from '@/composables/useToast'
 import { useFormDialog } from '@/composables/useFormDialog'
@@ -352,6 +358,14 @@ import {
 } from '@/api/endpoints'
 import { formatApiFormat, normalizeApiFormatAlias } from '@/api/endpoints/types/api-format'
 
+type RawSecretAuthType = 'api_key' | 'bearer'
+type ProviderKeyFormAuthType = RawSecretAuthType | 'service_account'
+
+interface AuthTypeOption {
+  value: ProviderKeyFormAuthType
+  label: string
+}
+
 const props = defineProps<{
   open: boolean
   endpoint: ProviderEndpoint | null
@@ -368,11 +382,46 @@ const emit = defineEmits<{
 
 const { success, error: showError } = useToast()
 
-function getVertexAllowedFormatsByAuth(authType: 'api_key' | 'service_account'): Set<string> {
+function isRawSecretAuthType(authType: string | null | undefined): authType is RawSecretAuthType {
+  return authType === 'api_key' || authType === 'bearer'
+}
+
+function normalizeRawSecretAuthType(authType: string | null | undefined): RawSecretAuthType | null {
+  const normalized = (authType || '').trim().toLowerCase()
+  if (normalized === 'api_key' || normalized === 'apikey' || normalized === 'api-key') return 'api_key'
+  if (normalized === 'bearer' || normalized === 'bearer_token' || normalized === 'bearer-token' || normalized === 'authorization') return 'bearer'
+  return null
+}
+
+function normalizeFormAuthType(authType: string | null | undefined): ProviderKeyFormAuthType {
+  const normalized = (authType || '').trim().toLowerCase()
+  if (normalized === 'bearer') return 'bearer'
+  if (normalized === 'service_account' || normalized === 'vertex_ai') return 'service_account'
+  return 'api_key'
+}
+
+function getAuthTypeOptions(providerType: ProviderType | null): AuthTypeOption[] {
+  if ((providerType || '').toLowerCase() === 'vertex_ai') {
+    return [
+      { value: 'api_key', label: 'API Key' },
+      { value: 'service_account', label: 'Service Account' },
+    ]
+  }
+
+  return [
+    { value: 'api_key', label: 'API Key' },
+    { value: 'bearer', label: 'Bearer Token' },
+  ]
+}
+
+function getVertexAllowedFormatsByAuth(authType: ProviderKeyFormAuthType): Set<string> {
   if (authType === 'api_key') {
     return new Set(['gemini:generate_content'])
   }
-  return new Set(['gemini:generate_content', 'claude:messages'])
+  if (authType === 'service_account') {
+    return new Set(['gemini:generate_content', 'claude:messages'])
+  }
+  return new Set()
 }
 
 function normalizeApiFormat(format: string): string {
@@ -411,6 +460,27 @@ function sanitizeApiFormats(formats: string[], authType = form.value.auth_type):
   return formats.filter(format => selectable.has(normalizeApiFormat(format)))
 }
 
+function sanitizeAuthTypeByFormat(
+  authTypeByFormat: Record<string, string> | null | undefined,
+  formats = form.value.api_formats,
+  authType = form.value.auth_type
+): Record<string, RawSecretAuthType> {
+  if (!isRawSecretAuthType(authType) || !authTypeByFormat) {
+    return {}
+  }
+
+  const selected = new Set(formats.map(normalizeApiFormat))
+  const sanitized: Record<string, RawSecretAuthType> = {}
+  for (const [format, rawAuthType] of Object.entries(authTypeByFormat)) {
+    const normalizedFormat = normalizeApiFormat(format)
+    if (!selected.has(normalizedFormat)) continue
+    const normalizedAuthType = normalizeRawSecretAuthType(rawAuthType)
+    if (!normalizedAuthType || normalizedAuthType === authType) continue
+    sanitized[normalizedFormat] = normalizedAuthType
+  }
+  return sanitized
+}
+
 function getDefaultApiFormats(): string[] {
   const endpointFormat = props.endpoint?.api_format
   if (endpointFormat) {
@@ -427,7 +497,88 @@ function getDefaultApiFormats(): string[] {
 // 按 provider/auth_type 过滤后的可用 API 格式列表
 const visibleApiFormats = computed(() => getSelectableApiFormats())
 
-const showAuthTypeSelector = computed(() => props.providerType === 'vertex_ai')
+const authTypeOptions = computed(() => getAuthTypeOptions(props.providerType))
+
+const showAuthTypeSelector = computed(() => authTypeOptions.value.length > 1)
+
+const authSecretLabel = computed(() => {
+  if (form.value.auth_type === 'service_account') return 'Service Account JSON'
+  if (form.value.auth_type === 'bearer') return 'Bearer Token'
+  return 'API 密钥'
+})
+
+const authSecretPlaceholder = computed(() =>
+  form.value.auth_type === 'bearer' ? 'token-...' : 'sk-...'
+)
+
+const authSecretRequiredMark = computed(() => {
+  if (form.value.auth_type === 'service_account' && (!props.editingKey || switchingToServiceAccount.value)) {
+    return '*'
+  }
+  return ''
+})
+
+function formatAuthMethodLabel(format: string): string {
+  const authType = getFormatAuthType(format)
+  if (authType === 'service_account') return 'Service Account'
+  if (authType === 'bearer') return 'Authorization'
+
+  const { family } = normalizeApiFormat(format).includes(':')
+    ? { family: normalizeApiFormat(format).split(':', 1)[0] }
+    : { family: normalizeApiFormat(format) }
+  if (family === 'claude') return 'x-api-key'
+  if (family === 'gemini') return 'x-goog-api-key'
+  if (family === 'openai') return 'Authorization'
+  return 'API Key'
+}
+
+function formatAuthMethodTitle(format: string): string {
+  const label = formatAuthMethodLabel(format)
+  if (!canOverrideFormatAuth(format)) {
+    return label
+  }
+  const nextAuthType = getFormatAuthType(format) === 'bearer' ? 'API Key' : 'Bearer Token'
+  return `${label}，点击切换为 ${nextAuthType}`
+}
+
+function getFormatAuthType(format: string): ProviderKeyFormAuthType {
+  if (!isRawSecretAuthType(form.value.auth_type)) {
+    return form.value.auth_type
+  }
+  return form.value.auth_type_by_format[normalizeApiFormat(format)] || form.value.auth_type
+}
+
+function canOverrideFormatAuth(format: string): boolean {
+  return isRawSecretAuthType(form.value.auth_type) && form.value.api_formats.includes(format)
+}
+
+function setFormatAuthType(format: string, authType: RawSecretAuthType) {
+  if (!isRawSecretAuthType(form.value.auth_type)) return
+  const normalizedFormat = normalizeApiFormat(format)
+  const next = { ...form.value.auth_type_by_format }
+  if (authType === form.value.auth_type) {
+    delete next[normalizedFormat]
+  } else {
+    next[normalizedFormat] = authType
+  }
+  form.value.auth_type_by_format = sanitizeAuthTypeByFormat(next)
+}
+
+function toggleFormatAuthType(format: string) {
+  if (!canOverrideFormatAuth(format)) return
+  setFormatAuthType(format, getFormatAuthType(format) === 'bearer' ? 'api_key' : 'bearer')
+}
+
+function handleFormatAuthBadgeClick(format: string, event: MouseEvent) {
+  if (!canOverrideFormatAuth(format)) return
+  event.stopPropagation()
+  toggleFormatAuthType(format)
+}
+
+function buildAuthTypeByFormatPayload(): Record<string, RawSecretAuthType> | null {
+  const sanitized = sanitizeAuthTypeByFormat(form.value.auth_type_by_format)
+  return Object.keys(sanitized).length > 0 ? sanitized : null
+}
 
 const serviceAccountDescription = computed(() => (
   props.editingKey
@@ -436,7 +587,9 @@ const serviceAccountDescription = computed(() => (
 ))
 
 // 默认认证类型
-const defaultAuthType = 'api_key' as const
+function getDefaultAuthType(): ProviderKeyFormAuthType {
+  return authTypeOptions.value[0]?.value || 'api_key'
+}
 
 // 显示自动获取模型警告：编辑模式下，原本未启用但现在启用，且已有 allowed_models
 const showAutoFetchWarning = computed(() => {
@@ -463,15 +616,10 @@ const autoFetchWarningMessage = computed(() => {
 })
 
 // 检查是否正在切换认证类型
-const switchingToVertexAI = computed(() =>
+const switchingToServiceAccount = computed(() =>
   !!props.editingKey &&
   props.editingKey.auth_type !== 'service_account' &&
   form.value.auth_type === 'service_account'
-)
-const switchingToApiKey = computed(() =>
-  !!props.editingKey &&
-  props.editingKey.auth_type !== 'api_key' &&
-  form.value.auth_type === 'api_key'
 )
 
 // 表单是否可以保存
@@ -480,12 +628,10 @@ const canSave = computed(() => {
   if (!form.value.name.trim()) return false
   // 新增模式下根据认证类型判断必填字段
   if (!props.editingKey) {
-    if (form.value.auth_type === 'api_key' && !form.value.api_key.trim()) return false
     if (form.value.auth_type === 'service_account' && !form.value.auth_config_text.trim()) return false
   } else {
     // 编辑模式下切换认证类型时，必须填写对应字段
-    if (switchingToApiKey.value && !form.value.api_key.trim()) return false
-    if (switchingToVertexAI.value && !form.value.auth_config_text.trim()) return false
+    if (switchingToServiceAccount.value && !form.value.auth_config_text.trim()) return false
   }
   // 必须至少选择一个 API 格式
   if (form.value.api_formats.length === 0) return false
@@ -497,7 +643,6 @@ const saving = ref(false)
 const formNonce = ref(createFieldNonce())
 const keyNameInputId = computed(() => `key-name-${formNonce.value}`)
 const apiKeyInputId = computed(() => `api-key-${formNonce.value}`)
-const authTypeSelectId = computed(() => `auth-type-${formNonce.value}`)
 const keyNameFieldName = computed(() => `key-name-field-${formNonce.value}`)
 const apiKeyFieldName = computed(() => `api-key-field-${formNonce.value}`)
 
@@ -510,7 +655,8 @@ const defaultAutoFetchModels = computed(() => false)
 const form = ref({
   name: '',
   api_key: '',  // 标准 API Key
-  auth_type: 'api_key' as 'api_key' | 'service_account',  // 认证类型
+  auth_type: 'api_key' as ProviderKeyFormAuthType,  // 认证类型
+  auth_type_by_format: {} as Record<string, RawSecretAuthType>,
   auth_config_text: '',  // Service Account JSON 文本（用于表单输入）
   api_formats: [] as string[],  // 支持的 API 格式列表
   rate_multipliers: {} as Record<string, number>,  // 按 API 格式的成本倍率
@@ -529,10 +675,17 @@ const form = ref({
 watch(
   [() => form.value.auth_type, () => props.providerType, () => props.availableApiFormats],
   () => {
+    const allowedAuthTypes = new Set(authTypeOptions.value.map(option => option.value))
+    if (!allowedAuthTypes.has(form.value.auth_type)) {
+      form.value.auth_type = getDefaultAuthType()
+      return
+    }
+
     const filtered = sanitizeApiFormats(form.value.api_formats)
     if (filtered.length !== form.value.api_formats.length) {
       form.value.api_formats = [...filtered]
     }
+    form.value.auth_type_by_format = sanitizeAuthTypeByFormat(form.value.auth_type_by_format)
   },
   { immediate: true }
 )
@@ -547,6 +700,7 @@ watch(
     const filtered = sanitizeApiFormats(form.value.api_formats)
     if (filtered.length !== form.value.api_formats.length) {
       form.value.api_formats = [...filtered]
+      form.value.auth_type_by_format = sanitizeAuthTypeByFormat(form.value.auth_type_by_format, filtered)
       return
     }
 
@@ -612,7 +766,8 @@ function resetForm() {
   form.value = {
     name: '',
     api_key: '',
-    auth_type: defaultAuthType,
+    auth_type: getDefaultAuthType(),
+    auth_type_by_format: {},
     auth_config_text: '',
     api_formats: getDefaultApiFormats(),
     rate_multipliers: {},
@@ -635,6 +790,7 @@ function clearForNextAdd() {
   form.value.name = ''
   form.value.api_key = ''
   form.value.auth_config_text = ''
+  form.value.auth_type_by_format = sanitizeAuthTypeByFormat(form.value.auth_type_by_format)
 }
 
 // 加载密钥数据（编辑模式）
@@ -644,12 +800,17 @@ function loadKeyData() {
   form.value = {
     name: props.editingKey.name,
     api_key: '',
-    auth_type: props.editingKey.auth_type === 'service_account' ? 'service_account' : 'api_key',
+    auth_type: normalizeFormAuthType(props.editingKey.auth_type),
+    auth_type_by_format: sanitizeAuthTypeByFormat(
+      props.editingKey.auth_type_by_format || {},
+      props.editingKey.api_formats || [],
+      normalizeFormAuthType(props.editingKey.auth_type)
+    ),
     auth_config_text: '',  // auth_config 不返回给前端，编辑时需要重新输入
     api_formats: props.editingKey.api_formats?.length > 0
       ? sanitizeApiFormats(
         props.editingKey.api_formats,
-        props.editingKey.auth_type === 'service_account' ? 'service_account' : 'api_key'
+        normalizeFormAuthType(props.editingKey.auth_type)
       )
       : [],  // 编辑模式下保持原有选择，不默认全选
     rate_multipliers: { ...(props.editingKey.rate_multipliers || {}) },
@@ -716,13 +877,7 @@ async function handleSave() {
   }
 
   // 验证认证信息
-  if (form.value.auth_type === 'api_key') {
-    // API Key 模式：新增时必填
-    if (!props.editingKey && !form.value.api_key.trim()) {
-      showError('请输入 API 密钥', '验证失败')
-      return
-    }
-  } else if (form.value.auth_type === 'service_account') {
+  if (form.value.auth_type === 'service_account') {
     if (!props.editingKey && !form.value.auth_config_text.trim()) {
       showError('请输入 Service Account JSON', '验证失败')
       return
@@ -774,6 +929,7 @@ async function handleSave() {
 
     // 准备认证相关数据
     const authConfig = parseAuthConfig()
+    const authTypeByFormat = buildAuthTypeByFormatPayload()
 
     if (props.editingKey) {
       const shouldClearAllowedModels = !!props.editingKey.auto_fetch_models && !form.value.auto_fetch_models
@@ -784,6 +940,7 @@ async function handleSave() {
         api_formats: form.value.api_formats,
         name: form.value.name,
         auth_type: form.value.auth_type,
+        auth_type_by_format: authTypeByFormat,
         rate_multipliers: rateMultipliersData,
         internal_priority: form.value.internal_priority,
         rpm_limit: form.value.rpm_limit,
@@ -799,7 +956,7 @@ async function handleSave() {
       }
 
       // 根据认证类型设置对应字段
-      if (form.value.auth_type === 'api_key' && form.value.api_key.trim()) {
+      if (isRawSecretAuthType(form.value.auth_type) && form.value.api_key.trim()) {
         updateData.api_key = form.value.api_key
       }
       if (form.value.auth_type === 'service_account' && authConfig) {
@@ -814,6 +971,7 @@ async function handleSave() {
         api_formats: form.value.api_formats,
         api_key: form.value.api_key,
         auth_type: form.value.auth_type,
+        auth_type_by_format: authTypeByFormat,
         auth_config: authConfig || undefined,
         name: form.value.name,
         rate_multipliers: rateMultipliersData,

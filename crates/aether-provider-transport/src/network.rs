@@ -298,6 +298,8 @@ mod tests {
                 auth_type: "api_key".to_string(),
                 is_active: true,
                 api_formats: None,
+                auth_type_by_format: None,
+
                 allowed_models: None,
                 capabilities: None,
                 rate_multipliers: None,

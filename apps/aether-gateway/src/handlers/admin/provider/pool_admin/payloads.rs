@@ -832,6 +832,10 @@ pub(super) fn build_admin_pool_key_payload(
     payload.insert("is_active".to_string(), json!(key.is_active));
     payload.insert("auth_type".to_string(), json!(key.auth_type));
     payload.insert(
+        "auth_type_by_format".to_string(),
+        json!(key.auth_type_by_format),
+    );
+    payload.insert(
         "credential_kind".to_string(),
         json!(auth_semantics.credential_kind().as_str()),
     );

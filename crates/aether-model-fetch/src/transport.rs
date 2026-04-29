@@ -562,6 +562,8 @@ mod tests {
                 auth_type: auth_type.to_string(),
                 is_active: true,
                 api_formats: Some(vec![api_format.to_string()]),
+                auth_type_by_format: None,
+
                 allowed_models: None,
                 capabilities: None,
                 rate_multipliers: None,

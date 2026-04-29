@@ -140,6 +140,7 @@ SELECT
   capabilities,
   is_active,
   api_formats,
+  auth_type_by_format,
   api_key,
   auth_config,
   note,
@@ -196,6 +197,7 @@ SELECT
   capabilities,
   is_active,
   api_formats,
+  auth_type_by_format,
   api_key,
   auth_config,
   note,
@@ -252,6 +254,7 @@ SELECT
   NULL::jsonb AS capabilities,
   is_active,
   api_formats,
+  NULL::jsonb AS auth_type_by_format,
   'summary' AS api_key,
   CASE
     WHEN auth_config IS NULL THEN NULL
@@ -592,6 +595,7 @@ SELECT
   capabilities,
   is_active,
   api_formats,
+  auth_type_by_format,
   api_key,
   auth_config,
   note,
@@ -1183,6 +1187,7 @@ INSERT INTO provider_api_keys (
   id,
   provider_id,
   api_formats,
+  auth_type_by_format,
   auth_type,
   api_key,
   auth_config,
@@ -1255,55 +1260,56 @@ INSERT INTO provider_api_keys (
   $22,
   $23,
   $24,
-  CASE
-    WHEN $25::double precision IS NULL THEN NULL
-    ELSE TO_TIMESTAMP($25::double precision)
-  END,
+  $25,
   CASE
     WHEN $26::double precision IS NULL THEN NULL
     ELSE TO_TIMESTAMP($26::double precision)
   END,
-  $27,
-  $28,
-  COALESCE($29, 0),
-  COALESCE($30, 0),
   CASE
-    WHEN $31::double precision IS NULL THEN NULL
-    ELSE TO_TIMESTAMP($31::double precision)
+    WHEN $27::double precision IS NULL THEN NULL
+    ELSE TO_TIMESTAMP($27::double precision)
   END,
-  $32,
+  $28,
+  $29,
+  COALESCE($30, 0),
+  COALESCE($31, 0),
+  CASE
+    WHEN $32::double precision IS NULL THEN NULL
+    ELSE TO_TIMESTAMP($32::double precision)
+  END,
   $33,
   $34,
+  $35,
   CASE
-    WHEN $35::double precision IS NULL THEN NULL
-    ELSE TO_TIMESTAMP($35::double precision)
+    WHEN $36::double precision IS NULL THEN NULL
+    ELSE TO_TIMESTAMP($36::double precision)
   END,
-  $36,
-  COALESCE($37, 0),
+  $37,
   COALESCE($38, 0),
   COALESCE($39, 0),
   COALESCE($40, 0),
   COALESCE($41, 0),
   COALESCE($42, 0),
-  CASE
-    WHEN $43::double precision IS NULL THEN NULL
-    ELSE TO_TIMESTAMP($43::double precision)
-  END,
+  COALESCE($43, 0),
   CASE
     WHEN $44::double precision IS NULL THEN NULL
     ELSE TO_TIMESTAMP($44::double precision)
   END,
-  $45,
+  CASE
+    WHEN $45::double precision IS NULL THEN NULL
+    ELSE TO_TIMESTAMP($45::double precision)
+  END,
   $46,
   $47,
   $48,
-  CASE
-    WHEN $49::double precision IS NULL THEN NOW()
-    ELSE TO_TIMESTAMP($49::double precision)
-  END,
+  $49,
   CASE
     WHEN $50::double precision IS NULL THEN NOW()
     ELSE TO_TIMESTAMP($50::double precision)
+  END,
+  CASE
+    WHEN $51::double precision IS NULL THEN NOW()
+    ELSE TO_TIMESTAMP($51::double precision)
   END
 )
 "#,
@@ -1311,6 +1317,7 @@ INSERT INTO provider_api_keys (
         .bind(&key.id)
         .bind(&key.provider_id)
         .bind(&key.api_formats)
+        .bind(&key.auth_type_by_format)
         .bind(&key.auth_type)
         .bind(&key.encrypted_api_key)
         .bind(&key.encrypted_auth_config)
@@ -1715,6 +1722,7 @@ UPDATE provider_api_keys
 SET
   provider_id = $2,
   api_formats = $3,
+  auth_type_by_format = $39,
   auth_type = $4,
   api_key = $5,
   auth_config = $6,
@@ -1809,6 +1817,7 @@ WHERE id = $1
         .bind(key.is_active)
         .bind(key.updated_at_unix_secs.map(|value| value as f64))
         .bind(key.expires_at_unix_secs.map(|value| value as f64))
+        .bind(&key.auth_type_by_format)
         .execute(&self.pool)
         .await
         .map_postgres_err()?
@@ -2437,7 +2446,7 @@ fn map_key_row(row: &PgRow) -> Result<StoredProviderCatalogKey, DataLayerError> 
     )?
     .with_transport_fields(
         row_get(row, "api_formats")?,
-        row_get(row, "api_key")?,
+        row_get::<Option<String>>(row, "api_key")?,
         row_get(row, "auth_config")?,
         row_get(row, "rate_multipliers")?,
         row_get(row, "global_priority_by_format")?,
@@ -2469,6 +2478,7 @@ fn map_key_row(row: &PgRow) -> Result<StoredProviderCatalogKey, DataLayerError> 
                 row.try_get("circuit_breaker_by_format").ok(),
             );
         key.note = row.try_get("note").ok();
+        key.auth_type_by_format = row.try_get("auth_type_by_format").ok();
         key.internal_priority = row.try_get("internal_priority").unwrap_or(50);
         key.cache_ttl_minutes = row.try_get("cache_ttl_minutes").unwrap_or(5);
         key.max_probe_interval_minutes = row.try_get("max_probe_interval_minutes").unwrap_or(32);

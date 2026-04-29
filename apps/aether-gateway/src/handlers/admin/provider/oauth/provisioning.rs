@@ -159,7 +159,7 @@ pub(crate) async fn update_existing_provider_oauth_catalog_key(
         .map(|duration| duration.as_secs())
         .unwrap_or(0);
     let mut updated = existing_key.clone();
-    updated.encrypted_api_key = encrypted_api_key;
+    updated.encrypted_api_key = Some(encrypted_api_key);
     updated.encrypted_auth_config = Some(encrypted_auth_config);
     updated.api_formats = provider_oauth_catalog_key_api_formats(provider_type, api_formats);
     updated.is_active = true;

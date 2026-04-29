@@ -339,9 +339,10 @@ async fn gateway_executes_openai_chat_stream_via_local_decision_gate_without_exe
     backup_key.id = "key-openai-local-stream-2".to_string();
     backup_key.provider_id = "provider-openai-local-stream-2".to_string();
     backup_key.name = "backup".to_string();
-    backup_key.encrypted_api_key =
+    backup_key.encrypted_api_key = Some(
         encrypt_python_fernet_plaintext(DEVELOPMENT_ENCRYPTION_KEY, "sk-upstream-openai-backup")
-            .expect("api key should encrypt");
+            .expect("api key should encrypt"),
+    );
     let (upstream_url, upstream_handle) = start_server(upstream).await;
     let (provider_url, provider_handle) = start_server(provider).await;
     let mut primary_endpoint = sample_provider_catalog_endpoint();

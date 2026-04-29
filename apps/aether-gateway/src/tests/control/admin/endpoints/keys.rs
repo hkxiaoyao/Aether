@@ -799,7 +799,10 @@ async fn gateway_updates_admin_provider_key_locally_with_trusted_admin_principal
     assert!(!reloaded[0].is_active);
     let decrypted = decrypt_python_fernet_ciphertext(
         DEVELOPMENT_ENCRYPTION_KEY,
-        &reloaded[0].encrypted_api_key,
+        reloaded[0]
+            .encrypted_api_key
+            .as_deref()
+            .expect("api key should be present"),
     )
     .expect("ciphertext should decrypt");
     assert_eq!(decrypted, "sk-updated-openai");

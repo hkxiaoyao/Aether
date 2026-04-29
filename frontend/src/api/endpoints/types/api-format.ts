@@ -16,7 +16,7 @@ export const API_FORMATS = {
 
 export type APIFormat = typeof API_FORMATS[keyof typeof API_FORMATS]
 
-// API 格式显示名称映射（按品牌分组：Chat 在前，CLI/Video 在后）
+// API 格式显示名称映射（按品牌分组）
 export const API_FORMAT_LABELS: Record<string, string> = {
   [API_FORMATS.CLAUDE_MESSAGES]: 'Claude Messages',
   [API_FORMATS.OPENAI]: 'OpenAI Chat',
@@ -87,10 +87,8 @@ export const API_FORMAT_FAMILY_LABELS: Record<string, string> = {
 // Kind 显示名称映射
 export const API_FORMAT_KIND_LABELS: Record<string, string> = {
   chat: 'Chat',
-  cli: 'CLI',
   responses: 'Responses',
   'responses:compact': 'Responses Compact',
-  compact: 'Compact',
   messages: 'Messages',
   generate_content: 'Generate Content',
   image: 'Image',
@@ -110,6 +108,8 @@ export function parseApiFormat(format: string): { family: string; kind: string }
 
 export function normalizeApiFormatAlias(format: string | null | undefined): string {
   const raw = format?.trim() ?? ''
+  // Only normalize current enum-style frontend constants. Retired API format ids
+  // are migrated in the database and intentionally do not map at runtime.
   switch (raw.toUpperCase()) {
     case 'CLAUDE':
     case 'CLAUDE_MESSAGES':

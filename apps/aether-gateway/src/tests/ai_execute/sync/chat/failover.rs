@@ -311,9 +311,10 @@ async fn gateway_skips_unsupported_local_openai_chat_sync_candidate_before_tryin
     supported_key.id = "key-openai-skip-local-2".to_string();
     supported_key.provider_id = "provider-openai-skip-local-2".to_string();
     supported_key.name = "backup".to_string();
-    supported_key.encrypted_api_key =
+    supported_key.encrypted_api_key = Some(
         encrypt_python_fernet_plaintext(DEVELOPMENT_ENCRYPTION_KEY, "sk-upstream-openai-backup")
-            .expect("api key should encrypt");
+            .expect("api key should encrypt"),
+    );
     let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
         vec![unsupported_provider, supported_provider],
         vec![unsupported_endpoint, supported_endpoint],

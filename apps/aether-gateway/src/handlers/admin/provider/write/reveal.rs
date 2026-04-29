@@ -2,6 +2,7 @@ fn normalize_reveal_auth_type(value: &str) -> &str {
     match value.trim().to_ascii_lowercase().as_str() {
         "service_account" | "vertex_ai" => "service_account",
         "oauth" => "oauth",
+        "bearer" => "bearer",
         _ => "api_key",
     }
 }
@@ -44,8 +45,10 @@ pub(crate) fn build_admin_reveal_key_payload(
                 "auth_config": auth_config,
             }));
         }
-        let decrypted = state
-            .decrypt_catalog_secret_with_fallbacks(&key.encrypted_api_key)
+        let decrypted = key
+            .encrypted_api_key
+            .as_deref()
+            .and_then(|ciphertext| state.decrypt_catalog_secret_with_fallbacks(ciphertext))
             .ok_or_else(|| {
                 "无法解密认证配置，可能是加密密钥已更改。请重新添加该密钥。".to_string()
             })?;
@@ -58,9 +61,14 @@ pub(crate) fn build_admin_reveal_key_payload(
         }));
     }
 
-    let decrypted = state
-        .decrypt_catalog_secret_with_fallbacks(&key.encrypted_api_key)
-        .ok_or_else(|| "无法解密 API Key，可能是加密密钥已更改。请重新添加该密钥。".to_string())?;
+    let decrypted = match key.encrypted_api_key.as_deref().map(str::trim) {
+        Some(ciphertext) if !ciphertext.is_empty() => state
+            .decrypt_catalog_secret_with_fallbacks(ciphertext)
+            .ok_or_else(|| {
+                "无法解密 API Key，可能是加密密钥已更改。请重新添加该密钥。".to_string()
+            })?,
+        _ => String::new(),
+    };
     Ok(json!({
         "auth_type": auth_type,
         "api_key": decrypted,
