@@ -175,23 +175,6 @@
                   @update:model-value="(value) => setAuthChannelMismatchAllowed(format, value)"
                 />
               </div>
-              <div
-                class="flex items-center text-xs text-muted-foreground gap-1"
-                @click.stop
-              >
-                <span>×</span>
-                <input
-                  :value="form.rate_multipliers[format] ?? ''"
-                  type="number"
-                  step="0.01"
-                  min="0.01"
-                  placeholder="1"
-                  class="w-9 bg-transparent text-right outline-none [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
-                  :class="form.api_formats.includes(format) ? 'text-primary' : 'text-muted-foreground'"
-                  title="成本倍率"
-                  @input="(e) => updateRateMultiplier(format, (e.target as HTMLInputElement).value)"
-                >
-              </div>
             </div>
           </div>
         </div>
@@ -778,32 +761,12 @@ function toggleApiFormat(format: string) {
     form.value.api_formats.push(format)
     setAuthChannelMismatchAllowed(format, true)
   } else {
-    // 移除格式，但保留倍率配置（用户可能只是临时取消）
+    // 移除格式，但保留隐藏配置（用户可能只是临时取消）
     form.value.api_formats.splice(index, 1)
   }
   form.value.allow_auth_channel_mismatch_formats = sanitizeAllowAuthChannelMismatchFormats(
     form.value.allow_auth_channel_mismatch_formats
   )
-}
-
-// 更新指定格式的成本倍率
-function updateRateMultiplier(format: string, value: string | number) {
-  // 使用对象替换以确保 Vue 3 响应性
-  const newMultipliers = { ...form.value.rate_multipliers }
-
-  if (value === '' || value === null || value === undefined) {
-    // 清空时删除该格式的配置（使用默认倍率）
-    delete newMultipliers[format]
-  } else {
-    const numValue = typeof value === 'string' ? parseFloat(value) : value
-    // 限制倍率范围：0.01 - 100
-    if (!isNaN(numValue) && numValue >= 0.01 && numValue <= 100) {
-      newMultipliers[format] = numValue
-    }
-  }
-
-  // 替换整个对象以触发响应式更新
-  form.value.rate_multipliers = newMultipliers
 }
 
 
