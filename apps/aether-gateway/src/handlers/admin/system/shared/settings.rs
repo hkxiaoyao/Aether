@@ -12,26 +12,12 @@ use aether_admin::system::{
 use axum::body::Bytes;
 use axum::http;
 use serde_json::json;
-use std::fs;
 
 pub(crate) fn current_aether_version() -> String {
-    let version_file =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../src/_version.py");
-    if let Ok(contents) = fs::read_to_string(version_file) {
-        for line in contents.lines() {
-            let line = line.trim();
-            if let Some(version) = line
-                .strip_prefix("__version__ = version = '")
-                .and_then(|value| value.strip_suffix('\''))
-            {
-                if !version.is_empty() {
-                    return version.to_string();
-                }
-            }
-        }
-    }
-
-    env!("CARGO_PKG_VERSION").to_string()
+    option_env!("AETHER_BUILD_VERSION")
+        .filter(|version| !version.is_empty())
+        .unwrap_or(env!("CARGO_PKG_VERSION"))
+        .to_string()
 }
 
 pub(crate) fn build_admin_system_check_update_payload() -> serde_json::Value {

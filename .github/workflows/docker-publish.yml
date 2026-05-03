@@ -74,6 +74,7 @@ jobs:
 
       - name: Build
         env:
+          AETHER_VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
           CARGO_TERM_COLOR: always
         run: cross build --release --locked -p aether-gateway --target ${{ matrix.target }}
 
