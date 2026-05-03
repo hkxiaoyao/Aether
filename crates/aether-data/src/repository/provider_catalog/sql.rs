@@ -601,6 +601,7 @@ SELECT
   is_active,
   api_formats,
   auth_type_by_format,
+  allow_auth_channel_mismatch_formats,
   api_key,
   auth_config,
   note,
@@ -2591,5 +2592,25 @@ mod tests {
         let baseline = include_str!("../../../bootstrap/20260413020000_baseline_v2.sql");
         assert!(baseline.contains("CREATE TABLE IF NOT EXISTS public.provider_api_keys"));
         assert!(baseline.contains("concurrent_limit integer,"));
+    }
+
+    #[test]
+    fn provider_api_keys_auth_channel_mismatch_list_queries_include_field() {
+        for sql in [
+            super::LIST_KEYS_BY_IDS_PREFIX,
+            super::LIST_KEYS_BY_PROVIDER_IDS_PREFIX,
+        ] {
+            assert!(sql.contains("allow_auth_channel_mismatch_formats"));
+        }
+
+        let source = include_str!("sql.rs");
+        assert!(
+            source
+                .matches("auth_type_by_format,\n  allow_auth_channel_mismatch_formats,\n  api_key",)
+                .count()
+                >= 3
+        );
+        assert!(source.contains(".bind(&key.allow_auth_channel_mismatch_formats)"));
+        assert!(source.contains("row.try_get(\"allow_auth_channel_mismatch_formats\").ok()"));
     }
 }
