@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use aether_data::repository::proxy_nodes::{
     ProxyNodeHeartbeatMutation, ProxyNodeManualCreateMutation, ProxyNodeManualUpdateMutation,
-    ProxyNodeTunnelStatusMutation, StoredProxyNode, StoredProxyNodeEvent,
+    ProxyNodeTrafficMutation, ProxyNodeTunnelStatusMutation, StoredProxyNode, StoredProxyNodeEvent,
 };
 use aether_http::{build_http_client, HttpClientConfig};
 use aether_runtime::{
@@ -547,6 +547,16 @@ impl AppState {
     ) -> Result<Option<StoredProxyNode>, GatewayError> {
         self.data
             .apply_proxy_node_heartbeat(mutation)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
+    pub(crate) async fn record_proxy_node_traffic(
+        &self,
+        mutation: &ProxyNodeTrafficMutation,
+    ) -> Result<bool, GatewayError> {
+        self.data
+            .record_proxy_node_traffic(mutation)
             .await
             .map_err(|err| GatewayError::Internal(err.to_string()))
     }

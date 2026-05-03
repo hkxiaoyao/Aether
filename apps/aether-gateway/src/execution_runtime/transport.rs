@@ -8,6 +8,7 @@ use aether_contracts::{
     ExecutionPlan, ExecutionResult, ExecutionTelemetry, ProxySnapshot, ResponseBody,
     EXECUTION_REQUEST_FOLLOW_REDIRECTS_HEADER, EXECUTION_REQUEST_HTTP1_ONLY_HEADER,
 };
+use aether_data::repository::proxy_nodes::ProxyNodeTrafficMutation;
 use aether_http::{apply_http_client_config, HttpClientConfig};
 use axum::body::Bytes;
 use base64::Engine as _;
@@ -267,12 +268,17 @@ pub(crate) async fn execute_sync_plan(
             .map_err(|err| GatewayError::Internal(err.to_string()));
     }
 
-    let _ = state;
     let _ = trace_id;
-    DirectSyncExecutionRuntime::new()
-        .execute_sync(plan)
-        .await
-        .map_err(|err| GatewayError::Internal(err.to_string()))
+    match DirectSyncExecutionRuntime::new().execute_sync(plan).await {
+        Ok(result) => {
+            record_manual_proxy_request_outcome(state, plan, result.status_code).await;
+            Ok(result)
+        }
+        Err(err) => {
+            record_manual_proxy_request_failure(state, plan).await;
+            Err(GatewayError::Internal(err.to_string()))
+        }
+    }
 }
 
 pub(crate) async fn execute_stream_plan_via_local_tunnel(
@@ -325,6 +331,68 @@ fn build_stream_summary_report_context(plan: &ExecutionPlan) -> Value {
         "client_api_format": plan.client_api_format,
         "model": plan.model_name,
     })
+}
+
+pub(crate) async fn record_manual_proxy_request_success(state: &AppState, plan: &ExecutionPlan) {
+    record_manual_proxy_traffic(state, plan, 1, 0, 0, 0).await;
+}
+
+pub(crate) async fn record_manual_proxy_request_outcome(
+    state: &AppState,
+    plan: &ExecutionPlan,
+    status_code: u16,
+) {
+    let failed_requests_delta = i64::from(status_code >= 400);
+    record_manual_proxy_traffic(state, plan, 1, failed_requests_delta, 0, 0).await;
+}
+
+pub(crate) async fn record_manual_proxy_request_failure(state: &AppState, plan: &ExecutionPlan) {
+    record_manual_proxy_traffic(state, plan, 1, 1, 0, 0).await;
+}
+
+pub(crate) async fn record_manual_proxy_stream_error(state: &AppState, plan: &ExecutionPlan) {
+    record_manual_proxy_traffic(state, plan, 0, 0, 0, 1).await;
+}
+
+async fn record_manual_proxy_traffic(
+    state: &AppState,
+    plan: &ExecutionPlan,
+    total_requests_delta: i64,
+    failed_requests_delta: i64,
+    dns_failures_delta: i64,
+    stream_errors_delta: i64,
+) {
+    let Some(node_id) = manual_proxy_node_id(plan.proxy.as_ref()) else {
+        return;
+    };
+    let mutation = ProxyNodeTrafficMutation {
+        node_id: node_id.clone(),
+        total_requests_delta,
+        failed_requests_delta,
+        dns_failures_delta,
+        stream_errors_delta,
+    };
+
+    if let Err(error) = state.record_proxy_node_traffic(&mutation).await {
+        tracing::warn!(
+            node_id = %node_id,
+            error = ?error,
+            "failed to record manual proxy node traffic"
+        );
+    }
+}
+
+fn manual_proxy_node_id(proxy: Option<&ProxySnapshot>) -> Option<String> {
+    let proxy = proxy?;
+    if proxy.enabled == Some(false) || resolve_tunnel_node_id(Some(proxy)).is_some() {
+        return None;
+    }
+    proxy
+        .node_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 async fn execute_sync_plan_via_local_tunnel(
@@ -1068,8 +1136,11 @@ mod tests {
     use std::sync::Arc;
 
     use aether_contracts::{
-        ExecutionPlan, ExecutionTimeouts, RequestBody, EXECUTION_REQUEST_FOLLOW_REDIRECTS_HEADER,
-        EXECUTION_REQUEST_HTTP1_ONLY_HEADER,
+        ExecutionPlan, ExecutionTimeouts, ProxySnapshot, RequestBody,
+        EXECUTION_REQUEST_FOLLOW_REDIRECTS_HEADER, EXECUTION_REQUEST_HTTP1_ONLY_HEADER,
+    };
+    use aether_data::repository::proxy_nodes::{
+        InMemoryProxyNodeRepository, ProxyNodeReadRepository, StoredProxyNode,
     };
     use axum::body::Bytes;
     use axum::extract::ws::Message;
@@ -1081,7 +1152,10 @@ mod tests {
     use tokio::sync::watch;
 
     use super::{
-        build_client, execute_sync_plan, DirectSyncExecutionRuntime, ExecutionTransportControls,
+        build_client, execute_sync_plan, record_manual_proxy_request_failure,
+        record_manual_proxy_request_outcome, record_manual_proxy_request_success,
+        record_manual_proxy_stream_error, DirectSyncExecutionRuntime,
+        ExecutionTransportControls,
     };
     use crate::constants::{
         EXECUTION_RUNTIME_LOOP_GUARD_HEADER, EXECUTION_RUNTIME_LOOP_GUARD_VIA_TOKEN,
@@ -1162,8 +1236,8 @@ mod tests {
         }
     }
 
-    fn tunnel_proxy_snapshot(base_url: String) -> aether_contracts::ProxySnapshot {
-        aether_contracts::ProxySnapshot {
+    fn tunnel_proxy_snapshot(base_url: String) -> ProxySnapshot {
+        ProxySnapshot {
             enabled: Some(true),
             mode: Some("tunnel".into()),
             node_id: Some("node-1".into()),
@@ -1171,6 +1245,39 @@ mod tests {
             url: None,
             extra: Some(json!({"tunnel_base_url": base_url})),
         }
+    }
+
+    fn manual_proxy_snapshot(node_id: &str) -> ProxySnapshot {
+        ProxySnapshot {
+            enabled: Some(true),
+            mode: Some("http".into()),
+            node_id: Some(node_id.to_string()),
+            label: Some("manual-proxy".into()),
+            url: Some("http://127.0.0.1:1".into()),
+            extra: None,
+        }
+    }
+
+    fn sample_manual_proxy_node(node_id: &str) -> StoredProxyNode {
+        StoredProxyNode::new(
+            node_id.to_string(),
+            "manual-proxy".to_string(),
+            "127.0.0.1".to_string(),
+            1,
+            true,
+            "online".to_string(),
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            false,
+            false,
+            0,
+        )
+        .expect("manual proxy node should build")
+        .with_manual_proxy_fields(Some("http://127.0.0.1:1".into()), None, None)
     }
 
     fn decode_relay_envelope(body: &[u8]) -> (serde_json::Value, Vec<u8>) {
@@ -1257,6 +1364,273 @@ mod tests {
             result.body.and_then(|body| body.json_body),
             Some(json!({"error": {"message": "slow down"}}))
         );
+    }
+
+    #[tokio::test]
+    async fn execute_sync_plan_records_manual_proxy_success() {
+        let repository = Arc::new(InMemoryProxyNodeRepository::seed(vec![
+            sample_manual_proxy_node("manual-node-1"),
+        ]));
+        let data = crate::data::GatewayDataState::with_proxy_node_repository_for_tests(Arc::clone(
+            &repository,
+        ));
+        let state = AppState::new()
+            .expect("app state should build")
+            .with_data_state_for_tests(data);
+        let plan = ExecutionPlan {
+            request_id: "req-manual-proxy-success".into(),
+            candidate_id: None,
+            provider_name: None,
+            provider_id: "prov-1".into(),
+            endpoint_id: "ep-1".into(),
+            key_id: "key-1".into(),
+            method: "POST".into(),
+            url: "https://example.com/chat".into(),
+            headers: BTreeMap::new(),
+            content_type: None,
+            content_encoding: None,
+            body: RequestBody::from_json(json!({})),
+            stream: false,
+            client_api_format: "openai:chat".into(),
+            provider_api_format: "openai:chat".into(),
+            model_name: None,
+            proxy: Some(manual_proxy_snapshot("manual-node-1")),
+            tls_profile: None,
+            timeouts: None,
+        };
+
+        record_manual_proxy_request_success(&state, &plan).await;
+
+        let node = repository
+            .find_proxy_node("manual-node-1")
+            .await
+            .expect("proxy node lookup should succeed")
+            .expect("manual proxy node should exist");
+        assert_eq!(node.total_requests, 1);
+        assert_eq!(node.failed_requests, 0);
+    }
+
+    #[tokio::test]
+    async fn execute_sync_plan_records_manual_proxy_failure() {
+        let repository = Arc::new(InMemoryProxyNodeRepository::seed(vec![
+            sample_manual_proxy_node("manual-node-1"),
+        ]));
+        let data = crate::data::GatewayDataState::with_proxy_node_repository_for_tests(Arc::clone(
+            &repository,
+        ));
+        let state = AppState::new()
+            .expect("app state should build")
+            .with_data_state_for_tests(data);
+        let plan = ExecutionPlan {
+            request_id: "req-manual-proxy-failure".into(),
+            candidate_id: None,
+            provider_name: None,
+            provider_id: "prov-1".into(),
+            endpoint_id: "ep-1".into(),
+            key_id: "key-1".into(),
+            method: "POST".into(),
+            url: "https://example.com/chat".into(),
+            headers: BTreeMap::new(),
+            content_type: None,
+            content_encoding: None,
+            body: RequestBody::from_json(json!({})),
+            stream: false,
+            client_api_format: "openai:chat".into(),
+            provider_api_format: "openai:chat".into(),
+            model_name: None,
+            proxy: Some(manual_proxy_snapshot("manual-node-1")),
+            tls_profile: None,
+            timeouts: None,
+        };
+
+        record_manual_proxy_request_failure(&state, &plan).await;
+
+        let node = repository
+            .find_proxy_node("manual-node-1")
+            .await
+            .expect("proxy node lookup should succeed")
+            .expect("manual proxy node should exist");
+        assert_eq!(node.total_requests, 1);
+        assert_eq!(node.failed_requests, 1);
+    }
+
+    #[tokio::test]
+    async fn execute_sync_plan_records_manual_proxy_http_error_as_failure() {
+        let repository = Arc::new(InMemoryProxyNodeRepository::seed(vec![
+            sample_manual_proxy_node("manual-node-1"),
+        ]));
+        let data = crate::data::GatewayDataState::with_proxy_node_repository_for_tests(Arc::clone(
+            &repository,
+        ));
+        let state = AppState::new()
+            .expect("app state should build")
+            .with_data_state_for_tests(data);
+        let plan = ExecutionPlan {
+            request_id: "req-manual-proxy-http-error".into(),
+            candidate_id: None,
+            provider_name: None,
+            provider_id: "prov-1".into(),
+            endpoint_id: "ep-1".into(),
+            key_id: "key-1".into(),
+            method: "POST".into(),
+            url: "https://example.com/chat".into(),
+            headers: BTreeMap::new(),
+            content_type: None,
+            content_encoding: None,
+            body: RequestBody::from_json(json!({})),
+            stream: false,
+            client_api_format: "openai:chat".into(),
+            provider_api_format: "openai:chat".into(),
+            model_name: None,
+            proxy: Some(manual_proxy_snapshot("manual-node-1")),
+            tls_profile: None,
+            timeouts: None,
+        };
+
+        record_manual_proxy_request_outcome(&state, &plan, 429).await;
+
+        let node = repository
+            .find_proxy_node("manual-node-1")
+            .await
+            .expect("proxy node lookup should succeed")
+            .expect("manual proxy node should exist");
+        assert_eq!(node.total_requests, 1);
+        assert_eq!(node.failed_requests, 1);
+    }
+
+    #[tokio::test]
+    async fn execute_sync_plan_records_manual_proxy_http_success_without_failure() {
+        let repository = Arc::new(InMemoryProxyNodeRepository::seed(vec![
+            sample_manual_proxy_node("manual-node-1"),
+        ]));
+        let data = crate::data::GatewayDataState::with_proxy_node_repository_for_tests(Arc::clone(
+            &repository,
+        ));
+        let state = AppState::new()
+            .expect("app state should build")
+            .with_data_state_for_tests(data);
+        let plan = ExecutionPlan {
+            request_id: "req-manual-proxy-http-success".into(),
+            candidate_id: None,
+            provider_name: None,
+            provider_id: "prov-1".into(),
+            endpoint_id: "ep-1".into(),
+            key_id: "key-1".into(),
+            method: "POST".into(),
+            url: "https://example.com/chat".into(),
+            headers: BTreeMap::new(),
+            content_type: None,
+            content_encoding: None,
+            body: RequestBody::from_json(json!({})),
+            stream: false,
+            client_api_format: "openai:chat".into(),
+            provider_api_format: "openai:chat".into(),
+            model_name: None,
+            proxy: Some(manual_proxy_snapshot("manual-node-1")),
+            tls_profile: None,
+            timeouts: None,
+        };
+
+        record_manual_proxy_request_outcome(&state, &plan, 200).await;
+
+        let node = repository
+            .find_proxy_node("manual-node-1")
+            .await
+            .expect("proxy node lookup should succeed")
+            .expect("manual proxy node should exist");
+        assert_eq!(node.total_requests, 1);
+        assert_eq!(node.failed_requests, 0);
+    }
+
+    #[tokio::test]
+    async fn execute_sync_plan_records_manual_proxy_stream_error_without_extra_request_count() {
+        let repository = Arc::new(InMemoryProxyNodeRepository::seed(vec![
+            sample_manual_proxy_node("manual-node-1"),
+        ]));
+        let data = crate::data::GatewayDataState::with_proxy_node_repository_for_tests(Arc::clone(
+            &repository,
+        ));
+        let state = AppState::new()
+            .expect("app state should build")
+            .with_data_state_for_tests(data);
+        let plan = ExecutionPlan {
+            request_id: "req-manual-proxy-stream-error".into(),
+            candidate_id: None,
+            provider_name: None,
+            provider_id: "prov-1".into(),
+            endpoint_id: "ep-1".into(),
+            key_id: "key-1".into(),
+            method: "POST".into(),
+            url: "https://example.com/chat".into(),
+            headers: BTreeMap::new(),
+            content_type: None,
+            content_encoding: None,
+            body: RequestBody::from_json(json!({})),
+            stream: true,
+            client_api_format: "openai:chat".into(),
+            provider_api_format: "openai:chat".into(),
+            model_name: None,
+            proxy: Some(manual_proxy_snapshot("manual-node-1")),
+            tls_profile: None,
+            timeouts: None,
+        };
+
+        record_manual_proxy_request_success(&state, &plan).await;
+        record_manual_proxy_stream_error(&state, &plan).await;
+
+        let node = repository
+            .find_proxy_node("manual-node-1")
+            .await
+            .expect("proxy node lookup should succeed")
+            .expect("manual proxy node should exist");
+        assert_eq!(node.total_requests, 1);
+        assert_eq!(node.failed_requests, 0);
+        assert_eq!(node.stream_errors, 1);
+    }
+
+    #[tokio::test]
+    async fn execute_sync_plan_ignores_stream_error_for_tunnel_proxy() {
+        let repository = Arc::new(InMemoryProxyNodeRepository::seed(vec![
+            sample_manual_proxy_node("manual-node-1"),
+        ]));
+        let data = crate::data::GatewayDataState::with_proxy_node_repository_for_tests(Arc::clone(
+            &repository,
+        ));
+        let state = AppState::new()
+            .expect("app state should build")
+            .with_data_state_for_tests(data);
+        let plan = ExecutionPlan {
+            request_id: "req-tunnel-proxy-stream-error".into(),
+            candidate_id: None,
+            provider_name: None,
+            provider_id: "prov-1".into(),
+            endpoint_id: "ep-1".into(),
+            key_id: "key-1".into(),
+            method: "POST".into(),
+            url: "https://example.com/chat".into(),
+            headers: BTreeMap::new(),
+            content_type: None,
+            content_encoding: None,
+            body: RequestBody::from_json(json!({})),
+            stream: true,
+            client_api_format: "openai:chat".into(),
+            provider_api_format: "openai:chat".into(),
+            model_name: None,
+            proxy: Some(tunnel_proxy_snapshot("http://127.0.0.1:1".to_string())),
+            tls_profile: None,
+            timeouts: None,
+        };
+
+        record_manual_proxy_stream_error(&state, &plan).await;
+
+        let node = repository
+            .find_proxy_node("manual-node-1")
+            .await
+            .expect("proxy node lookup should succeed")
+            .expect("manual proxy node should exist");
+        assert_eq!(node.total_requests, 0);
+        assert_eq!(node.failed_requests, 0);
+        assert_eq!(node.stream_errors, 0);
     }
 
     #[tokio::test]

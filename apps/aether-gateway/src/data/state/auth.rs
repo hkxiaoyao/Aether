@@ -2,11 +2,11 @@ use super::{
     AuthApiKeyLookupKey, CreateManagementTokenRecord, DataLayerError, GatewayAuthApiKeySnapshot,
     GatewayDataState, ManagementTokenListQuery, ProxyNodeHeartbeatMutation,
     ProxyNodeManualCreateMutation, ProxyNodeManualUpdateMutation, ProxyNodeRegistrationMutation,
-    ProxyNodeRemoteConfigMutation, ProxyNodeTunnelStatusMutation, RegenerateManagementTokenSecret,
-    StoredAuthApiKeyExportRecord, StoredAuthApiKeySnapshot, StoredLdapModuleConfig,
-    StoredManagementToken, StoredManagementTokenListPage, StoredManagementTokenWithUser,
-    StoredOAuthProviderConfig, StoredOAuthProviderModuleConfig, StoredProxyNode,
-    StoredProxyNodeEvent, StoredUserAuthRecord, StoredUserPreferenceRecord,
+    ProxyNodeRemoteConfigMutation, ProxyNodeTrafficMutation, ProxyNodeTunnelStatusMutation,
+    RegenerateManagementTokenSecret, StoredAuthApiKeyExportRecord, StoredAuthApiKeySnapshot,
+    StoredLdapModuleConfig, StoredManagementToken, StoredManagementTokenListPage,
+    StoredManagementTokenWithUser, StoredOAuthProviderConfig, StoredOAuthProviderModuleConfig,
+    StoredProxyNode, StoredProxyNodeEvent, StoredUserAuthRecord, StoredUserPreferenceRecord,
     StoredUserSessionRecord, StoredWalletSnapshot, UpdateManagementTokenRecord,
     UpsertOAuthProviderConfigRecord,
 };
@@ -2307,6 +2307,16 @@ impl GatewayDataState {
         match &self.proxy_node_writer {
             Some(repository) => repository.apply_heartbeat(mutation).await,
             None => Ok(None),
+        }
+    }
+
+    pub(crate) async fn record_proxy_node_traffic(
+        &self,
+        mutation: &ProxyNodeTrafficMutation,
+    ) -> Result<bool, DataLayerError> {
+        match &self.proxy_node_writer {
+            Some(repository) => repository.record_traffic(mutation).await,
+            None => Ok(false),
         }
     }
 

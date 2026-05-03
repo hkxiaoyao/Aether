@@ -6,8 +6,8 @@ use sqlx::{postgres::PgRow, PgPool, Row};
 use super::types::{
     normalize_proxy_metadata, reconcile_remote_config_after_heartbeat, ProxyNodeHeartbeatMutation,
     ProxyNodeManualCreateMutation, ProxyNodeManualUpdateMutation, ProxyNodeReadRepository,
-    ProxyNodeRegistrationMutation, ProxyNodeRemoteConfigMutation, ProxyNodeTunnelStatusMutation,
-    ProxyNodeWriteRepository, StoredProxyNode, StoredProxyNodeEvent,
+    ProxyNodeRegistrationMutation, ProxyNodeRemoteConfigMutation, ProxyNodeTrafficMutation,
+    ProxyNodeTunnelStatusMutation, ProxyNodeWriteRepository, StoredProxyNode, StoredProxyNodeEvent,
 };
 use crate::{
     error::{postgres_error, SqlxResultExt},
@@ -315,6 +315,18 @@ SET
   proxy_url = COALESCE($6, proxy_url),
   proxy_username = COALESCE($7, proxy_username),
   proxy_password = COALESCE($8, proxy_password),
+  updated_at = NOW()
+WHERE id = $1
+  AND is_manual = TRUE
+"#;
+
+const RECORD_PROXY_NODE_TRAFFIC_SQL: &str = r#"
+UPDATE proxy_nodes
+SET
+  total_requests = total_requests + GREATEST($2, 0),
+  failed_requests = failed_requests + GREATEST($3, 0),
+  dns_failures = dns_failures + GREATEST($4, 0),
+  stream_errors = stream_errors + GREATEST($5, 0),
   updated_at = NOW()
 WHERE id = $1
   AND is_manual = TRUE
@@ -818,6 +830,23 @@ impl ProxyNodeWriteRepository for SqlxProxyNodeRepository {
         }
 
         Ok(Some(updated))
+    }
+
+    async fn record_traffic(
+        &self,
+        mutation: &ProxyNodeTrafficMutation,
+    ) -> Result<bool, DataLayerError> {
+        let result = sqlx::query(RECORD_PROXY_NODE_TRAFFIC_SQL)
+            .bind(&mutation.node_id)
+            .bind(mutation.total_requests_delta)
+            .bind(mutation.failed_requests_delta)
+            .bind(mutation.dns_failures_delta)
+            .bind(mutation.stream_errors_delta)
+            .execute(&self.pool)
+            .await
+            .map_postgres_err()?;
+
+        Ok(result.rows_affected() > 0)
     }
 
     async fn update_tunnel_status(

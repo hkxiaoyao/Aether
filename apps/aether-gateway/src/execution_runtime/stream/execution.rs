@@ -60,8 +60,9 @@ use crate::execution_runtime::submission::{
     submit_local_core_error_or_sync_finalize,
 };
 use crate::execution_runtime::transport::{
-    execute_stream_plan_via_local_tunnel, DirectSyncExecutionRuntime,
-    DirectUpstreamStreamExecution, ExecutionRuntimeTransportError,
+    execute_stream_plan_via_local_tunnel, record_manual_proxy_request_failure,
+    record_manual_proxy_request_success, record_manual_proxy_stream_error,
+    DirectSyncExecutionRuntime, DirectUpstreamStreamExecution, ExecutionRuntimeTransportError,
 };
 use crate::execution_runtime::{
     local_failover_response_text, resolve_core_stream_direct_finalize_report_kind,
@@ -314,7 +315,16 @@ async fn execute_in_process_stream(
         return Ok(execution);
     }
 
-    DirectSyncExecutionRuntime::new().execute_stream(plan).await
+    match DirectSyncExecutionRuntime::new().execute_stream(plan).await {
+        Ok(execution) => {
+            record_manual_proxy_request_success(state, plan).await;
+            Ok(execution)
+        }
+        Err(error) => {
+            record_manual_proxy_request_failure(state, plan).await;
+            Err(error)
+        }
+    }
 }
 
 async fn execute_in_process_stream_with_oauth_retry(
@@ -2119,6 +2129,7 @@ async fn execute_stream_from_frame_stream(
         }
 
         if let Some(failure) = terminal_failure {
+            record_manual_proxy_stream_error(&state_for_report, &plan_for_report).await;
             submit_midstream_stream_failure(
                 &state_for_report,
                 &trace_id_owned,
