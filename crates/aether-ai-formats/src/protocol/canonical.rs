@@ -4337,12 +4337,7 @@ fn rerank_request_from_raw(body_json: &Value, namespace: &str) -> Option<Canonic
         .map(str::trim)
         .filter(|value| !value.is_empty())?
         .to_string();
-    let documents = request
-        .get("documents")
-        .and_then(Value::as_array)?
-        .iter()
-        .cloned()
-        .collect::<Vec<_>>();
+    let documents = request.get("documents").and_then(Value::as_array)?.to_vec();
     let rerank = CanonicalRerankRequest {
         query,
         documents,

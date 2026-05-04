@@ -676,12 +676,13 @@ mod tests {
                 Some("ai_public"),
                 Some("openai"),
                 Some("embedding"),
+                None,
                 &Method::POST,
                 "/v1/embeddings",
             ),
             Some(OPENAI_EMBEDDING_SYNC_PLAN_KIND)
         );
-        assert!(supports_sync_scheduler_decision_kind(
+        assert!(supports_sync_execution_decision_kind(
             OPENAI_EMBEDDING_SYNC_PLAN_KIND
         ));
     }
@@ -693,12 +694,13 @@ mod tests {
                 Some("ai_public"),
                 Some("openai"),
                 Some("rerank"),
+                None,
                 &Method::POST,
                 "/v1/rerank",
             ),
             Some(OPENAI_RERANK_SYNC_PLAN_KIND)
         );
-        assert!(supports_sync_scheduler_decision_kind(
+        assert!(supports_sync_execution_decision_kind(
             OPENAI_RERANK_SYNC_PLAN_KIND
         ));
     }
