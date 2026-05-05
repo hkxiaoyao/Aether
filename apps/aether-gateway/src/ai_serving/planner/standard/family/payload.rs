@@ -341,6 +341,7 @@ mod tests {
             auth_snapshot: sample_auth_snapshot(),
             required_capabilities: None,
             request_auth_channel: None,
+            client_session_affinity: None,
         }
     }
 
