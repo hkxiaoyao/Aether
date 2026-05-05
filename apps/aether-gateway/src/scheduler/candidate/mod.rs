@@ -158,6 +158,7 @@ pub(crate) async fn list_selectable_candidates_for_required_capability_without_r
     required_capability: &str,
     require_streaming: bool,
     auth_snapshot: Option<&GatewayAuthApiKeySnapshot>,
+    client_session_affinity: Option<&ClientSessionAffinity>,
     now_unix_secs: u64,
 ) -> Result<Vec<SchedulerMinimalCandidateSelectionCandidate>, GatewayError> {
     Ok(
@@ -168,6 +169,7 @@ pub(crate) async fn list_selectable_candidates_for_required_capability_without_r
             required_capability,
             require_streaming,
             auth_snapshot,
+            client_session_affinity,
             now_unix_secs,
         )
         .await?
@@ -182,6 +184,7 @@ pub(crate) async fn list_selectable_candidates_for_required_capability_without_r
     required_capability: &str,
     require_streaming: bool,
     auth_snapshot: Option<&GatewayAuthApiKeySnapshot>,
+    client_session_affinity: Option<&ClientSessionAffinity>,
     now_unix_secs: u64,
 ) -> Result<(Vec<SchedulerMinimalCandidateSelectionCandidate>, bool), GatewayError> {
     let normalized_api_format = normalize_api_format(candidate_api_format);
@@ -224,7 +227,7 @@ pub(crate) async fn list_selectable_candidates_for_required_capability_without_r
             require_streaming,
             required_capabilities.as_ref(),
             auth_snapshot,
-            None,
+            client_session_affinity,
             now_unix_secs,
             false,
         )
