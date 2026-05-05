@@ -1048,6 +1048,7 @@ CREATE TABLE IF NOT EXISTS public.usage (
     request_type character varying(50),
     api_format character varying(50),
     is_stream boolean DEFAULT false,
+    upstream_is_stream boolean,
     status_code integer,
     error_message text,
     response_time_ms integer,
@@ -4939,13 +4940,18 @@ SELECT
   ) AS price_per_request,
   settlement.billing_pricing_source,
   settlement.billing_rule_id,
-  settlement.billing_rule_version
+  settlement.billing_rule_version,
+  COALESCE(usage_rows.upstream_is_stream, COALESCE(usage_rows.is_stream, FALSE)) AS upstream_is_stream
 FROM public."usage" AS usage_rows
 LEFT JOIN public.usage_settlement_snapshots AS settlement
   ON settlement.request_id = usage_rows.request_id;
 
 COMMENT ON VIEW public.usage_billing_facts IS
   'Canonical billing read model. Token/cost fields prefer usage_settlement_snapshots.billing_* and fall back to deprecated usage mirrors for legacy rows.';
+COMMENT ON COLUMN public.usage.upstream_is_stream IS
+  'Resolved upstream stream mode from request_metadata.upstream_is_stream, falling back to is_stream for legacy rows.';
+COMMENT ON COLUMN public.usage_billing_facts.upstream_is_stream IS
+  'Resolved upstream stream mode from public.usage.upstream_is_stream, falling back to usage.is_stream for legacy rows.';
 
 COMMENT ON COLUMN public.usage.input_tokens IS
   'DEPRECATED: billing dimension mirror. Use public.usage_settlement_snapshots.billing_input_tokens or public.usage_billing_facts.input_tokens.';

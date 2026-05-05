@@ -273,8 +273,15 @@
             /></span>
             <span
               v-else-if="record.response_time_ms != null || record.first_byte_time_ms != null"
-              class="tabular-nums"
-            >{{ record.first_byte_time_ms != null ? (record.first_byte_time_ms / 1000).toFixed(1) + '/' : '' }}{{ record.response_time_ms != null ? (record.response_time_ms / 1000).toFixed(1) : '-' }}{{ record.response_time_ms != null ? 's' : '' }}</span>
+              class="flex flex-col items-end tabular-nums leading-3 shrink-0"
+              :title="getRecordPerformanceTitle(record)"
+            >
+              <span class="whitespace-nowrap">{{ formatRecordLatencyPair(record) }}</span>
+              <span
+                v-if="getRecordDisplayOutputRate(record) != null"
+                class="text-primary/80 whitespace-nowrap"
+              >{{ formatOutputRate(getRecordDisplayOutputRate(record)) }}</span>
+            </span>
             <span
               v-else
               class="tabular-nums"
@@ -288,17 +295,17 @@
     </div>
 
     <!-- 桌面端表格视图 -->
-    <Table :class="isAdmin ? 'hidden md:table table-fixed min-w-[1288px]' : 'hidden md:table table-fixed min-w-[1178px]'">
+    <Table :class="isAdmin ? 'hidden md:table table-fixed min-w-[1304px]' : 'hidden md:table table-fixed min-w-[1218px]'">
       <colgroup v-if="isAdmin">
         <col class="w-[88px]">
         <col class="w-[180px]">
         <col class="w-[190px]">
         <col class="w-[160px]">
         <col class="w-[190px]">
-        <col class="w-[120px]">
+        <col class="w-[108px]">
         <col class="w-[150px]">
-        <col class="w-[120px]">
-        <col class="w-[90px]">
+        <col class="w-[108px]">
+        <col class="w-[130px]">
       </colgroup>
       <colgroup v-else>
         <col class="w-[88px]">
@@ -308,7 +315,7 @@
         <col class="w-[120px]">
         <col class="w-[150px]">
         <col class="w-[120px]">
-        <col class="w-[90px]">
+        <col class="w-[130px]">
       </colgroup>
       <TableHeader>
         <TableRow class="border-b border-border/60 hover:bg-transparent">
@@ -396,7 +403,7 @@
             </template>
           </SortableTableHead>
           <SortableTableHead
-            class="h-12 font-semibold w-[110px] text-center"
+            class="h-12 font-semibold w-[108px] text-center"
             column-key="status"
             :sortable="false"
             align="center"
@@ -417,13 +424,13 @@
           <TableHead class="h-12 font-semibold w-[140px] text-right">
             Tokens
           </TableHead>
-          <TableHead class="h-12 font-semibold w-[100px] text-right">
+          <TableHead class="h-12 font-semibold w-[108px] text-right">
             费用
           </TableHead>
-          <TableHead class="h-12 font-semibold w-[70px] text-right">
+          <TableHead class="h-12 font-semibold w-[130px] text-right">
             <div class="flex flex-col items-end text-xs gap-0.5">
-              <span>首字</span>
-              <span class="text-muted-foreground font-normal">总耗时</span>
+              <span class="whitespace-nowrap">首字/总耗时</span>
+              <span class="text-muted-foreground font-normal">输出速度</span>
             </div>
           </TableHead>
         </TableRow>
@@ -605,7 +612,7 @@
               class="text-muted-foreground text-xs"
             >-</span>
           </TableCell>
-          <TableCell class="text-center py-4 w-[70px]">
+          <TableCell class="text-center py-4 w-[108px]">
             <!-- 优先显示请求状态 -->
             <Badge
               v-if="getDisplayStatus(record) === 'pending'"
@@ -670,7 +677,7 @@
               </div>
             </div>
           </TableCell>
-          <TableCell class="text-right py-4 w-[100px]">
+          <TableCell class="text-right py-4 w-[108px]">
             <div class="flex flex-col items-end text-xs gap-0.5">
               <span class="text-primary font-medium">{{ formatCurrency(record.cost || 0) }}</span>
               <span
@@ -681,7 +688,7 @@
               </span>
             </div>
           </TableCell>
-          <TableCell class="text-right py-4 w-[70px]">
+          <TableCell class="text-right py-4 w-[130px]">
             <!-- pending 状态：只显示增长的总时间 -->
             <div
               v-if="getDisplayStatus(record) === 'pending'"
@@ -717,23 +724,13 @@
             <div
               v-else-if="record.response_time_ms != null || record.first_byte_time_ms != null"
               class="flex flex-col items-end text-xs gap-0.5"
+              :title="getRecordPerformanceTitle(record)"
             >
+              <span class="tabular-nums whitespace-nowrap">{{ formatRecordLatencyPair(record) }}</span>
               <span
-                v-if="record.first_byte_time_ms != null"
-                class="tabular-nums"
-              >{{ (record.first_byte_time_ms / 1000).toFixed(2) }}s</span>
-              <span
-                v-else
-                class="text-muted-foreground"
-              >-</span>
-              <span
-                v-if="record.response_time_ms != null"
-                class="text-muted-foreground tabular-nums"
-              >{{ (record.response_time_ms / 1000).toFixed(2) }}s</span>
-              <span
-                v-else
-                class="text-muted-foreground"
-              >-</span>
+                v-if="getRecordDisplayOutputRate(record) != null"
+                class="text-primary/80 tabular-nums whitespace-nowrap"
+              >{{ formatOutputRate(getRecordDisplayOutputRate(record)) }}</span>
             </div>
             <span
               v-else
@@ -787,6 +784,13 @@ import { RefreshCcw, Search } from 'lucide-vue-next'
 import { formatTokens, formatCurrency } from '@/utils/format'
 import { formatDateTime } from '../composables'
 import { getCacheCreationTokens, getCacheReadTokens, getEffectiveInputTokens } from '../token-normalization'
+import {
+  formatDurationMs,
+  formatOutputRate,
+  getDisplayOutputRate,
+  getGenerationTimeMs,
+  isOutputRateUsingGenerationTime,
+} from '../performance'
 import {
   formatUsageStreamLabel,
   isUsageRecordFailed,
@@ -976,6 +980,27 @@ function getRecordCacheReadTokens(record: UsageRecord): number {
 
 function getRecordCacheCreationTokens(record: UsageRecord): number {
   return getCacheCreationTokens(record)
+}
+
+function getRecordDisplayOutputRate(record: UsageRecord): number | null {
+  return getDisplayOutputRate(record)
+}
+
+function formatRecordLatencyPair(record: UsageRecord): string {
+  const firstByte = formatDurationMs(record.first_byte_time_ms)
+  const total = formatDurationMs(record.response_time_ms)
+  return `${firstByte} / ${total}`
+}
+
+function getRecordPerformanceTitle(record: UsageRecord): string {
+  const outputRate = getRecordDisplayOutputRate(record)
+  const outputRateBasis = isOutputRateUsingGenerationTime(record) ? '首字后生成耗时' : '总耗时'
+  return [
+    `首字: ${formatDurationMs(record.first_byte_time_ms)}`,
+    `总耗时: ${formatDurationMs(record.response_time_ms)}`,
+    `生成耗时: ${formatDurationMs(getGenerationTimeMs(record))}`,
+    `输出速度: ${formatOutputRate(outputRate)} (${outputRateBasis})`,
+  ].join('\n')
 }
 
 function hasPositiveTokens(value: number | null | undefined): boolean {

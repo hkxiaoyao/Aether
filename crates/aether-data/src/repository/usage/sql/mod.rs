@@ -4698,6 +4698,17 @@ WITH filtered_usage AS (
     "usage".response_time_ms IS NOT NULL AS has_response_time,
     "usage".first_byte_time_ms IS NOT NULL AS has_first_byte_time,
     CASE
+      WHEN COALESCE("usage".upstream_is_stream, "usage".is_stream, false)
+      THEN CASE
+        WHEN "usage".response_time_ms IS NOT NULL
+             AND "usage".first_byte_time_ms IS NOT NULL
+             AND GREATEST(COALESCE("usage".response_time_ms, 0), 0) > GREATEST(COALESCE("usage".first_byte_time_ms, 0), 0)
+        THEN GREATEST(COALESCE("usage".response_time_ms, 0), 0) - GREATEST(COALESCE("usage".first_byte_time_ms, 0), 0)
+        ELSE 0
+      END
+      ELSE GREATEST(COALESCE("usage".response_time_ms, 0), 0)
+    END AS output_tps_duration_ms,
+    CASE
       WHEN lower(COALESCE("usage".status, '')) IN ('completed', 'success', 'ok', 'billed', 'settled')
            AND ("usage".status_code IS NULL OR "usage".status_code < 400)
       THEN 1
@@ -4724,17 +4735,17 @@ SELECT
   COALESCE(SUM(success_flag), 0)::BIGINT AS success_count,
   CASE
     WHEN COALESCE(SUM(CASE
-      WHEN success_flag = 1 AND response_time_ms > 0 AND output_tokens > 0
-      THEN response_time_ms
+      WHEN success_flag = 1 AND output_tps_duration_ms > 0 AND output_tokens > 0
+      THEN output_tps_duration_ms
       ELSE 0
     END), 0) > 0
     THEN COALESCE(SUM(CASE
-      WHEN success_flag = 1 AND response_time_ms > 0 AND output_tokens > 0
+      WHEN success_flag = 1 AND output_tps_duration_ms > 0 AND output_tokens > 0
       THEN output_tokens
       ELSE 0
     END), 0)::DOUBLE PRECISION * 1000.0 / COALESCE(SUM(CASE
-      WHEN success_flag = 1 AND response_time_ms > 0 AND output_tokens > 0
-      THEN response_time_ms
+      WHEN success_flag = 1 AND output_tps_duration_ms > 0 AND output_tokens > 0
+      THEN output_tps_duration_ms
       ELSE 0
     END), 0)::DOUBLE PRECISION
     ELSE NULL
@@ -4771,6 +4782,17 @@ WITH filtered_usage AS (
     "usage".response_time_ms IS NOT NULL AS has_response_time,
     "usage".first_byte_time_ms IS NOT NULL AS has_first_byte_time,
     CASE
+      WHEN COALESCE("usage".upstream_is_stream, "usage".is_stream, false)
+      THEN CASE
+        WHEN "usage".response_time_ms IS NOT NULL
+             AND "usage".first_byte_time_ms IS NOT NULL
+             AND GREATEST(COALESCE("usage".response_time_ms, 0), 0) > GREATEST(COALESCE("usage".first_byte_time_ms, 0), 0)
+        THEN GREATEST(COALESCE("usage".response_time_ms, 0), 0) - GREATEST(COALESCE("usage".first_byte_time_ms, 0), 0)
+        ELSE 0
+      END
+      ELSE GREATEST(COALESCE("usage".response_time_ms, 0), 0)
+    END AS output_tps_duration_ms,
+    CASE
       WHEN lower(COALESCE("usage".status, '')) IN ('completed', 'success', 'ok', 'billed', 'settled')
            AND ("usage".status_code IS NULL OR "usage".status_code < 400)
       THEN 1
@@ -4800,17 +4822,17 @@ SELECT
   COALESCE(SUM(output_tokens), 0)::BIGINT AS output_tokens,
   CASE
     WHEN COALESCE(SUM(CASE
-      WHEN success_flag = 1 AND response_time_ms > 0 AND output_tokens > 0
-      THEN response_time_ms
+      WHEN success_flag = 1 AND output_tps_duration_ms > 0 AND output_tokens > 0
+      THEN output_tps_duration_ms
       ELSE 0
     END), 0) > 0
     THEN COALESCE(SUM(CASE
-      WHEN success_flag = 1 AND response_time_ms > 0 AND output_tokens > 0
+      WHEN success_flag = 1 AND output_tps_duration_ms > 0 AND output_tokens > 0
       THEN output_tokens
       ELSE 0
     END), 0)::DOUBLE PRECISION * 1000.0 / COALESCE(SUM(CASE
-      WHEN success_flag = 1 AND response_time_ms > 0 AND output_tokens > 0
-      THEN response_time_ms
+      WHEN success_flag = 1 AND output_tps_duration_ms > 0 AND output_tokens > 0
+      THEN output_tps_duration_ms
       ELSE 0
     END), 0)::DOUBLE PRECISION
     ELSE NULL
@@ -4832,7 +4854,7 @@ SELECT
     ELSE NULL
   END AS p90_first_byte_time_ms,
   COALESCE(SUM(CASE
-    WHEN success_flag = 1 AND response_time_ms > 0 AND output_tokens > 0
+    WHEN success_flag = 1 AND output_tps_duration_ms > 0 AND output_tokens > 0
     THEN 1
     ELSE 0
   END), 0)::BIGINT AS tps_sample_count,
@@ -4886,6 +4908,17 @@ ORDER BY request_count DESC, provider_id ASC
     "usage".response_time_ms IS NOT NULL AS has_response_time,
     "usage".first_byte_time_ms IS NOT NULL AS has_first_byte_time,
     CASE
+      WHEN COALESCE("usage".upstream_is_stream, "usage".is_stream, false)
+      THEN CASE
+        WHEN "usage".response_time_ms IS NOT NULL
+             AND "usage".first_byte_time_ms IS NOT NULL
+             AND GREATEST(COALESCE("usage".response_time_ms, 0), 0) > GREATEST(COALESCE("usage".first_byte_time_ms, 0), 0)
+        THEN GREATEST(COALESCE("usage".response_time_ms, 0), 0) - GREATEST(COALESCE("usage".first_byte_time_ms, 0), 0)
+        ELSE 0
+      END
+      ELSE GREATEST(COALESCE("usage".response_time_ms, 0), 0)
+    END AS output_tps_duration_ms,
+    CASE
       WHEN lower(COALESCE("usage".status, '')) IN ('completed', 'success', 'ok', 'billed', 'settled')
            AND ("usage".status_code IS NULL OR "usage".status_code < 400)
       THEN 1
@@ -4921,17 +4954,17 @@ SELECT
   COALESCE(SUM(output_tokens), 0)::BIGINT AS output_tokens,
   CASE
     WHEN COALESCE(SUM(CASE
-      WHEN success_flag = 1 AND response_time_ms > 0 AND output_tokens > 0
-      THEN response_time_ms
+      WHEN success_flag = 1 AND output_tps_duration_ms > 0 AND output_tokens > 0
+      THEN output_tps_duration_ms
       ELSE 0
     END), 0) > 0
     THEN COALESCE(SUM(CASE
-      WHEN success_flag = 1 AND response_time_ms > 0 AND output_tokens > 0
+      WHEN success_flag = 1 AND output_tps_duration_ms > 0 AND output_tokens > 0
       THEN output_tokens
       ELSE 0
     END), 0)::DOUBLE PRECISION * 1000.0 / COALESCE(SUM(CASE
-      WHEN success_flag = 1 AND response_time_ms > 0 AND output_tokens > 0
-      THEN response_time_ms
+      WHEN success_flag = 1 AND output_tps_duration_ms > 0 AND output_tokens > 0
+      THEN output_tps_duration_ms
       ELSE 0
     END), 0)::DOUBLE PRECISION
     ELSE NULL
