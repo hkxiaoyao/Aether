@@ -17,6 +17,7 @@ use axum::routing::{any, get};
 use axum::{extract::Request, Router};
 use chrono::Utc;
 use http::StatusCode;
+use serde_json::json;
 
 use super::super::{
     build_router_with_state, sample_currently_usable_auth_snapshot, sample_provider, start_server,
@@ -876,6 +877,7 @@ async fn gateway_handles_admin_stats_provider_performance_locally_with_trusted_a
             );
             row.response_time_ms = Some((index * 100) as u64);
             row.first_byte_time_ms = Some((index * 10) as u64);
+            row.request_metadata = Some(json!({ "upstream_is_stream": true }));
             row
         })
         .collect::<Vec<_>>();
@@ -955,9 +957,12 @@ async fn gateway_handles_admin_stats_provider_performance_locally_with_trusted_a
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
     assert_eq!(payload["summary"]["request_count"], 12);
     assert_eq!(payload["summary"]["success_rate"], 91.67);
-    assert_eq!(payload["summary"]["avg_output_tps"], 18.46);
+    assert_eq!(payload["summary"]["avg_output_tps"], 20.17);
     assert_eq!(payload["summary"]["avg_first_byte_time_ms"], 55.0);
     assert_eq!(payload["summary"]["avg_response_time_ms"], 590.91);
+    assert_eq!(payload["summary"]["p99_response_time_ms"], 1000);
+    assert_eq!(payload["summary"]["response_time_sample_count"], 11);
+    assert_eq!(payload["summary"]["slow_request_count"], 0);
 
     assert_eq!(payload["providers"].as_array().map(Vec::len), Some(2));
     assert_eq!(payload["providers"][0]["provider_id"], "provider-1");
@@ -967,13 +972,17 @@ async fn gateway_handles_admin_stats_provider_performance_locally_with_trusted_a
     assert_eq!(payload["providers"][0]["error_count"], 1);
     assert_eq!(payload["providers"][0]["success_rate"], 90.91);
     assert_eq!(payload["providers"][0]["output_tokens"], 199);
-    assert_eq!(payload["providers"][0]["avg_output_tps"], 18.18);
+    assert_eq!(payload["providers"][0]["avg_output_tps"], 20.2);
     assert_eq!(payload["providers"][0]["avg_first_byte_time_ms"], 55.0);
     assert_eq!(payload["providers"][0]["avg_response_time_ms"], 550.0);
     assert_eq!(payload["providers"][0]["p90_response_time_ms"], 910);
+    assert_eq!(payload["providers"][0]["p99_response_time_ms"], 991);
     assert_eq!(payload["providers"][0]["p90_first_byte_time_ms"], 91);
+    assert_eq!(payload["providers"][0]["p99_first_byte_time_ms"], 99);
     assert_eq!(payload["providers"][0]["tps_sample_count"], 10);
+    assert_eq!(payload["providers"][0]["response_time_sample_count"], 10);
     assert_eq!(payload["providers"][0]["first_byte_sample_count"], 10);
+    assert_eq!(payload["providers"][0]["slow_request_count"], 0);
 
     assert_eq!(payload["providers"][1]["provider_id"], "provider-2");
     assert_eq!(payload["providers"][1]["provider"], "Anthropic");
@@ -990,8 +999,9 @@ async fn gateway_handles_admin_stats_provider_performance_locally_with_trusted_a
     assert_eq!(payload["timeline"].as_array().map(Vec::len), Some(2));
     assert_eq!(payload["timeline"][0]["date"], "2024-03-21T05:00:00+00:00");
     assert_eq!(payload["timeline"][0]["provider_id"], "provider-1");
-    assert_eq!(payload["timeline"][0]["avg_output_tps"], 18.18);
+    assert_eq!(payload["timeline"][0]["avg_output_tps"], 20.2);
     assert_eq!(payload["timeline"][0]["success_rate"], 90.91);
+    assert_eq!(payload["timeline"][0]["slow_request_count"], 0);
     assert_eq!(payload["timeline"][1]["provider_id"], "provider-2");
     assert_eq!(
         payload["timeline"][1]["avg_first_byte_time_ms"],
@@ -1235,6 +1245,7 @@ async fn gateway_handles_admin_stats_cost_savings_locally_with_trusted_admin_pri
     usage_row.cache_creation_cost_usd = 0.001;
     usage_row.cache_read_cost_usd = 0.002;
     usage_row.output_price_per_1m = Some(50.0);
+    usage_row.request_metadata = Some(json!({ "input_price_per_1m": 30.0 }));
 
     let usage_repository = Arc::new(InMemoryUsageReadRepository::seed(vec![usage_row]));
 
@@ -1261,8 +1272,8 @@ async fn gateway_handles_admin_stats_cost_savings_locally_with_trusted_admin_pri
     assert_eq!(payload["cache_read_tokens"], 100);
     assert_eq!(payload["cache_read_cost"], 0.002);
     assert_eq!(payload["cache_creation_cost"], 0.001);
-    assert_eq!(payload["estimated_full_cost"], 0.005);
-    assert_eq!(payload["cache_savings"], 0.003);
+    assert_eq!(payload["estimated_full_cost"], 0.003);
+    assert_eq!(payload["cache_savings"], 0.001);
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();

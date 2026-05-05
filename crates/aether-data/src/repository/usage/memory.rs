@@ -618,6 +618,36 @@ fn usage_matches_provider_performance_query(
     {
         return None;
     }
+    if let Some(provider_id) = query.provider_id.as_deref() {
+        if item.provider_id.as_deref() != Some(provider_id) {
+            return None;
+        }
+    }
+    if let Some(model) = query.model.as_deref() {
+        if item.model != model {
+            return None;
+        }
+    }
+    if let Some(api_format) = query.api_format.as_deref() {
+        if item.api_format.as_deref() != Some(api_format) {
+            return None;
+        }
+    }
+    if let Some(endpoint_kind) = query.endpoint_kind.as_deref() {
+        if item.endpoint_kind.as_deref() != Some(endpoint_kind) {
+            return None;
+        }
+    }
+    if let Some(is_stream) = query.is_stream {
+        if item.is_stream != is_stream {
+            return None;
+        }
+    }
+    if let Some(has_format_conversion) = query.has_format_conversion {
+        if item.has_format_conversion != has_format_conversion {
+            return None;
+        }
+    }
     usage_provider_performance_identity(item)
 }
 
@@ -900,6 +930,32 @@ fn usage_is_success(item: &StoredRequestUsageAudit) -> bool {
         item.status.as_str(),
         "completed" | "success" | "ok" | "billed" | "settled"
     ) && item.status_code.is_none_or(|code| code < 400)
+}
+
+fn usage_output_tps_uses_generation_time(item: &StoredRequestUsageAudit) -> bool {
+    item.request_metadata
+        .as_ref()
+        .and_then(Value::as_object)
+        .and_then(|metadata| metadata.get("upstream_is_stream"))
+        .and_then(Value::as_bool)
+        .unwrap_or(item.is_stream)
+}
+
+fn usage_output_tps_duration_ms(item: &StoredRequestUsageAudit) -> Option<u64> {
+    let response_time_ms = item.response_time_ms?;
+    if response_time_ms == 0 {
+        return None;
+    }
+
+    if !usage_output_tps_uses_generation_time(item) {
+        return Some(response_time_ms);
+    }
+
+    let first_byte_time_ms = item.first_byte_time_ms?;
+    if first_byte_time_ms >= response_time_ms {
+        return None;
+    }
+    Some(response_time_ms - first_byte_time_ms)
 }
 
 fn usage_provider_display_name(item: &StoredRequestUsageAudit) -> Option<String> {
@@ -1703,12 +1759,19 @@ impl UsageReadRepository for InMemoryUsageReadRepository {
             response_time_sample_count: u64,
             response_times: Vec<u64>,
             first_byte_times: Vec<u64>,
+            slow_request_count: u64,
         }
 
         impl ProviderPerformanceBucket {
-            fn add(&mut self, item: &StoredRequestUsageAudit) {
+            fn add(&mut self, item: &StoredRequestUsageAudit, slow_threshold_ms: u64) {
                 self.request_count = self.request_count.saturating_add(1);
                 self.output_tokens = self.output_tokens.saturating_add(item.output_tokens);
+                if item
+                    .response_time_ms
+                    .is_some_and(|value| value >= slow_threshold_ms)
+                {
+                    self.slow_request_count = self.slow_request_count.saturating_add(1);
+                }
                 if !usage_is_success(item) {
                     return;
                 }
@@ -1720,13 +1783,15 @@ impl UsageReadRepository for InMemoryUsageReadRepository {
                     self.response_time_sample_count =
                         self.response_time_sample_count.saturating_add(1);
                     self.response_times.push(response_time_ms);
-                    if response_time_ms > 0 && item.output_tokens > 0 {
-                        self.tps_output_tokens =
-                            self.tps_output_tokens.saturating_add(item.output_tokens);
-                        self.tps_response_time_ms_sum = self
-                            .tps_response_time_ms_sum
-                            .saturating_add(response_time_ms);
-                        self.tps_sample_count = self.tps_sample_count.saturating_add(1);
+                    if let Some(output_tps_duration_ms) = usage_output_tps_duration_ms(item) {
+                        if item.output_tokens > 0 {
+                            self.tps_output_tokens =
+                                self.tps_output_tokens.saturating_add(item.output_tokens);
+                            self.tps_response_time_ms_sum = self
+                                .tps_response_time_ms_sum
+                                .saturating_add(output_tps_duration_ms);
+                            self.tps_sample_count = self.tps_sample_count.saturating_add(1);
+                        }
                     }
                 }
                 if let Some(first_byte_time_ms) = item.first_byte_time_ms {
@@ -1771,14 +1836,16 @@ impl UsageReadRepository for InMemoryUsageReadRepository {
             else {
                 continue;
             };
-            summary_bucket.add(item);
+            summary_bucket.add(item, query.slow_threshold_ms);
             let bucket = grouped.entry(provider_id).or_default();
             if bucket.provider.is_empty() {
                 bucket.provider = provider;
             }
-            bucket.add(item);
+            bucket.add(item, query.slow_threshold_ms);
         }
 
+        let mut summary_response_times = summary_bucket.response_times.clone();
+        let mut summary_first_byte_times = summary_bucket.first_byte_times.clone();
         let summary = StoredUsageProviderPerformanceSummary {
             request_count: summary_bucket.request_count,
             success_count: summary_bucket.success_count,
@@ -1794,14 +1861,25 @@ impl UsageReadRepository for InMemoryUsageReadRepository {
                 summary_bucket.response_time_ms_sum,
                 summary_bucket.response_time_sample_count,
             ),
+            p90_response_time_ms: usage_percentile_cont(&mut summary_response_times, 0.9),
+            p99_response_time_ms: usage_percentile_cont(&mut summary_response_times, 0.99),
+            p90_first_byte_time_ms: usage_percentile_cont(&mut summary_first_byte_times, 0.9),
+            p99_first_byte_time_ms: usage_percentile_cont(&mut summary_first_byte_times, 0.99),
+            tps_sample_count: summary_bucket.tps_sample_count,
+            response_time_sample_count: summary_bucket.response_time_sample_count,
+            first_byte_sample_count: summary_bucket.first_byte_sample_count,
+            slow_request_count: summary_bucket.slow_request_count,
         };
 
         let mut providers = grouped
             .into_iter()
             .map(|(provider_id, mut bucket)| {
                 let p90_response_time_ms = usage_percentile_cont(&mut bucket.response_times, 0.9);
+                let p99_response_time_ms = usage_percentile_cont(&mut bucket.response_times, 0.99);
                 let p90_first_byte_time_ms =
                     usage_percentile_cont(&mut bucket.first_byte_times, 0.9);
+                let p99_first_byte_time_ms =
+                    usage_percentile_cont(&mut bucket.first_byte_times, 0.99);
                 StoredUsageProviderPerformanceProviderRow {
                     provider_id,
                     provider: bucket.provider,
@@ -1821,9 +1899,13 @@ impl UsageReadRepository for InMemoryUsageReadRepository {
                         bucket.response_time_sample_count,
                     ),
                     p90_response_time_ms,
+                    p99_response_time_ms,
                     p90_first_byte_time_ms,
+                    p99_first_byte_time_ms,
                     tps_sample_count: bucket.tps_sample_count,
+                    response_time_sample_count: bucket.response_time_sample_count,
                     first_byte_sample_count: bucket.first_byte_sample_count,
+                    slow_request_count: bucket.slow_request_count,
                 }
             })
             .collect::<Vec<_>>();
@@ -1860,7 +1942,7 @@ impl UsageReadRepository for InMemoryUsageReadRepository {
             if bucket.provider.is_empty() {
                 bucket.provider = provider;
             }
-            bucket.add(item);
+            bucket.add(item, query.slow_threshold_ms);
         }
 
         let timeline = timeline_grouped
@@ -1885,6 +1967,7 @@ impl UsageReadRepository for InMemoryUsageReadRepository {
                         bucket.response_time_ms_sum,
                         bucket.response_time_sample_count,
                     ),
+                    slow_request_count: bucket.slow_request_count,
                 },
             )
             .collect();
@@ -1915,7 +1998,7 @@ impl UsageReadRepository for InMemoryUsageReadRepository {
                 .saturating_add(item.cache_read_input_tokens);
             summary.cache_read_cost_usd += item.cache_read_cost_usd;
             summary.cache_creation_cost_usd += item.cache_creation_cost_usd;
-            summary.estimated_full_cost_usd += item.settlement_output_price_per_1m().unwrap_or(0.0)
+            summary.estimated_full_cost_usd += item.settlement_input_price_per_1m().unwrap_or(0.0)
                 * item.cache_read_input_tokens as f64
                 / 1_000_000.0;
         }
@@ -4822,6 +4905,7 @@ mod tests {
         second.output_tokens = 40;
         second.response_time_ms = Some(1000);
         second.first_byte_time_ms = Some(200);
+        second.request_metadata = Some(json!({ "upstream_is_stream": true }));
 
         let mut failed = sample_usage("req-provider-perf-failed", 1_711_000_400);
         failed.output_tokens = 999;
@@ -4846,13 +4930,20 @@ mod tests {
                 granularity: UsageTimeSeriesGranularity::Hour,
                 tz_offset_minutes: 0,
                 limit: 1,
+                provider_id: None,
+                model: None,
+                api_format: None,
+                endpoint_kind: None,
+                is_stream: None,
+                has_format_conversion: None,
+                slow_threshold_ms: 10_000,
             })
             .await
             .expect("provider performance should summarize");
 
         assert_eq!(summary.summary.request_count, 4);
         assert_eq!(summary.summary.success_count, 3);
-        assert!((summary.summary.avg_output_tps.expect("summary tps") - 18.571_428).abs() < 0.001);
+        assert!((summary.summary.avg_output_tps.expect("summary tps") - 19.117_647).abs() < 0.001);
         assert_eq!(summary.summary.avg_first_byte_time_ms, Some(150.0));
         assert!(
             (summary
@@ -4870,7 +4961,7 @@ mod tests {
         assert_eq!(provider.request_count, 3);
         assert_eq!(provider.success_count, 2);
         assert_eq!(provider.output_tokens, 1099);
-        assert_eq!(provider.avg_output_tps, Some(25.0));
+        assert!((provider.avg_output_tps.expect("provider tps") - 26.315_789).abs() < 0.001);
         assert_eq!(provider.avg_first_byte_time_ms, Some(150.0));
         assert_eq!(provider.avg_response_time_ms, Some(2000.0));
         assert_eq!(provider.p90_response_time_ms, None);
@@ -4880,6 +4971,8 @@ mod tests {
         assert_eq!(summary.timeline.len(), 1);
         assert_eq!(summary.timeline[0].date, "2024-03-21T05:00:00+00:00");
         assert_eq!(summary.timeline[0].provider_id, "provider-1");
-        assert_eq!(summary.timeline[0].avg_output_tps, Some(25.0));
+        assert!(
+            (summary.timeline[0].avg_output_tps.expect("timeline tps") - 26.315_789).abs() < 0.001
+        );
     }
 }

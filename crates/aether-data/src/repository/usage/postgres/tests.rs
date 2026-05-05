@@ -402,6 +402,19 @@ fn usage_sql_summarize_usage_leaderboard_supports_daily_aggregates() {
 }
 
 #[test]
+fn usage_sql_aggregate_usage_audits_supports_daily_model_and_provider_aggregates() {
+    let source = include_str!("mod.rs");
+    assert!(source.contains("aggregate_usage_audits_from_daily_aggregates"));
+    assert!(source.contains("stats_user_daily_model"));
+    assert!(source.contains("stats_user_daily_provider"));
+    assert!(source.contains("stats_user_daily_api_format"));
+    assert!(source.contains("absorb_usage_audit_aggregation_rows"));
+    assert!(
+        source.contains("split_dashboard_daily_aggregate_range(start_utc, end_utc, cutoff_utc)")
+    );
+}
+
+#[test]
 fn usage_sql_summarize_total_tokens_by_api_key_ids_supports_daily_aggregates() {
     let source = include_str!("mod.rs");
     assert!(source.contains("FROM stats_daily_api_key"));
@@ -428,6 +441,33 @@ fn usage_sql_raw_aggregates_use_canonical_billing_facts() {
         .contains("FROM usage_billing_facts AS \"usage\""));
     assert!(super::SUMMARIZE_USAGE_TOTALS_BY_USER_IDS_SQL
         .contains("FROM usage_billing_facts AS \"usage\""));
+}
+
+#[test]
+fn usage_sql_provider_performance_reads_upstream_stream_from_billing_facts() {
+    let source = include_str!("mod.rs");
+    assert!(source.contains("\"usage\".upstream_is_stream"));
+    assert!(
+        !source.contains("usage_base.request_metadata->>'upstream_is_stream'"),
+        "provider performance queries should not rejoin public.usage to resolve upstream stream mode"
+    );
+    assert!(
+        !source.contains("LEFT JOIN public.usage AS usage_base"),
+        "provider performance queries should stay on usage_billing_facts to avoid an extra usage scan"
+    );
+}
+
+#[test]
+fn usage_billing_facts_projects_upstream_stream_mode() {
+    let migration = include_str!(
+        "../../../../migrations/postgres/20260505130000_project_upstream_stream_in_usage_billing_facts.sql"
+    );
+
+    assert!(migration.contains("AS upstream_is_stream"));
+    assert!(migration.contains("COALESCE(usage_rows.upstream_is_stream"));
+    assert!(migration.contains("COALESCE(usage_rows.is_stream, FALSE)"));
+    assert!(migration.contains("ADD COLUMN IF NOT EXISTS upstream_is_stream boolean"));
+    assert!(migration.contains("request_metadata->>'upstream_is_stream'"));
 }
 
 #[test]
@@ -562,6 +602,14 @@ fn usage_sql_insert_values_aligns_request_metadata_and_timestamps() {
     assert!(super::UPSERT_SQL.contains("\n  $51::json,\n  $52,\n  $53::json,\n  CASE"));
     assert!(super::UPSERT_SQL.contains("WHEN $54 IS NULL THEN NULL"));
     assert!(super::UPSERT_SQL.contains("TO_TIMESTAMP($55::double precision)"));
+}
+
+#[test]
+fn usage_sql_upsert_materializes_upstream_stream_mode() {
+    assert!(super::UPSERT_SQL.contains("upstream_is_stream,"));
+    assert!(super::UPSERT_SQL.contains("$53::json->>'upstream_is_stream'"));
+    assert!(super::UPSERT_SQL.contains("COALESCE($21, FALSE)"));
+    assert!(super::UPSERT_SQL.contains("upstream_is_stream = CASE"));
 }
 
 #[test]
