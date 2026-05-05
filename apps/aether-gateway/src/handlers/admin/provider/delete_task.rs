@@ -3,7 +3,9 @@ use crate::handlers::admin::provider::shared::support::{
     ADMIN_PROVIDER_MAPPING_PREVIEW_MAX_KEYS, ADMIN_PROVIDER_MAPPING_PREVIEW_MAX_MODELS,
 };
 use crate::handlers::admin::request::AdminAppState;
-use crate::handlers::admin::shared::{decrypt_catalog_secret_with_fallbacks, json_string_list};
+use crate::handlers::admin::shared::{
+    decrypt_catalog_secret_with_fallbacks, json_string_list, take_secret_prefix, take_secret_suffix,
+};
 use crate::handlers::public::matches_model_mapping_for_models;
 use crate::{GatewayError, LocalProviderDeleteTaskState};
 use aether_data_contracts::repository::global_models::{
@@ -175,14 +177,15 @@ pub(crate) fn mapping_preview_masked_catalog_api_key(
 
     decrypt_catalog_secret_with_fallbacks(state.encryption_key(), ciphertext)
         .map(|value| {
-            if value.len() > 8 {
+            let char_count = value.chars().count();
+            if char_count > 8 {
                 format!(
                     "{}***{}",
-                    &value[..4],
-                    &value[value.len().saturating_sub(4)..]
+                    take_secret_prefix(&value, 4),
+                    take_secret_suffix(&value, 4)
                 )
-            } else if value.len() >= 2 {
-                format!("{}***", &value[..2])
+            } else if char_count >= 2 {
+                format!("{}***", take_secret_prefix(&value, 2))
             } else {
                 "***".to_string()
             }

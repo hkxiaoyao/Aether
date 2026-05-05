@@ -96,7 +96,7 @@ pub(crate) enum LocalExecutionEffect<'a> {
 }
 
 struct PoolFeedbackContext {
-    runner: aether_data::redis::RedisKvRunner,
+    runner: aether_data::driver::redis::RedisKvRunner,
     pool_config: AdminProviderPoolConfig,
     sticky_session_token: Option<String>,
 }
@@ -815,7 +815,7 @@ mod tests {
             provider_api_format: "openai:chat".to_string(),
             model_name: Some("gpt-5".to_string()),
             proxy: None,
-            tls_profile: None,
+            transport_profile: None,
             timeouts: None,
         }
     }
@@ -875,7 +875,7 @@ mod tests {
             provider_api_format: "openai:responses".to_string(),
             model_name: Some("gpt-5.4".to_string()),
             proxy: None,
-            tls_profile: None,
+            transport_profile: None,
             timeouts: None,
         }
     }

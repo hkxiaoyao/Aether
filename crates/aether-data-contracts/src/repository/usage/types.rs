@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use serde_json::Value;
 
 /// Joined usage read model assembled from the accounting row plus the newer audit/snapshot
@@ -949,6 +950,60 @@ pub struct StoredUsagePerformancePercentilesRow {
     pub p99_first_byte_time_ms: Option<u64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct UsageProviderPerformanceQuery {
+    pub created_from_unix_secs: u64,
+    pub created_until_unix_secs: u64,
+    pub granularity: UsageTimeSeriesGranularity,
+    pub tz_offset_minutes: i32,
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+pub struct StoredUsageProviderPerformanceSummary {
+    pub request_count: u64,
+    pub success_count: u64,
+    pub avg_output_tps: Option<f64>,
+    pub avg_first_byte_time_ms: Option<f64>,
+    pub avg_response_time_ms: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+pub struct StoredUsageProviderPerformanceProviderRow {
+    pub provider_id: String,
+    pub provider: String,
+    pub request_count: u64,
+    pub success_count: u64,
+    pub output_tokens: u64,
+    pub avg_output_tps: Option<f64>,
+    pub avg_first_byte_time_ms: Option<f64>,
+    pub avg_response_time_ms: Option<f64>,
+    pub p90_response_time_ms: Option<u64>,
+    pub p90_first_byte_time_ms: Option<u64>,
+    pub tps_sample_count: u64,
+    pub first_byte_sample_count: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+pub struct StoredUsageProviderPerformanceTimelineRow {
+    pub date: String,
+    pub provider_id: String,
+    pub provider: String,
+    pub request_count: u64,
+    pub success_count: u64,
+    pub output_tokens: u64,
+    pub avg_output_tps: Option<f64>,
+    pub avg_first_byte_time_ms: Option<f64>,
+    pub avg_response_time_ms: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+pub struct StoredUsageProviderPerformance {
+    pub summary: StoredUsageProviderPerformanceSummary,
+    pub providers: Vec<StoredUsageProviderPerformanceProviderRow>,
+    pub timeline: Vec<StoredUsageProviderPerformanceTimelineRow>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct UsageCostSavingsSummaryQuery {
     pub created_from_unix_secs: u64,
@@ -1364,6 +1419,11 @@ pub trait UsageReadRepository: Send + Sync {
         query: &UsagePerformancePercentilesQuery,
     ) -> Result<Vec<StoredUsagePerformancePercentilesRow>, crate::DataLayerError>;
 
+    async fn summarize_usage_provider_performance(
+        &self,
+        query: &UsageProviderPerformanceQuery,
+    ) -> Result<StoredUsageProviderPerformance, crate::DataLayerError>;
+
     async fn summarize_usage_cost_savings(
         &self,
         query: &UsageCostSavingsSummaryQuery,
@@ -1568,11 +1628,56 @@ pub trait UsageWriteRepository: Send + Sync {
     async fn rebuild_api_key_usage_stats(&self) -> Result<u64, crate::DataLayerError>;
 
     async fn rebuild_provider_api_key_usage_stats(&self) -> Result<u64, crate::DataLayerError>;
+
+    async fn cleanup_stale_pending_requests(
+        &self,
+        cutoff_unix_secs: u64,
+        now_unix_secs: u64,
+        timeout_minutes: u64,
+        batch_size: usize,
+    ) -> Result<PendingUsageCleanupSummary, crate::DataLayerError> {
+        let _ = (cutoff_unix_secs, now_unix_secs, timeout_minutes, batch_size);
+        Ok(PendingUsageCleanupSummary::default())
+    }
+
+    async fn cleanup_usage(
+        &self,
+        window: &UsageCleanupWindow,
+        batch_size: usize,
+        auto_delete_expired_keys: bool,
+    ) -> Result<UsageCleanupSummary, crate::DataLayerError> {
+        let _ = (window, batch_size, auto_delete_expired_keys);
+        Ok(UsageCleanupSummary::default())
+    }
 }
 
 pub trait UsageRepository: UsageReadRepository + UsageWriteRepository + Send + Sync {}
 
 impl<T> UsageRepository for T where T: UsageReadRepository + UsageWriteRepository + Send + Sync {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PendingUsageCleanupSummary {
+    pub failed: usize,
+    pub recovered: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub struct UsageCleanupSummary {
+    pub body_externalized: usize,
+    pub legacy_body_refs_migrated: usize,
+    pub body_cleaned: usize,
+    pub header_cleaned: usize,
+    pub keys_cleaned: usize,
+    pub records_deleted: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct UsageCleanupWindow {
+    pub detail_cutoff: DateTime<Utc>,
+    pub compressed_cutoff: DateTime<Utc>,
+    pub header_cutoff: DateTime<Utc>,
+    pub log_cutoff: DateTime<Utc>,
+}
 
 fn parse_u64(value: i32, field_name: &str) -> Result<u64, crate::DataLayerError> {
     u64::try_from(value).map_err(|_| {
