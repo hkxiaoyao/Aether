@@ -102,6 +102,29 @@ pub(crate) fn encrypt_catalog_secret_with_fallbacks(
     encrypt_python_fernet_plaintext(encryption_key.as_ref(), plaintext).ok()
 }
 
+pub(crate) fn take_secret_prefix(value: &str, prefix_chars: usize) -> &str {
+    let end = value
+        .char_indices()
+        .nth(prefix_chars)
+        .map(|(index, _)| index)
+        .unwrap_or(value.len());
+    &value[..end]
+}
+
+pub(crate) fn take_secret_suffix(value: &str, suffix_chars: usize) -> &str {
+    if suffix_chars == 0 {
+        return &value[value.len()..];
+    }
+
+    let start = value
+        .char_indices()
+        .rev()
+        .nth(suffix_chars - 1)
+        .map(|(index, _)| index)
+        .unwrap_or(0);
+    &value[start..]
+}
+
 pub(crate) fn masked_catalog_api_key(state: &AppState, key: &StoredProviderCatalogKey) -> String {
     match key.auth_type.trim() {
         "service_account" | "vertex_ai" => "[Service Account]".to_string(),
@@ -117,13 +140,13 @@ pub(crate) fn masked_catalog_api_key(state: &AppState, key: &StoredProviderCatal
             };
             decrypt_catalog_secret_with_fallbacks(state.encryption_key(), ciphertext)
                 .map(|value| {
-                    if value.len() <= 12 {
+                    if value.chars().count() <= 12 {
                         format!("{value}***")
                     } else {
                         format!(
                             "{}***{}",
-                            &value[..8],
-                            &value[value.len().saturating_sub(4)..]
+                            take_secret_prefix(&value, 8),
+                            take_secret_suffix(&value, 4)
                         )
                     }
                 })
@@ -1619,6 +1642,39 @@ mod tests {
             None,
         )
         .expect("key transport should build")
+    }
+
+    #[test]
+    fn masked_catalog_api_key_handles_unicode_plaintext_without_panicking() {
+        let state = AppState::new().expect("gateway should build");
+        let encrypted_api_key =
+            encrypt_python_fernet_plaintext(DEVELOPMENT_ENCRYPTION_KEY, "测试-密钥-1234567890")
+                .expect("api key ciphertext should build");
+        let key = StoredProviderCatalogKey::new(
+            "key-unicode".to_string(),
+            "provider-test".to_string(),
+            "default".to_string(),
+            "api_key".to_string(),
+            None,
+            true,
+        )
+        .expect("key should build")
+        .with_transport_fields(
+            Some(json!(["openai:chat"])),
+            encrypted_api_key,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("key transport should build");
+
+        let masked = masked_catalog_api_key(&state, &key);
+        assert!(masked.contains("***"));
+        assert_ne!(masked, "***ERROR***");
     }
 
     #[test]

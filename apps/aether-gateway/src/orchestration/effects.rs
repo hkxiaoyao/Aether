@@ -93,7 +93,7 @@ pub(crate) enum LocalExecutionEffect<'a> {
 }
 
 struct PoolFeedbackContext {
-    runner: aether_data::redis::RedisKvRunner,
+    runner: aether_data::driver::redis::RedisKvRunner,
     pool_config: AdminProviderPoolConfig,
     sticky_session_token: Option<String>,
 }

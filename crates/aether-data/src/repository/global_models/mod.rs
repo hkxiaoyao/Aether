@@ -1,5 +1,7 @@
 mod memory;
-mod sql;
+mod mysql;
+mod postgres;
+mod sqlite;
 
 #[allow(unused_imports)]
 pub(crate) use aether_data_contracts::repository::global_models::{
@@ -11,4 +13,6 @@ pub(crate) use aether_data_contracts::repository::global_models::{
     StoredPublicGlobalModelPage, UpdateAdminGlobalModelRecord, UpsertAdminProviderModelRecord,
 };
 pub use memory::InMemoryGlobalModelReadRepository;
-pub use sql::SqlxGlobalModelReadRepository;
+pub use mysql::MysqlGlobalModelReadRepository;
+pub use postgres::SqlxGlobalModelReadRepository;
+pub use sqlite::SqliteGlobalModelReadRepository;
