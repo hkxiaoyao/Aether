@@ -4,8 +4,7 @@ use crate::handlers::admin::provider::shared::support::{
 };
 use crate::handlers::admin::request::AdminAppState;
 use crate::handlers::admin::shared::{
-    decrypt_catalog_secret_with_fallbacks, json_string_list, take_secret_prefix,
-    take_secret_suffix,
+    decrypt_catalog_secret_with_fallbacks, json_string_list, take_secret_prefix, take_secret_suffix,
 };
 use crate::handlers::public::matches_model_mapping_for_models;
 use crate::{GatewayError, LocalProviderDeleteTaskState};

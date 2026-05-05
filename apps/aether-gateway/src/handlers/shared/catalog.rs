@@ -1647,11 +1647,9 @@ mod tests {
     #[test]
     fn masked_catalog_api_key_handles_unicode_plaintext_without_panicking() {
         let state = AppState::new().expect("gateway should build");
-        let encrypted_api_key = encrypt_python_fernet_plaintext(
-            DEVELOPMENT_ENCRYPTION_KEY,
-            "测试-密钥-1234567890",
-        )
-        .expect("api key ciphertext should build");
+        let encrypted_api_key =
+            encrypt_python_fernet_plaintext(DEVELOPMENT_ENCRYPTION_KEY, "测试-密钥-1234567890")
+                .expect("api key ciphertext should build");
         let key = StoredProviderCatalogKey::new(
             "key-unicode".to_string(),
             "provider-test".to_string(),
