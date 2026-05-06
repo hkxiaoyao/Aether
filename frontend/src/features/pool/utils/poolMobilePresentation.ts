@@ -21,6 +21,7 @@ export interface PoolMobileTagInput {
 export type PoolMobileActionId =
   | 'copy_or_download'
   | 'refresh_token'
+  | 'reset_cycle_stats'
   | 'clear_cooldown'
   | 'recover_health'
   | 'permissions'
@@ -33,6 +34,7 @@ export interface PoolMobileActionInput {
   canDownloadOrCopy?: boolean
   canRefreshToken?: boolean
   showRefreshToken?: boolean
+  canResetCycleStats?: boolean
   canClearCooldown?: boolean
   canRecoverHealth?: boolean
   hasProxy?: boolean
@@ -70,6 +72,9 @@ export function splitPoolMobileActions(input: PoolMobileActionInput): {
     if (showRefreshToken) {
       primary.push('refresh_token')
     }
+    if (input.canResetCycleStats) {
+      primary.push('reset_cycle_stats')
+    }
     if (input.canClearCooldown) {
       primary.push('clear_cooldown')
     }
@@ -91,6 +96,9 @@ export function splitPoolMobileActions(input: PoolMobileActionInput): {
   const primary: PoolMobileActionId[] = []
   if (showRefreshToken) {
     primary.push('refresh_token')
+  }
+  if (input.canResetCycleStats) {
+    primary.push('reset_cycle_stats')
   }
   if (input.canClearCooldown) {
     primary.push('clear_cooldown')

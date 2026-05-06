@@ -151,8 +151,13 @@ fn oauth_invalid_reason_is_account_block(reason: Option<&str>) -> bool {
     if reason.starts_with(OAUTH_ACCOUNT_BLOCK_PREFIX) {
         return true;
     }
-    aether_admin::provider::status::resolve_account_status_snapshot(None, None, Some(reason))
-        .blocked
+    let snapshot =
+        aether_admin::provider::status::resolve_account_status_snapshot(None, None, Some(reason));
+    snapshot.blocked
+        && !matches!(
+            snapshot.code.trim().to_ascii_lowercase().as_str(),
+            "oauth_token_invalid" | "oauth_expired" | "oauth_refresh_failed"
+        )
 }
 
 fn normalize_local_oauth_refresh_error_message(
@@ -270,7 +275,7 @@ fn merge_local_oauth_refresh_failure_reason(
         return Some(refresh_reason.to_string());
     }
     if current_reason.starts_with(OAUTH_EXPIRED_PREFIX) {
-        return None;
+        return Some(refresh_reason.to_string());
     }
     if oauth_invalid_reason_is_account_block(Some(current_reason)) {
         return None;
@@ -1679,6 +1684,17 @@ mod tests {
         assert_eq!(
             super::normalize_local_oauth_refresh_error_message(Some(401), Some(body)),
             "refresh_token 无效、已过期或已撤销，请重新登录授权"
+        );
+    }
+
+    #[test]
+    fn local_refresh_failure_replaces_access_token_expired_marker() {
+        assert_eq!(
+            super::merge_local_oauth_refresh_failure_reason(
+                Some("[OAUTH_EXPIRED] access token invalid"),
+                "[REFRESH_FAILED] Token 续期失败 (401): refresh_token 无效",
+            ),
+            Some("[REFRESH_FAILED] Token 续期失败 (401): refresh_token 无效".to_string()),
         );
     }
 }

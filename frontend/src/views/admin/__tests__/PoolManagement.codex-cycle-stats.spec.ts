@@ -17,6 +17,7 @@ const endpointMocks = vi.hoisted(() => ({
   deleteEndpointKey: vi.fn(),
   updateProviderKey: vi.fn(),
   refreshProviderQuota: vi.fn(),
+  resetProviderKeyCycleStats: vi.fn(),
   refreshProviderOAuth: vi.fn(),
 }))
 
@@ -50,6 +51,7 @@ vi.mock('@/api/endpoints/keys', () => ({
   deleteEndpointKey: endpointMocks.deleteEndpointKey,
   updateProviderKey: endpointMocks.updateProviderKey,
   refreshProviderQuota: endpointMocks.refreshProviderQuota,
+  resetProviderKeyCycleStats: endpointMocks.resetProviderKeyCycleStats,
 }))
 
 vi.mock('@/api/endpoints/provider_oauth', () => ({
@@ -130,6 +132,8 @@ vi.mock('lucide-vue-next', async () => {
     Copy: Icon,
     Shield: Icon,
     Globe: Icon,
+    Repeat2: Icon,
+    RotateCcw: Icon,
     SquarePen: Icon,
     Trash2: Icon,
     Users: Icon,
@@ -468,11 +472,13 @@ beforeEach(() => {
   endpointMocks.deleteEndpointKey.mockReset()
   endpointMocks.updateProviderKey.mockReset()
   endpointMocks.refreshProviderQuota.mockReset()
+  endpointMocks.resetProviderKeyCycleStats.mockReset()
   endpointMocks.refreshProviderOAuth.mockReset()
 
   endpointMocks.getPoolSchedulingPresets.mockResolvedValue([])
   endpointMocks.clearPoolCooldown.mockResolvedValue({ message: 'ok' })
   endpointMocks.refreshProviderQuota.mockResolvedValue({ success: 0, failed: 0 })
+  endpointMocks.resetProviderKeyCycleStats.mockResolvedValue({ message: '已重置周期统计', reset_at: 123, windows: 2 })
 })
 
 afterEach(() => {
@@ -483,7 +489,7 @@ afterEach(() => {
 })
 
 describe('PoolManagement Codex cycle stats mode', () => {
-  it('defaults Codex providers to current-cycle groups and toggles back to account totals', async () => {
+  it('renders Codex current-cycle stats by default with a header icon toggle', async () => {
     const codexKey = createPoolKey('codex')
     endpointMocks.getPoolOverview.mockResolvedValue({ items: [createOverview('codex')] })
     endpointMocks.listPoolKeys.mockResolvedValue(createKeyPage(codexKey))
@@ -492,52 +498,96 @@ describe('PoolManagement Codex cycle stats mode', () => {
     const root = mountPoolManagement()
     await settle()
 
-    const modeSwitch = root.querySelector<HTMLInputElement>('[data-testid="pool-stats-mode-switch"]')
-    expect(modeSwitch).not.toBeNull()
-    expect(modeSwitch?.checked).toBe(true)
+    expect(root.querySelector('[data-testid="pool-stats-mode-switch"]')).toBeNull()
+    const modeButton = root.querySelector<HTMLButtonElement>('[data-testid="pool-stats-mode-control"]')
+    expect(modeButton).not.toBeNull()
+    expect(modeButton?.getAttribute('title')).toBe('切换为总计统计')
     expect(root.querySelectorAll('[data-testid="pool-stats-cycle-group-5h"]').length).toBeGreaterThan(0)
     expect(root.querySelectorAll('[data-testid="pool-stats-cycle-group-weekly"]').length).toBeGreaterThan(0)
     expect(root.querySelector('[data-testid="pool-stats-5h-request_count"]')?.textContent?.trim()).toBe('7')
     expect(root.querySelector('[data-testid="pool-stats-weekly-total_tokens"]')?.textContent?.trim()).toBe('0')
+    expect(root.querySelector('[data-testid="pool-stats-cycle-grid"]')?.className).toContain('grid-cols-[38px_64px_10px_64px]')
+    expect(root.querySelector('[data-testid="pool-stats-cycle-grid"]')?.className).toContain('w-[188px]')
+    expect(root.querySelector('[data-testid="pool-stats-cycle-grid"]')?.className).toContain('min-h-16')
+    expect(root.querySelector('[data-testid="pool-stats-5h-request_count"]')?.className).toContain('text-center')
+    expect(root.querySelector('[data-testid="pool-stats-weekly-total_tokens"]')?.className).toContain('text-center')
+    expect(endpointMocks.listPoolKeys).toHaveBeenLastCalledWith(
+      'codex-provider',
+      expect.objectContaining({
+        sort_by: 'imported_at',
+        sort_order: 'desc',
+      }),
+      expect.anything(),
+    )
+    expect(root.textContent).not.toContain('累计')
+    expect(root.textContent).not.toContain('总计')
+  })
 
-    if (!modeSwitch) throw new Error('expected stats switch')
-    modeSwitch.checked = false
-    modeSwitch.dispatchEvent(new Event('change', { bubbles: true }))
+  it('refreshes quota only for keys on the current page', async () => {
+    const pageKeys = [
+      createPoolKey('codex', { key_id: 'codex-page-key-1', quota_updated_at: null }),
+      createPoolKey('codex', { key_id: 'codex-page-key-2', quota_updated_at: null }),
+    ]
+    endpointMocks.getPoolOverview.mockResolvedValue({
+      items: [{ ...createOverview('codex'), total_keys: 120 }],
+    })
+    endpointMocks.listPoolKeys.mockResolvedValue({
+      total: 120,
+      page: 1,
+      page_size: 50,
+      keys: pageKeys,
+    })
+    endpointMocks.getProvider.mockResolvedValue(createProvider('codex'))
+    endpointMocks.refreshProviderQuota.mockResolvedValue({
+      success: 2,
+      failed: 0,
+      total: 2,
+      results: [],
+    })
+
+    const root = mountPoolManagement()
     await settle()
 
+    const refreshButton = root.querySelector('button[title="刷新数据和额度"]') as HTMLButtonElement | null
+    expect(refreshButton).not.toBeNull()
+    refreshButton?.click()
+    await settle()
+
+    expect(endpointMocks.refreshProviderQuota).toHaveBeenCalledTimes(1)
+    expect(endpointMocks.refreshProviderQuota).toHaveBeenCalledWith(
+      'codex-provider',
+      ['codex-page-key-1', 'codex-page-key-2'],
+    )
+    expect(endpointMocks.refreshProviderQuota).not.toHaveBeenCalledWith('codex-provider')
+  })
+
+  it('toggles Codex stats to account totals and persists the choice', async () => {
+    const codexKey = createPoolKey('codex')
+    endpointMocks.getPoolOverview.mockResolvedValue({ items: [createOverview('codex')] })
+    endpointMocks.listPoolKeys.mockResolvedValue(createKeyPage(codexKey))
+    endpointMocks.getProvider.mockResolvedValue(createProvider('codex'))
+
+    const root = mountPoolManagement()
+    await settle()
+
+    const modeButton = root.querySelector<HTMLButtonElement>('[data-testid="pool-stats-mode-control"]')
+    expect(modeButton).not.toBeNull()
+    modeButton?.click()
+    await settle()
+
+    expect(root.querySelector('[data-testid="pool-stats-account-total"]')).not.toBeNull()
+    expect(root.querySelector('[data-testid="pool-stats-account-total"]')?.className).toContain('w-[188px]')
+    expect(root.querySelector('[data-testid="pool-stats-account-total"]')?.className).toContain('grid-rows-4')
+    expect(root.querySelector('[data-testid="pool-stats-account-total"]')?.className).toContain('min-h-16')
+    expect(root.querySelector('[data-testid="pool-stats-cycle-group-5h"]')).toBeNull()
     expect(routeMocks.query.statsMode).toBe('account_total')
     expect(window.sessionStorage.getItem(POOL_MANAGEMENT_VIEW_STORAGE_KEY)).toContain('"statsMode":"account_total"')
-    expect(root.querySelector('[data-testid="pool-stats-account-total"]')).not.toBeNull()
-    expect(root.textContent).toContain('9,876')
-    expect(root.textContent).toContain('4.3M')
-    expect(root.textContent).toContain('$8.77')
+    expect(modeButton?.getAttribute('title')).toBe('切换为周期统计')
   })
 
-  it('renders the Codex stats switch in header actions instead of a standalone mode bar', async () => {
-    const codexKey = createPoolKey('codex')
-    endpointMocks.getPoolOverview.mockResolvedValue({ items: [createOverview('codex')] })
-    endpointMocks.listPoolKeys.mockResolvedValue(createKeyPage(codexKey))
-    endpointMocks.getProvider.mockResolvedValue(createProvider('codex'))
-
-    const root = mountPoolManagement()
-    await settle()
-
-    const desktopHeaderActions = root.querySelector('[data-testid="pool-header-actions"]')
-    const mobileHeaderActions = root.querySelector('[data-testid="pool-mobile-header-actions"]')
-    const modeControls = Array.from(root.querySelectorAll('[data-testid="pool-stats-mode-control"]'))
-
-    expect(desktopHeaderActions?.querySelector('[data-testid="pool-stats-mode-control"]')).not.toBeNull()
-    expect(mobileHeaderActions?.querySelector('[data-testid="pool-stats-mode-control"]')).not.toBeNull()
-    expect(modeControls).toHaveLength(2)
-    expect(modeControls.every(control => control.closest('[data-testid="pool-header-actions"], [data-testid="pool-mobile-header-actions"]'))).toBe(true)
-    expect(desktopHeaderActions?.textContent).toContain('累计')
-    expect(desktopHeaderActions?.textContent).toContain('周期')
-    expect(root.textContent).not.toContain('Codex 统计模式')
-    expect(root.textContent).not.toContain('当前周期显示 5H 与周窗口')
-  })
-
-  it('restores stored Codex account-total mode when the query omits statsMode', async () => {
+  it('restores stored and query account-total mode for Codex providers', async () => {
     seedStoredStatsMode('account_total')
+    routeMocks.query.statsMode = 'account_total'
     const codexKey = createPoolKey('codex')
     endpointMocks.getPoolOverview.mockResolvedValue({ items: [createOverview('codex')] })
     endpointMocks.listPoolKeys.mockResolvedValue(createKeyPage(codexKey))
@@ -546,18 +596,13 @@ describe('PoolManagement Codex cycle stats mode', () => {
     const root = mountPoolManagement()
     await settle()
 
-    const modeSwitch = root.querySelector<HTMLInputElement>('[data-testid="pool-stats-mode-switch"]')
-    expect(modeSwitch).not.toBeNull()
-    expect(modeSwitch?.checked).toBe(false)
     expect(root.querySelector('[data-testid="pool-stats-account-total"]')).not.toBeNull()
     expect(root.querySelector('[data-testid="pool-stats-cycle-group-5h"]')).toBeNull()
     expect(routeMocks.query.statsMode).toBe('account_total')
     expect(window.sessionStorage.getItem(POOL_MANAGEMENT_VIEW_STORAGE_KEY)).toContain('"statsMode":"account_total"')
   })
 
-  it('lets a current-cycle statsMode query override stored Codex account-total mode', async () => {
-    seedStoredStatsMode('account_total')
-    routeMocks.query.statsMode = 'current_cycle'
+  it('resets Codex cycle stats from the action column', async () => {
     const codexKey = createPoolKey('codex')
     endpointMocks.getPoolOverview.mockResolvedValue({ items: [createOverview('codex')] })
     endpointMocks.listPoolKeys.mockResolvedValue(createKeyPage(codexKey))
@@ -566,13 +611,14 @@ describe('PoolManagement Codex cycle stats mode', () => {
     const root = mountPoolManagement()
     await settle()
 
-    const modeSwitch = root.querySelector<HTMLInputElement>('[data-testid="pool-stats-mode-switch"]')
-    expect(modeSwitch).not.toBeNull()
-    expect(modeSwitch?.checked).toBe(true)
-    expect(root.querySelector('[data-testid="pool-stats-cycle-group-5h"]')).not.toBeNull()
-    expect(root.querySelector('[data-testid="pool-stats-account-total"]')).toBeNull()
-    expect(routeMocks.query.statsMode).toBeUndefined()
-    expect(window.sessionStorage.getItem(POOL_MANAGEMENT_VIEW_STORAGE_KEY)).toContain('"statsMode":"current_cycle"')
+    const resetButton = root.querySelector<HTMLButtonElement>('[data-testid="pool-reset-cycle-stats"]')
+    expect(resetButton).not.toBeNull()
+
+    resetButton?.click()
+    await settle()
+
+    expect(endpointMocks.resetProviderKeyCycleStats).toHaveBeenCalledWith(codexKey.key_id)
+    expect(endpointMocks.listPoolKeys).toHaveBeenCalledTimes(2)
   })
 
   it('hides the stats mode switch for non-Codex providers and keeps account totals', async () => {
@@ -590,6 +636,7 @@ describe('PoolManagement Codex cycle stats mode', () => {
 
     expect(root.querySelector('[data-testid="pool-stats-mode-switch"]')).toBeNull()
     expect(root.querySelector('[data-testid="pool-stats-mode-control"]')).toBeNull()
+    expect(root.querySelector('[data-testid="pool-reset-cycle-stats"]')).toBeNull()
     expect(root.querySelector('[data-testid="pool-stats-cycle-group-5h"]')).toBeNull()
     expect(root.querySelector('[data-testid="pool-stats-account-total"]')).not.toBeNull()
     expect(root.textContent).toContain('12')

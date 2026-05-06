@@ -16,22 +16,40 @@ const MAX_POOL_COOLDOWN_SECONDS: u64 = 32 * 60;
 
 const ACCOUNT_DISABLE_PATTERNS: &[&str] = &[
     "organization has been disabled",
+    "organization disabled",
     "organization_disabled",
     "account has been disabled",
+    "account disabled",
     "account_disabled",
     "account has been deactivated",
     "account_deactivated",
     "account deactivated",
 ];
 
+const WORKSPACE_DISABLE_PATTERNS: &[&str] = &[
+    "deactivated_workspace",
+    "workspace has been disabled",
+    "workspace disabled",
+    "workspace has been deactivated",
+    "workspace deactivated",
+    "workspace is disabled",
+    "workspace is deactivated",
+];
+
 const FORBIDDEN_ACCOUNT_PATTERNS: &[&str] = &[
     "account suspended",
+    "account suspend",
     "account banned",
+    "account blocked",
+    "account forbidden",
     "account deactivated",
+    "account access denied",
     "subscription inactive",
     "suspended",
     "banned",
+    "blocked",
     "deactivated",
+    "access denied",
 ];
 
 fn current_unix_secs_f64() -> f64 {
@@ -178,10 +196,9 @@ fn extract_error_message(error_body: Option<&str>) -> String {
                 .as_object()
                 .and_then(|object| object.get("error").or_else(|| object.get("message")))
                 .and_then(|error| match error {
-                    serde_json::Value::Object(object) => object
-                        .get("message")
-                        .and_then(serde_json::Value::as_str)
-                        .map(ToOwned::to_owned),
+                    serde_json::Value::Object(object) => {
+                        first_error_text(object, &["message", "detail", "reason", "code", "status"])
+                    }
                     serde_json::Value::String(text) => Some(text.clone()),
                     _ => None,
                 })
@@ -189,11 +206,32 @@ fn extract_error_message(error_body: Option<&str>) -> String {
         .unwrap_or_else(|| error_body.chars().take(500).collect())
 }
 
+fn first_error_text(
+    object: &serde_json::Map<String, serde_json::Value>,
+    keys: &[&str],
+) -> Option<String> {
+    keys.iter().find_map(|key| {
+        let text = object.get(*key).and_then(|value| match value {
+            serde_json::Value::String(text) => Some(text.trim().to_string()),
+            serde_json::Value::Number(number) => Some(number.to_string()),
+            _ => None,
+        })?;
+        (!text.is_empty()).then_some(text)
+    })
+}
+
 pub(crate) fn admin_provider_pool_key_circuit_breaker_reason(
     status_code: u16,
     error_body: Option<&str>,
 ) -> Option<String> {
     let error_message = extract_error_message(error_body).to_ascii_lowercase();
+    if let Some(pattern) = WORKSPACE_DISABLE_PATTERNS
+        .iter()
+        .find(|pattern| error_message.contains(**pattern))
+    {
+        return Some(format!("workspace_deactivated_{status_code}:{pattern}"));
+    }
+
     match status_code {
         401 if ACCOUNT_DISABLE_PATTERNS
             .iter()
@@ -212,6 +250,12 @@ pub(crate) fn admin_provider_pool_key_circuit_breaker_reason(
             .iter()
             .find(|pattern| error_message.contains(**pattern))
             .map(|pattern| format!("account_disabled_400:{pattern}")),
+        423 if FORBIDDEN_ACCOUNT_PATTERNS
+            .iter()
+            .any(|pattern| error_message.contains(pattern)) =>
+        {
+            Some("account_locked_423".to_string())
+        }
         _ => None,
     }
 }
@@ -449,9 +493,9 @@ pub(crate) async fn record_admin_provider_pool_error(
     }
 
     if status_code == 400 {
-        if admin_provider_pool_key_circuit_breaker_reason(status_code, error_body).is_some() {
-            return;
-        }
+        // Bad Request is usually attributable to the caller payload, not key health.
+        // Account-level 400s are handled by the orchestration circuit-breaker path.
+        return;
     }
 
     if let Some(rule) =
@@ -707,6 +751,46 @@ mod tests {
 
         assert_eq!(delay_cooldown, Some(5_415));
         assert_eq!(message_cooldown, Some(2_700));
+    }
+
+    #[test]
+    fn circuit_reason_detects_workspace_deactivated_errors() {
+        assert_eq!(
+            admin_provider_pool_key_circuit_breaker_reason(
+                402,
+                Some(r#"{"error":{"message":"workspace has been deactivated"}}"#),
+            )
+            .as_deref(),
+            Some("workspace_deactivated_402:workspace has been deactivated")
+        );
+        assert_eq!(
+            admin_provider_pool_key_circuit_breaker_reason(
+                400,
+                Some(r#"{"error":{"message":"deactivated_workspace"}}"#),
+            )
+            .as_deref(),
+            Some("workspace_deactivated_400:deactivated_workspace")
+        );
+    }
+
+    #[test]
+    fn circuit_reason_detects_account_ban_errors() {
+        assert_eq!(
+            admin_provider_pool_key_circuit_breaker_reason(
+                403,
+                Some(r#"{"error":{"message":"AccountSuspendedException: account suspended"}}"#),
+            )
+            .as_deref(),
+            Some("forbidden_403")
+        );
+        assert_eq!(
+            admin_provider_pool_key_circuit_breaker_reason(
+                423,
+                Some(r#"{"error":{"message":"account access denied"}}"#),
+            )
+            .as_deref(),
+            Some("account_locked_423")
+        );
     }
 
     #[tokio::test]
@@ -1023,6 +1107,46 @@ mod tests {
             .cooldown_ttl_by_key
             .get("key-3")
             .is_some_and(|ttl| *ttl <= 420 && *ttl >= 380));
+    }
+
+    #[tokio::test]
+    async fn error_feedback_ignores_client_bad_request_for_cooldown() {
+        let Some(redis) = start_managed_redis_or_skip().await else {
+            return;
+        };
+        let app = build_runner_app(redis.redis_url(), "pool_runtime_ignore_400");
+        let runner = app.redis_kv_runner().expect("redis runner should exist");
+        let mut pool_config = sample_pool_config();
+        pool_config.unschedulable_rules = vec![AdminProviderPoolUnschedulableRule {
+            keyword: "review required".to_string(),
+            duration_minutes: 7,
+        }];
+        let key_ids = vec!["key-client-400".to_string()];
+
+        record_admin_provider_pool_error(
+            &runner,
+            "provider-1",
+            "key-client-400",
+            &pool_config,
+            400,
+            Some(r#"{"error":{"message":"manual review required before reuse"}}"#),
+            None,
+        )
+        .await;
+
+        let runtime = read_admin_provider_pool_runtime_state(
+            &runner,
+            "provider-1",
+            &key_ids,
+            &pool_config,
+            None,
+        )
+        .await;
+
+        assert!(!runtime
+            .cooldown_reason_by_key
+            .contains_key("key-client-400"));
+        assert!(!runtime.cooldown_ttl_by_key.contains_key("key-client-400"));
     }
 
     #[tokio::test]

@@ -210,6 +210,18 @@ export async function clearOAuthInvalid(keyId: string): Promise<{ message: strin
 }
 
 /**
+ * 重置 Key 的当前周期统计起点（Codex 号池）
+ */
+export async function resetProviderKeyCycleStats(keyId: string): Promise<{
+  message: string
+  reset_at: number
+  windows: number
+}> {
+  const response = await client.post(`/api/admin/endpoints/keys/${keyId}/reset-cycle-stats`)
+  return response.data
+}
+
+/**
  * 刷新 Provider 的所有 Key 限额信息（Codex / Antigravity）
  */
 export interface RefreshQuotaResult {

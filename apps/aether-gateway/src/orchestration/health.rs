@@ -144,6 +144,9 @@ fn local_candidate_failure_should_project_health(
     if status_code < 400 {
         return false;
     }
+    if status_code == 400 {
+        return false;
+    }
 
     match classification {
         LocalFailoverClassification::RetrySuccessPattern
@@ -210,6 +213,18 @@ mod tests {
             None,
             "openai:chat",
             LocalFailoverClassification::StopErrorPattern,
+            400,
+            1_760_000_000,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn failure_projection_ignores_client_bad_request() {
+        assert!(project_local_failure_health(
+            None,
+            "openai:chat",
+            LocalFailoverClassification::RetryUpstreamFailure,
             400,
             1_760_000_000,
         )

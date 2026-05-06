@@ -322,7 +322,11 @@ fn admin_pool_codex_window_usage_bounds(
     let reset_at = admin_pool_json_to_u64(window.get("reset_at"))?;
     let window_minutes = admin_pool_json_to_u64(window.get("window_minutes"))?;
     let window_seconds = window_minutes.checked_mul(60)?;
-    let start = reset_at.checked_sub(window_seconds)?;
+    let window_start = reset_at.checked_sub(window_seconds)?;
+    let usage_reset_at = admin_pool_json_to_u64(window.get("usage_reset_at"))
+        .filter(|reset_at_override| *reset_at_override < reset_at)
+        .unwrap_or(window_start);
+    let start = window_start.max(usage_reset_at);
     (start < reset_at).then_some((start, reset_at))
 }
 
@@ -1225,4 +1229,42 @@ pub(super) fn build_admin_pool_key_payload(
     payload.insert("scheduling_reasons".to_string(), json!(scheduling_reasons));
 
     serde_json::Value::Object(payload)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn codex_window_usage_bounds_honor_manual_usage_reset_at() {
+        let window = json!({
+            "code": "5h",
+            "reset_at": 20_000,
+            "window_minutes": 300,
+            "usage_reset_at": 9_000,
+        });
+        let window = window.as_object().expect("window object");
+
+        assert_eq!(
+            admin_pool_codex_window_usage_bounds(window),
+            Some((9_000, 20_000))
+        );
+    }
+
+    #[test]
+    fn codex_window_usage_bounds_ignore_reset_before_window_start() {
+        let window = json!({
+            "code": "weekly",
+            "reset_at": 700_000,
+            "window_minutes": 10_080,
+            "usage_reset_at": 1,
+        });
+        let window = window.as_object().expect("window object");
+
+        assert_eq!(
+            admin_pool_codex_window_usage_bounds(window),
+            Some((95_200, 700_000))
+        );
+    }
 }

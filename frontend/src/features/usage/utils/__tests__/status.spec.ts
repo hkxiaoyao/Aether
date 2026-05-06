@@ -91,12 +91,19 @@ describe('usage status helpers', () => {
     expect(isUsageRecordFailed(record)).toBe(true)
   })
 
-  it('treats explicit success status code as authoritative for the timeline', () => {
+  it('prefers terminal request lifecycle status over status code for the timeline', () => {
     expect(resolveTimelineFinalStatus({
       traceFinalStatus: 'success',
       requestStatus: 'failed',
       statusCode: 200,
-    })).toBe('success')
+    })).toBe('failed')
+  })
+
+  it('prefers terminal trace status over status code when request lifecycle is absent', () => {
+    expect(resolveTimelineFinalStatus({
+      traceFinalStatus: 'failed',
+      statusCode: 200,
+    })).toBe('failed')
   })
 
   it('falls back to request lifecycle status when status code and trace are missing', () => {

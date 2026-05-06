@@ -75,19 +75,21 @@
 
                 <!-- 子节点（同提供商的其他尝试，不包含首次） -->
                 <div
-                  v-if="group.retryCount > 0 && isGroupSelected(group)"
+                  v-if="group.retryCount > 0"
                   class="sub-dots"
                 >
                   <button
                     v-for="(attempt, idx) in group.allAttempts.slice(1)"
                     :key="attempt.id"
+                    type="button"
                     class="sub-dot"
                     :class="[
                       getStatusColorClass(getDisplayStatus(attempt)),
-                      { active: selectedAttemptIndex === idx + 1 }
+                      { active: isAttemptSelected(group, idx + 1) }
                     ]"
-                    :title="attempt.key_name || `Key ${idx + 2}`"
-                    @click.stop="selectedAttemptIndex = idx + 1"
+                    :title="formatAttemptDotTitle(attempt)"
+                    :aria-label="formatAttemptDotTitle(attempt)"
+                    @click.stop="selectAttemptInGroup(group, idx + 1)"
                   />
                 </div>
               </div>
@@ -780,20 +782,28 @@ const STATUS_PRIORITY: Record<string, number> = {
   success: 4,
 }
 
-// 候选时间线（按实际执行顺序排序）
+const isParticipatedCandidate = (candidate: CandidateRecord): boolean => {
+  if (candidate.status === 'available' || candidate.status === 'unused') return false
+  if (candidate.status === 'pending' && !candidate.started_at) return false
+  return true
+}
+
+const compareBySchedulingOrder = (a: CandidateRecord, b: CandidateRecord): number => {
+  if (a.candidate_index !== b.candidate_index) {
+    return a.candidate_index - b.candidate_index
+  }
+  if (a.retry_index !== b.retry_index) {
+    return a.retry_index - b.retry_index
+  }
+  return new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+}
+
+// 候选时间线（按调度顺序排序；lazy 加载的跳过候选通常没有 started_at）
 const rawTimeline = computed<CandidateRecord[]>(() => {
   if (!trace.value) return []
   return [...trace.value.candidates]
     .filter(c => TIMELINE_STATUS.includes(c.status))
-    .sort((a, b) => {
-      const startedA = a.started_at ? new Date(a.started_at).getTime() : Infinity
-      const startedB = b.started_at ? new Date(b.started_at).getTime() : Infinity
-      if (startedA !== startedB) return startedA - startedB
-      if (a.candidate_index !== b.candidate_index) {
-        return a.candidate_index - b.candidate_index
-      }
-      return a.retry_index - b.retry_index
-    })
+    .sort(compareBySchedulingOrder)
 })
 
 
@@ -919,7 +929,7 @@ const buildProviderGroups = (items: CandidateRecord[]): NodeGroup[] => {
 
 // 将相同 Provider 的所有请求合并为组（同提供商的 Key 放在子节点）
 const groupedTimeline = computed<NodeGroup[]>(() => {
-  const providerGroups = buildProviderGroups(timeline.value)
+  const providerGroups = buildProviderGroups(timeline.value.filter(isParticipatedCandidate))
   if (poolAttemptsByGroup.value.size === 0) {
     return providerGroups
   }
@@ -929,12 +939,7 @@ const groupedTimeline = computed<NodeGroup[]>(() => {
   const poolGroups: NodeGroup[] = []
 
   for (const [groupId, attemptsRaw] of poolAttemptsByGroup.value.entries()) {
-    const attempts = [...attemptsRaw].sort((a, b) => {
-      if (a.candidate_index !== b.candidate_index) {
-        return a.candidate_index - b.candidate_index
-      }
-      return a.retry_index - b.retry_index
-    })
+    const attempts = [...attemptsRaw].sort(compareBySchedulingOrder)
     if (attempts.length === 0) continue
 
     const visibleAttempts = buildPoolGroupVisibleAttempts(attempts)
@@ -1638,6 +1643,32 @@ const selectFirstAttempt = (group: NodeGroup) => {
   }
 }
 
+const selectAttemptInGroup = (group: NodeGroup, attemptIndex: number) => {
+  const groupIndex = groupedTimeline.value.findIndex(g => g.id === group.id && g.startIndex === group.startIndex)
+  if (groupIndex < 0) return
+  selectedGroupIndex.value = groupIndex
+  selectedAttemptIndex.value = attemptIndex
+}
+
+const isAttemptSelected = (group: NodeGroup, attemptIndex: number) => {
+  return isGroupSelected(group) && selectedAttemptIndex.value === attemptIndex
+}
+
+const formatCandidateAttemptIndex = (attempt: CandidateRecord): string => {
+  return attempt.retry_index > 0
+    ? `#${attempt.candidate_index}.${attempt.retry_index}`
+    : `#${attempt.candidate_index}`
+}
+
+const formatAttemptDotTitle = (attempt: CandidateRecord): string => {
+  const parts = [
+    formatCandidateAttemptIndex(attempt),
+    attempt.key_name || attempt.key_account_label || attempt.key_preview || '未知 Key',
+    getStatusLabel(getDisplayStatus(attempt)),
+  ]
+  return parts.filter(Boolean).join(' · ')
+}
+
 // 导航到上/下一组
 const navigateGroup = (direction: number) => {
   const newIndex = selectedGroupIndex.value + direction
@@ -1837,8 +1868,17 @@ const getStatusColorClass = (status: string) => {
 }
 
 // 展示状态：进行中态优先（包括 started 但未 finished 的中间态），再按 HTTP 状态码兜底
-const getDisplayStatus = (attempt: CandidateRecord | null | undefined): string => {
+function getDisplayStatus(attempt: CandidateRecord | null | undefined): string {
   if (!attempt) return 'available'
+  if (
+    attempt.status === 'success' ||
+    attempt.status === 'failed' ||
+    attempt.status === 'cancelled' ||
+    attempt.status === 'skipped' ||
+    attempt.status === 'stream_interrupted'
+  ) {
+    return attempt.status
+  }
   const hasFinished = Boolean(attempt.finished_at)
   const isExplicitPending = (attempt.status === 'pending' || attempt.status === 'streaming') && !hasFinished
   const isImplicitPending = Boolean(

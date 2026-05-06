@@ -255,23 +255,34 @@ pub(super) async fn build_admin_pool_list_keys_response(
     };
     let codex_window_usage_requests =
         pool_payloads::build_admin_pool_codex_window_usage_requests(&provider.provider_type, &keys);
-    let codex_window_usage_by_key: pool_payloads::AdminPoolCodexWindowUsageByKey =
-        if codex_window_usage_requests.is_empty() {
-            pool_payloads::AdminPoolCodexWindowUsageByKey::new()
-        } else {
-            state
-                .app()
-                .summarize_usage_by_provider_api_key_windows(&codex_window_usage_requests)
-                .await?
-                .into_iter()
-                .map(|usage| {
-                    (
-                        (usage.provider_api_key_id.clone(), usage.window_code.clone()),
-                        usage,
-                    )
-                })
-                .collect()
-        };
+    let mut codex_window_usage_by_key = codex_window_usage_requests
+        .iter()
+        .map(|request| {
+            (
+                (
+                    request.provider_api_key_id.clone(),
+                    request.window_code.clone(),
+                ),
+                aether_data_contracts::repository::usage::StoredProviderApiKeyWindowUsageSummary {
+                    provider_api_key_id: request.provider_api_key_id.clone(),
+                    window_code: request.window_code.clone(),
+                    ..Default::default()
+                },
+            )
+        })
+        .collect::<pool_payloads::AdminPoolCodexWindowUsageByKey>();
+    if !codex_window_usage_requests.is_empty() {
+        for usage in state
+            .app()
+            .summarize_usage_by_provider_api_key_windows(&codex_window_usage_requests)
+            .await?
+        {
+            codex_window_usage_by_key.insert(
+                (usage.provider_api_key_id.clone(), usage.window_code.clone()),
+                usage,
+            );
+        }
+    }
 
     let items = keys
         .into_iter()

@@ -1,0 +1,272 @@
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { createApp, defineComponent, h, nextTick, type App } from 'vue'
+
+import type { CandidateRecord, RequestTrace } from '@/api/requestTrace'
+import HorizontalRequestTimeline from '../HorizontalRequestTimeline.vue'
+
+vi.mock('@/components/ui/card.vue', async () => {
+  const { defineComponent, h } = await import('vue')
+  return {
+    default: defineComponent({
+      name: 'CardStub',
+      setup(_, { slots }) {
+        return () => h('section', slots.default?.())
+      },
+    }),
+  }
+})
+
+vi.mock('@/components/ui/badge.vue', async () => {
+  const { defineComponent, h } = await import('vue')
+  return {
+    default: defineComponent({
+      name: 'BadgeStub',
+      setup(_, { slots }) {
+        return () => h('span', slots.default?.())
+      },
+    }),
+  }
+})
+
+vi.mock('@/components/ui/skeleton.vue', async () => {
+  const { defineComponent, h } = await import('vue')
+  return {
+    default: defineComponent({
+      name: 'SkeletonStub',
+      setup() {
+        return () => h('div')
+      },
+    }),
+  }
+})
+
+vi.mock('../JsonContentPanel.vue', async () => {
+  const { defineComponent, h } = await import('vue')
+  return {
+    default: defineComponent({
+      name: 'JsonContentPanelStub',
+      setup() {
+        return () => h('div')
+      },
+    }),
+  }
+})
+
+vi.mock('lucide-vue-next', async () => {
+  const { defineComponent, h } = await import('vue')
+  const Icon = defineComponent({
+    name: 'IconStub',
+    setup() {
+      return () => h('span')
+    },
+  })
+
+  return {
+    ChevronLeft: Icon,
+    ChevronRight: Icon,
+    ExternalLink: Icon,
+  }
+})
+
+const mountedApps: Array<{ app: App, root: HTMLElement }> = []
+
+function buildCandidate(overrides: Partial<CandidateRecord> = {}): CandidateRecord {
+  return {
+    id: 'cand-1',
+    request_id: 'req-1',
+    candidate_index: 0,
+    retry_index: 0,
+    provider_id: 'provider-1',
+    provider_name: 'Provider 1',
+    key_id: 'key-1',
+    key_name: 'Key 1',
+    status: 'failed',
+    is_cached: false,
+    created_at: '2026-05-06T12:00:00.000Z',
+    started_at: '2026-05-06T12:00:00.000Z',
+    finished_at: '2026-05-06T12:00:01.000Z',
+    ...overrides,
+  }
+}
+
+function buildTrace(candidates: CandidateRecord[]): RequestTrace {
+  return {
+    request_id: 'req-1',
+    total_candidates: candidates.length,
+    final_status: 'success',
+    total_latency_ms: 1000,
+    candidates,
+  }
+}
+
+function mountTimeline(traceData: RequestTrace) {
+  const root = document.createElement('div')
+  document.body.appendChild(root)
+  const app = createApp(HorizontalRequestTimeline, {
+    requestId: traceData.request_id,
+    traceData,
+  })
+  app.mount(root)
+  mountedApps.push({ app, root })
+  return root
+}
+
+afterEach(() => {
+  for (const { app, root } of mountedApps.splice(0)) {
+    app.unmount()
+    root.remove()
+  }
+})
+
+describe('HorizontalRequestTimeline', () => {
+  it('keeps attempted keys visible for ordinary provider groups that are not selected', async () => {
+    const trace = buildTrace([
+      buildCandidate({
+        id: 'provider-a-key-1',
+        provider_id: 'provider-a',
+        provider_name: 'Provider A',
+        key_id: 'key-a-1',
+        key_name: 'Key A1',
+        candidate_index: 0,
+        status: 'failed',
+      }),
+      buildCandidate({
+        id: 'provider-a-key-2',
+        provider_id: 'provider-a',
+        provider_name: 'Provider A',
+        key_id: 'key-a-2',
+        key_name: 'Key A2',
+        candidate_index: 1,
+        status: 'failed',
+      }),
+      buildCandidate({
+        id: 'provider-b-key-1',
+        provider_id: 'provider-b',
+        provider_name: 'Provider B',
+        key_id: 'key-b-1',
+        key_name: 'Key B1',
+        candidate_index: 2,
+        status: 'failed',
+      }),
+      buildCandidate({
+        id: 'provider-b-key-2',
+        provider_id: 'provider-b',
+        provider_name: 'Provider B',
+        key_id: 'key-b-2',
+        key_name: 'Key B2',
+        candidate_index: 3,
+        status: 'success',
+      }),
+    ])
+
+    const root = mountTimeline(trace)
+    await nextTick()
+
+    const subDots = [...root.querySelectorAll<HTMLButtonElement>('.sub-dot')]
+    expect(subDots).toHaveLength(2)
+    expect(subDots.map(dot => dot.getAttribute('title'))).toEqual([
+      '#1 · Key A2 · 失败',
+      '#3 · Key B2 · 成功',
+    ])
+  })
+
+  it('orders visible candidates by scheduling index and hides unstarted lazy candidates', async () => {
+    const trace = buildTrace([
+      buildCandidate({
+        id: 'cand-success',
+        provider_id: 'provider-success',
+        provider_name: 'Provider Success',
+        key_id: 'key-success',
+        key_name: 'Success Key',
+        candidate_index: 4,
+        status: 'success',
+        started_at: '2026-05-06T12:00:04.000Z',
+        finished_at: '2026-05-06T12:00:05.000Z',
+      }),
+      buildCandidate({
+        id: 'cand-available',
+        provider_id: 'provider-available',
+        provider_name: 'Provider Available',
+        key_id: 'key-available',
+        key_name: 'Available Key',
+        candidate_index: 0,
+        status: 'available',
+        started_at: undefined,
+        finished_at: undefined,
+      }),
+      buildCandidate({
+        id: 'cand-skipped',
+        provider_id: 'provider-skipped',
+        provider_name: 'Provider Skipped',
+        key_id: 'key-skipped',
+        key_name: 'Skipped Key',
+        candidate_index: 1,
+        status: 'skipped',
+        started_at: undefined,
+        finished_at: undefined,
+      }),
+      buildCandidate({
+        id: 'cand-pending-unstarted',
+        provider_id: 'provider-pending',
+        provider_name: 'Provider Pending',
+        key_id: 'key-pending',
+        key_name: 'Pending Key',
+        candidate_index: 2,
+        status: 'pending',
+        started_at: undefined,
+        finished_at: undefined,
+      }),
+      buildCandidate({
+        id: 'cand-failed',
+        provider_id: 'provider-failed',
+        provider_name: 'Provider Failed',
+        key_id: 'key-failed',
+        key_name: 'Failed Key',
+        candidate_index: 3,
+        status: 'failed',
+        started_at: '2026-05-06T12:00:03.000Z',
+        finished_at: '2026-05-06T12:00:04.000Z',
+      }),
+    ])
+
+    const root = mountTimeline(trace)
+    await nextTick()
+
+    const labels = [...root.querySelectorAll<HTMLElement>('.node-label')]
+      .map(label => label.textContent?.trim())
+    expect(labels).toEqual(['Provider Skipped', 'Provider Failed', 'Provider Success'])
+  })
+
+  it('uses candidate terminal status for node colors instead of overriding with HTTP code', async () => {
+    const trace = buildTrace([
+      buildCandidate({
+        id: 'cand-body-error',
+        provider_id: 'provider-body-error',
+        provider_name: 'Provider Body Error',
+        key_id: 'key-body-error',
+        key_name: 'Body Error Key',
+        candidate_index: 0,
+        status: 'failed',
+        status_code: 200,
+      }),
+      buildCandidate({
+        id: 'cand-success',
+        provider_id: 'provider-success',
+        provider_name: 'Provider Success',
+        key_id: 'key-success',
+        key_name: 'Success Key',
+        candidate_index: 1,
+        status: 'success',
+        status_code: 200,
+      }),
+    ])
+
+    const root = mountTimeline(trace)
+    await nextTick()
+
+    const nodeDots = [...root.querySelectorAll<HTMLElement>('.node-dot')]
+    expect(nodeDots[0].classList.contains('status-failed')).toBe(true)
+    expect(nodeDots[0].classList.contains('status-success')).toBe(false)
+    expect(nodeDots[1].classList.contains('status-success')).toBe(true)
+  })
+})

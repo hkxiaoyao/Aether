@@ -311,10 +311,10 @@
       <colgroup v-if="isAdmin">
         <col class="w-[8%]">
         <col class="w-[12%]">
+        <col class="w-[14%]">
         <col class="w-[16%]">
-        <col class="w-[16%]">
-        <col class="w-[17%]">
-        <col class="w-[6%]">
+        <col class="w-[15%]">
+        <col class="w-[10%]">
         <col class="w-[10%]">
         <col class="w-[6%]">
         <col class="w-[9%]">
@@ -322,9 +322,9 @@
       <colgroup v-else>
         <col class="w-[9%]">
         <col class="w-[17%]">
-        <col class="w-[24%]">
-        <col class="w-[15%]">
-        <col class="w-[7%]">
+        <col class="w-[22%]">
+        <col class="w-[14%]">
+        <col class="w-[10%]">
         <col class="w-[11%]">
         <col class="w-[7%]">
         <col class="w-[10%]">
@@ -360,7 +360,7 @@
             密钥
           </TableHead>
           <SortableTableHead
-            class="h-12 font-semibold w-[16%]"
+            :class="['h-12 font-semibold', isAdmin ? 'w-[14%]' : 'w-[22%]']"
             column-key="model"
             :sortable="false"
             :filter-active="filterModel !== '__all__'"
@@ -397,7 +397,7 @@
             </template>
           </SortableTableHead>
           <SortableTableHead
-            class="h-12 font-semibold w-[17%]"
+            :class="['h-12 font-semibold', isAdmin ? 'w-[15%]' : 'w-[14%]']"
             column-key="api_format"
             :sortable="false"
             :filter-active="filterApiFormat !== '__all__'"
@@ -415,7 +415,7 @@
             </template>
           </SortableTableHead>
           <SortableTableHead
-            class="h-12 font-semibold w-[6%] text-center"
+            class="h-12 font-semibold w-[10%] text-center"
             column-key="status"
             :sortable="false"
             align="center"
@@ -509,7 +509,7 @@
             </div>
           </TableCell>
           <TableCell
-            class="font-medium py-4 w-[16%]"
+            :class="['font-medium py-4', isAdmin ? 'w-[14%]' : 'w-[22%]']"
             :title="getModelTooltip(record)"
           >
             <div
@@ -596,7 +596,7 @@
             </div>
           </TableCell>
           <TableCell
-            class="py-4 w-[17%]"
+            :class="['py-4', isAdmin ? 'w-[15%]' : 'w-[14%]']"
             :title="getApiFormatTooltip(record)"
           >
             <!-- 有格式转换或同族格式差异：两行显示 -->
@@ -631,7 +631,7 @@
               class="text-muted-foreground text-xs"
             >-</span>
           </TableCell>
-          <TableCell class="text-center py-4 w-[6%]">
+          <TableCell class="text-center py-4 w-[10%]">
             <!-- 优先显示请求状态 -->
             <Badge
               v-if="getDisplayStatus(record) === 'pending'"

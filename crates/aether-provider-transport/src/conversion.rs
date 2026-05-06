@@ -267,12 +267,16 @@ fn transport_key_allows_candidate_model(
         .mapping_matched_model
         .map(str::trim)
         .filter(|value| !value.is_empty());
+    let requested_base_model = aether_ai_formats::model_directive_base_model(requested_model);
 
     for allowed_model in allowed_models.iter().map(String::as_str).map(str::trim) {
         if allowed_model.is_empty() {
             continue;
         }
         if allowed_model == requested_model
+            || requested_base_model
+                .as_deref()
+                .is_some_and(|base_model| allowed_model == base_model)
             || allowed_model == global_model_name
             || allowed_model == selected_provider_model_name
             || mapping_matched_model.is_some_and(|value| value == allowed_model)
@@ -550,6 +554,26 @@ mod tests {
                 Some("gpt-4.1")
             ),
             Some("key_model_disabled")
+        );
+    }
+
+    #[test]
+    fn candidate_common_transport_policy_allows_model_directive_base_model() {
+        let mut transport = transport_snapshot("custom", "openai:responses", "bearer", true, None);
+        transport.key.allowed_models = Some(vec!["gpt-5.5".to_string()]);
+
+        assert_eq!(
+            candidate_common_transport_skip_reason(
+                &transport,
+                CandidateTransportPolicyFacts {
+                    endpoint_api_format: "openai:responses",
+                    global_model_name: "gpt-5",
+                    selected_provider_model_name: "provider-gpt-5",
+                    mapping_matched_model: None,
+                },
+                Some("gpt-5.5-xhigh"),
+            ),
+            None
         );
     }
 

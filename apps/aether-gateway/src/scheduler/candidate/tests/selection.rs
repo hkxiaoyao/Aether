@@ -1971,7 +1971,7 @@ async fn keeps_refreshable_kiro_candidate_selectable_when_oauth_token_expired() 
 }
 
 #[tokio::test]
-async fn keeps_kiro_candidate_selectable_after_refresh_failure() {
+async fn skips_kiro_candidate_after_refresh_token_failure() {
     let mut row = sample_row();
     row.provider_id = "provider-kiro".to_string();
     row.provider_name = "kiro".to_string();
@@ -2028,9 +2028,10 @@ async fn keeps_kiro_candidate_selectable_after_refresh_failure() {
     .await
     .expect("selection should succeed");
 
-    assert_eq!(selected.len(), 1);
-    assert_eq!(selected[0].provider_id, "provider-kiro");
-    assert!(skipped.is_empty());
+    assert!(selected.is_empty());
+    assert_eq!(skipped.len(), 1);
+    assert_eq!(skipped[0].candidate.key_id, "key-kiro");
+    assert_eq!(skipped[0].skip_reason, "oauth_invalid");
 }
 
 #[tokio::test]

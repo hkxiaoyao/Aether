@@ -272,8 +272,9 @@ export function resolveTimelineFinalStatus(params: {
   requestStatus?: RequestStatusLike
   statusCode?: number
 }): TimelineFinalStatus {
-  if (typeof params.statusCode === 'number') {
-    return params.statusCode >= 200 && params.statusCode < 400 ? 'success' : 'failed'
+  const requestStatus = mapRequestStatusToTimelineStatus(params.requestStatus)
+  if (requestStatus === 'success' || requestStatus === 'failed' || requestStatus === 'cancelled') {
+    return requestStatus
   }
 
   const traceStatus = normalizeTimelineFinalStatus(params.traceFinalStatus)
@@ -281,9 +282,8 @@ export function resolveTimelineFinalStatus(params: {
     return traceStatus
   }
 
-  const requestStatus = mapRequestStatusToTimelineStatus(params.requestStatus)
-  if (requestStatus === 'success' || requestStatus === 'failed' || requestStatus === 'cancelled') {
-    return requestStatus
+  if (typeof params.statusCode === 'number') {
+    return params.statusCode >= 200 && params.statusCode < 400 ? 'success' : 'failed'
   }
 
   if (params.hasPendingCandidates) {

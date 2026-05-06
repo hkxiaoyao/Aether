@@ -77,34 +77,6 @@
             </div>
           </div>
           <div
-            v-if="showCodexStatsModeSwitch"
-            class="flex items-center"
-            data-testid="pool-mobile-header-actions"
-          >
-            <div
-              class="group inline-flex min-h-12 flex-col items-center justify-center gap-1 rounded-md border border-border/50 bg-muted/20 px-2.5 py-1.5 text-xs transition-all duration-200 hover:border-primary/40 hover:bg-muted/40"
-              data-testid="pool-stats-mode-control"
-            >
-              <div class="flex items-center gap-1 leading-none">
-                <span
-                  class="font-medium transition-colors"
-                  :class="!codexCurrentCycleStatsEnabled ? 'text-foreground/90' : 'text-muted-foreground/80'"
-                >累计</span>
-                <span class="text-muted-foreground/50 transition-colors group-hover:text-muted-foreground/80">/</span>
-                <span
-                  class="font-medium transition-colors"
-                  :class="codexCurrentCycleStatsEnabled ? 'text-foreground/90' : 'text-muted-foreground/80'"
-                >周期</span>
-              </div>
-              <Switch
-                v-model="codexCurrentCycleStatsEnabled"
-                class="shrink-0"
-                aria-label="Codex 统计模式"
-                data-testid="pool-stats-mode-switch"
-              />
-            </div>
-          </div>
-          <div
             v-if="selectedProviderId"
             class="flex items-center gap-1"
           >
@@ -259,33 +231,6 @@
               v-if="selectedProviderId"
               class="h-4 w-px bg-border"
             />
-            <div
-              v-if="showCodexStatsModeSwitch"
-              class="group inline-flex min-h-12 flex-col items-center justify-center gap-1 rounded-md border border-border/50 bg-muted/20 px-2.5 py-1.5 text-xs transition-all duration-200 hover:border-primary/40 hover:bg-muted/40"
-              data-testid="pool-stats-mode-control"
-            >
-              <div class="flex items-center gap-1 leading-none">
-                <span
-                  class="font-medium transition-colors"
-                  :class="!codexCurrentCycleStatsEnabled ? 'text-foreground/90' : 'text-muted-foreground/80'"
-                >累计</span>
-                <span class="text-muted-foreground/50 transition-colors group-hover:text-muted-foreground/80">/</span>
-                <span
-                  class="font-medium transition-colors"
-                  :class="codexCurrentCycleStatsEnabled ? 'text-foreground/90' : 'text-muted-foreground/80'"
-                >周期</span>
-              </div>
-              <Switch
-                v-model="codexCurrentCycleStatsEnabled"
-                class="shrink-0"
-                aria-label="Codex 统计模式"
-                data-testid="pool-stats-mode-switch"
-              />
-            </div>
-            <div
-              v-if="showCodexStatsModeSwitch"
-              class="h-4 w-px bg-border"
-            />
             <Button
               v-if="selectedProviderId"
               variant="ghost"
@@ -418,7 +363,21 @@
                   class="px-2 font-semibold text-center whitespace-nowrap"
                   :style="{ width: desktopColumnWidths.stats }"
                 >
-                  统计
+                  <div class="flex items-center justify-center gap-1.5">
+                    <button
+                      v-if="showCodexStatsModeToggle"
+                      type="button"
+                      class="inline-flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground"
+                      :title="poolStatsMode === 'current_cycle' ? '切换为总计统计' : '切换为周期统计'"
+                      :aria-label="poolStatsMode === 'current_cycle' ? '切换为总计统计' : '切换为周期统计'"
+                      :aria-pressed="poolStatsMode === 'current_cycle'"
+                      data-testid="pool-stats-mode-control"
+                      @click.stop="togglePoolStatsMode"
+                    >
+                      <Repeat2 class="h-3.5 w-3.5" />
+                    </button>
+                    <span>统计</span>
+                  </div>
                 </TableHead>
                 <SortableTableHead
                   class="font-semibold text-center whitespace-nowrap"
@@ -631,41 +590,66 @@
                 <TableCell class="py-3 px-2 align-middle">
                   <div
                     v-if="isPoolKeyCycleStatsDisplay(key)"
-                    class="mx-auto w-[136px] space-y-1.5 text-[10px] leading-4"
+                    class="mx-auto w-[188px] text-[10px] leading-4"
                     data-testid="pool-stats-cycle-groups"
                   >
                     <div
-                      v-for="group in getPoolKeyCycleStatsGroups(key)"
-                      :key="`${key.key_id}-${group.code}-desktop-stats`"
-                      :data-testid="`pool-stats-cycle-group-${group.code}`"
+                      class="grid min-h-16 w-[188px] grid-cols-[38px_64px_10px_64px] items-center gap-x-1"
+                      data-testid="pool-stats-cycle-grid"
                     >
-                      <div class="text-[9px] text-muted-foreground/70 font-medium mb-0.5">{{ group.label }}</div>
-                      <div
-                        v-for="metric in group.metrics"
-                        :key="`${group.code}-${metric.key}`"
-                        class="flex items-center justify-between gap-2"
+                      <span aria-hidden="true" />
+                      <span
+                        class="text-center text-[9px] font-semibold text-muted-foreground/80"
+                        data-testid="pool-stats-cycle-group-5h"
+                      >5H</span>
+                      <span class="text-center text-muted-foreground/50">|</span>
+                      <span
+                        class="text-center text-[9px] font-semibold text-muted-foreground/80"
+                        data-testid="pool-stats-cycle-group-weekly"
+                      >周</span>
+
+                      <template
+                        v-for="row in getPoolKeyCycleStatsRows(key)"
+                        :key="`${key.key_id}-${row.key}-desktop-cycle-row`"
                       >
-                        <span class="text-muted-foreground">{{ metric.label }}</span>
+                        <span class="text-muted-foreground truncate">{{ row.label }}</span>
                         <span
-                          class="tabular-nums text-foreground/90"
-                          :class="metric.missing ? 'text-muted-foreground/80' : ''"
-                          :data-testid="`pool-stats-${group.code}-${metric.key}`"
-                        >{{ metric.value }}</span>
-                      </div>
+                          class="min-w-0 truncate text-center tabular-nums text-foreground/90"
+                          :class="row.fiveH.missing ? 'text-muted-foreground/80' : ''"
+                          :data-testid="`pool-stats-5h-${row.key}`"
+                          :title="row.fiveH.value"
+                        >{{ row.fiveH.value }}</span>
+                        <span class="text-center text-muted-foreground/50">|</span>
+                        <span
+                          class="min-w-0 truncate text-center tabular-nums text-foreground/90"
+                          :class="row.weekly.missing ? 'text-muted-foreground/80' : ''"
+                          :data-testid="`pool-stats-weekly-${row.key}`"
+                          :title="row.weekly.value"
+                        >{{ row.weekly.value }}</span>
+                      </template>
                     </div>
                   </div>
                   <div
                     v-else
-                    class="grid grid-rows-3 gap-0.5 w-[136px] mx-auto text-[10px] leading-4"
+                    class="grid min-h-16 w-[188px] grid-rows-4 gap-0 mx-auto text-[10px] leading-4"
                     data-testid="pool-stats-account-total"
                   >
                     <div
+                      class="invisible h-4"
+                      aria-hidden="true"
+                    >
+                      -
+                    </div>
+                    <div
                       v-for="metric in getPoolKeyAccountStatsMetrics(key)"
                       :key="`${key.key_id}-${metric.key}-account-total`"
-                      class="flex items-center justify-between gap-2"
+                      class="grid grid-cols-[64px_124px] items-center"
                     >
-                      <span class="text-muted-foreground">{{ metric.label }}</span>
-                      <span class="tabular-nums text-foreground/90">
+                      <span class="text-muted-foreground truncate">{{ metric.label }}</span>
+                      <span
+                        class="min-w-0 truncate text-center tabular-nums text-foreground/90"
+                        :title="metric.value"
+                      >
                         {{ metric.value }}
                       </span>
                     </div>
@@ -701,6 +685,21 @@
                       @click="clearCooldown(key.key_id)"
                     >
                       <RefreshCw class="w-3.5 h-3.5" />
+                    </Button>
+                    <Button
+                      v-if="canResetCycleStats(key)"
+                      variant="ghost"
+                      size="icon"
+                      class="h-7 w-7 text-muted-foreground hover:text-foreground"
+                      :disabled="resettingCycleKeyId === key.key_id"
+                      title="重置周期统计"
+                      data-testid="pool-reset-cycle-stats"
+                      @click="handleResetCycleStats(key)"
+                    >
+                      <RotateCcw
+                        class="w-3.5 h-3.5"
+                        :class="{ 'animate-spin': resettingCycleKeyId === key.key_id }"
+                      />
                     </Button>
                     <Button
                       variant="ghost"
@@ -869,35 +868,56 @@
                 <div class="space-y-1 text-center">
                   <template v-if="isPoolKeyCycleStatsDisplay(key)">
                     <div
-                      v-for="group in getPoolKeyCycleStatsGroups(key)"
-                      :key="`${key.key_id}-${group.code}-mobile-stats`"
-                      class="flex items-start gap-3 text-left"
-                      :data-testid="`pool-mobile-stats-cycle-group-${group.code}`"
+                      class="grid min-h-16 w-[188px] grid-cols-[38px_64px_10px_64px] items-center gap-x-1 text-left"
+                      data-testid="pool-mobile-stats-cycle-grid"
                     >
-                      <span class="w-10 shrink-0 pt-0.5 text-[10px] font-semibold text-foreground">{{ group.label }}</span>
-                      <div class="min-w-0 flex-1 space-y-0.5">
-                        <div
-                          v-for="metric in group.metrics"
-                          :key="`${group.code}-${metric.key}-mobile`"
-                          class="flex items-center justify-between gap-2"
-                        >
-                          <span class="text-muted-foreground">{{ metric.label }}</span>
-                          <span
-                            class="font-medium text-foreground/90 tabular-nums"
-                            :class="metric.missing ? 'text-muted-foreground/80' : ''"
-                          >{{ metric.value }}</span>
-                        </div>
-                      </div>
+                      <span aria-hidden="true" />
+                      <span
+                        class="text-center text-[10px] font-semibold text-foreground"
+                        data-testid="pool-mobile-stats-cycle-group-5h"
+                      >5H</span>
+                      <span class="text-center text-muted-foreground/50">|</span>
+                      <span
+                        class="text-center text-[10px] font-semibold text-foreground"
+                        data-testid="pool-mobile-stats-cycle-group-weekly"
+                      >周</span>
+
+                      <template
+                        v-for="row in getPoolKeyCycleStatsRows(key)"
+                        :key="`${key.key_id}-${row.key}-mobile-cycle-row`"
+                      >
+                        <span class="text-muted-foreground truncate">{{ row.label }}</span>
+                        <span
+                          class="min-w-0 truncate text-center font-medium text-foreground/90 tabular-nums"
+                          :class="row.fiveH.missing ? 'text-muted-foreground/80' : ''"
+                          :title="row.fiveH.value"
+                        >{{ row.fiveH.value }}</span>
+                        <span class="text-center text-muted-foreground/50">|</span>
+                        <span
+                          class="min-w-0 truncate text-center font-medium text-foreground/90 tabular-nums"
+                          :class="row.weekly.missing ? 'text-muted-foreground/80' : ''"
+                          :title="row.weekly.value"
+                        >{{ row.weekly.value }}</span>
+                      </template>
                     </div>
                   </template>
                   <template v-else>
                     <div
+                      class="invisible h-4"
+                      aria-hidden="true"
+                    >
+                      -
+                    </div>
+                    <div
                       v-for="metric in getPoolKeyAccountStatsMetrics(key)"
                       :key="`${key.key_id}-${metric.key}-mobile-account-total`"
-                      class="flex items-center justify-between gap-2"
+                      class="grid h-4 w-[188px] grid-cols-[64px_124px] items-center text-left"
                     >
-                      <span class="text-muted-foreground">{{ metric.label }}</span>
-                      <span class="font-medium text-foreground/90">{{ metric.value }}</span>
+                      <span class="text-muted-foreground truncate">{{ metric.label }}</span>
+                      <span
+                        class="min-w-0 truncate text-center font-medium text-foreground/90"
+                        :title="metric.value"
+                      >{{ metric.value }}</span>
                     </div>
                   </template>
                   <div class="flex items-center justify-between gap-2 border-t border-border/40 pt-1 mt-1">
@@ -1073,6 +1093,20 @@
                     </PopoverContent>
                   </Popover>
                   <Button
+                    v-else-if="actionId === 'reset_cycle_stats'"
+                    variant="ghost"
+                    size="icon"
+                    class="h-7 w-7 shrink-0 text-muted-foreground hover:text-foreground"
+                    :disabled="resettingCycleKeyId === key.key_id"
+                    title="重置周期统计"
+                    @click="handleResetCycleStats(key)"
+                  >
+                    <RotateCcw
+                      class="w-3.5 h-3.5"
+                      :class="{ 'animate-spin': resettingCycleKeyId === key.key_id }"
+                    />
+                  </Button>
+                  <Button
                     v-else-if="actionId === 'edit'"
                     variant="ghost"
                     size="icon"
@@ -1232,6 +1266,8 @@ import {
   Copy,
   Shield,
   Globe,
+  Repeat2,
+  RotateCcw,
   SquarePen,
   Trash2,
   Users,
@@ -1257,7 +1293,6 @@ import {
   SortableTableHead,
   TableFilterMenu,
   TableCell,
-  Switch,
   Pagination,
   Popover,
   PopoverTrigger,
@@ -1282,6 +1317,7 @@ import {
   deleteEndpointKey,
   updateProviderKey,
   refreshProviderQuota,
+  resetProviderKeyCycleStats,
 } from '@/api/endpoints/keys'
 import { refreshProviderOAuth } from '@/api/endpoints/provider_oauth'
 import type {
@@ -1596,13 +1632,7 @@ const selectedProviderType = computed(() => {
   return String(fromOverview || '').trim().toLowerCase()
 })
 
-const showCodexStatsModeSwitch = computed(() => selectedProviderType.value === 'codex')
-const codexCurrentCycleStatsEnabled = computed({
-  get: () => poolStatsMode.value === 'current_cycle',
-  set: (enabled: boolean) => {
-    poolStatsMode.value = enabled ? 'current_cycle' : 'account_total'
-  },
-})
+const showCodexStatsModeToggle = computed(() => selectedProviderType.value === 'codex')
 
 const selectedProviderStatusText = computed(() => {
   if (!selectedProviderId.value) return ''
@@ -1632,9 +1662,9 @@ const showAccountQuotaColumn = computed(() => {
 const desktopColumnWidths = computed(() => {
   if (showAccountQuotaColumn.value) {
     return {
-      name: '24%',
+      name: '22%',
       quota: '21%',
-      stats: '13%',
+      stats: '15%',
       imported: '10%',
       lastUsed: '9%',
       status: '7%',
@@ -1732,6 +1762,7 @@ const poolStatsMode = ref<PoolManagementStatsMode>(restoredViewState.statsMode)
 const hasPoolKeyFilters = computed(() => searchQuery.value.trim().length > 0 || statusFilter.value !== 'all')
 const MANUAL_QUOTA_REFRESH_COOLDOWN_SECONDS = 5 * 60
 const refreshingOAuthKeyId = ref<string | null>(null)
+const resettingCycleKeyId = ref<string | null>(null)
 const savingProxyKeyId = ref<string | null>(null)
 const proxyDesktopPopoverOpenKeyId = ref<string | null>(null)
 const proxyMobilePopoverOpenKeyId = ref<string | null>(null)
@@ -1745,6 +1776,12 @@ const keyPermissionsDialogOpen = ref(false)
 const keyFormDialogOpen = ref(false)
 const oauthKeyEditDialogOpen = ref(false)
 const editingKeyDetail = ref<PoolKeyDetail | null>(null)
+
+function togglePoolStatsMode() {
+  poolStatsMode.value = poolStatsMode.value === 'current_cycle'
+    ? 'account_total'
+    : 'current_cycle'
+}
 
 function clearPoolKeyFilters() {
   if (!hasPoolKeyFilters.value) return
@@ -1864,6 +1901,20 @@ interface QuotaProgressItem {
   updatedAtSeconds?: number | null
 }
 
+interface PoolCodexCycleStatsRow {
+  key: PoolStatsMetric['key']
+  label: string
+  fiveH: PoolStatsMetric
+  weekly: PoolStatsMetric
+}
+
+const CODEX_CYCLE_STAT_KEYS: Array<PoolStatsMetric['key']> = ['request_count', 'total_tokens', 'total_cost_usd']
+const CODEX_CYCLE_STAT_LABELS: Record<PoolStatsMetric['key'], string> = {
+  request_count: '请求',
+  total_tokens: 'Token',
+  total_cost_usd: '费用',
+}
+
 type PoolKeyUiState = {
   rowClass: string
   schedulingBadgeLabel: string
@@ -1926,6 +1977,7 @@ const keyUiStateMap = computed<Record<string, PoolKeyUiState>>(() => {
       mobileActionIds: splitPoolMobileActions({
         canDownloadOrCopy: true,
         showRefreshToken: showOAuthRefreshControl,
+        canResetCycleStats: canResetCycleStats(key),
         canClearCooldown: Boolean(key.cooldown_reason),
         hasProxy: true,
       }).primary,
@@ -1949,6 +2001,39 @@ function getPoolKeyCycleStatsGroups(key: PoolKeyDetail): PoolCodexCycleStatsGrou
   return display.kind === 'codex_cycle' ? display.groups : []
 }
 
+function createMissingCycleMetric(key: PoolStatsMetric['key']): PoolStatsMetric {
+  return {
+    key,
+    label: CODEX_CYCLE_STAT_LABELS[key],
+    value: '—',
+    missing: true,
+  }
+}
+
+function findCycleMetric(
+  group: PoolCodexCycleStatsGroup | undefined,
+  key: PoolStatsMetric['key'],
+): PoolStatsMetric {
+  return group?.metrics.find(metric => metric.key === key) ?? createMissingCycleMetric(key)
+}
+
+function getPoolKeyCycleStatsRows(key: PoolKeyDetail): PoolCodexCycleStatsRow[] {
+  const groups = getPoolKeyCycleStatsGroups(key)
+  const fiveHGroup = groups.find(group => group.code === '5h')
+  const weeklyGroup = groups.find(group => group.code === 'weekly')
+
+  return CODEX_CYCLE_STAT_KEYS.map((metricKey) => {
+    const fiveH = findCycleMetric(fiveHGroup, metricKey)
+    const weekly = findCycleMetric(weeklyGroup, metricKey)
+    return {
+      key: metricKey,
+      label: CODEX_CYCLE_STAT_LABELS[metricKey],
+      fiveH,
+      weekly,
+    }
+  })
+}
+
 function getPoolKeyAccountStatsMetrics(key: PoolKeyDetail): PoolStatsMetric[] {
   const display = getPoolKeyStatsDisplay(key)
   return display.kind === 'account_total'
@@ -1962,6 +2047,10 @@ const quotaRefreshSupported = computed(() => {
     || selectedProviderType.value === 'antigravity'
     || selectedProviderType.value === 'chatgpt_web'
 })
+
+function canResetCycleStats(_key: PoolKeyDetail): boolean {
+  return selectedProviderType.value === 'codex' && Boolean(_key.key_id)
+}
 
 const refreshCurrentPageLoading = computed(() => {
   return keysLoading.value || refreshingCurrentPageQuota.value
@@ -2516,6 +2605,28 @@ async function clearCooldown(keyId: string) {
     refreshOverviewInBackground()
   } catch (err) {
     showError(parseApiError(err))
+  }
+}
+
+async function handleResetCycleStats(key: PoolKeyDetail) {
+  if (resettingCycleKeyId.value || !canResetCycleStats(key)) return
+
+  const confirmed = await confirm({
+    title: '重置周期统计',
+    message: `确定要将账号 "${key.key_name || key.key_id.slice(0, 8)}" 的 5H / 周统计从当前时间重新开始计算吗？`,
+    confirmText: '重置',
+  })
+  if (!confirmed) return
+
+  resettingCycleKeyId.value = key.key_id
+  try {
+    const result = await resetProviderKeyCycleStats(key.key_id)
+    success(result.message || '周期统计已重置')
+    await loadKeys()
+  } catch (err) {
+    showError(parseApiError(err, '重置周期统计失败'))
+  } finally {
+    resettingCycleKeyId.value = null
   }
 }
 

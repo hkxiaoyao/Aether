@@ -189,7 +189,7 @@ describe('poolTrace', () => {
     expect(isAttemptedCandidate(buildCandidate({ status: 'unused' }))).toBe(false)
   })
 
-  it('shows only attempted pool children when attempted nodes exist', () => {
+  it('keeps skipped pool children visible when attempted nodes exist', () => {
     const attempts = buildPoolGroupVisibleAttempts([
       buildCandidate({
         id: 'cand-skipped',
@@ -210,10 +210,10 @@ describe('poolTrace', () => {
       }),
     ])
 
-    expect(attempts.map(item => item.id)).toEqual(['cand-failed', 'cand-success'])
+    expect(attempts.map(item => item.id)).toEqual(['cand-skipped', 'cand-failed', 'cand-success'])
   })
 
-  it('collapses all-skipped pool nodes to a single provider node', () => {
+  it('keeps all skipped pool children visible', () => {
     const attempts = buildPoolGroupVisibleAttempts([
       buildCandidate({
         id: 'cand-skipped-1',
@@ -227,6 +227,6 @@ describe('poolTrace', () => {
       }),
     ])
 
-    expect(attempts.map(item => item.id)).toEqual(['cand-skipped-2'])
+    expect(attempts.map(item => item.id)).toEqual(['cand-skipped-1', 'cand-skipped-2'])
   })
 })

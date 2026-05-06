@@ -68,14 +68,7 @@ export const isAttemptedCandidate = (
 export function buildPoolGroupVisibleAttempts(
   attempts: CandidateRecord[],
 ): CandidateRecord[] {
-  if (attempts.length === 0) return []
-
-  const attempted = attempts.filter(isAttemptedCandidate)
-  if (attempted.length > 0) {
-    return attempted
-  }
-
-  return [attempts[attempts.length - 1]]
+  return attempts.filter(isPoolParticipatedCandidate)
 }
 
 export const parseTimelineStatus = (value: unknown): CandidateRecord['status'] | null => {

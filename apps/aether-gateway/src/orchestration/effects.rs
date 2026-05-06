@@ -731,6 +731,10 @@ fn local_candidate_failure_should_record_pool_error(
     classification: LocalFailoverClassification,
     status_code: u16,
 ) -> bool {
+    if status_code == 400 {
+        return false;
+    }
+
     local_candidate_failure_should_invalidate_affinity(classification, status_code)
 }
 
@@ -1439,6 +1443,10 @@ mod tests {
     fn configured_stop_pattern_does_not_penalize_pool_feedback() {
         assert!(!local_candidate_failure_should_record_pool_error(
             LocalFailoverClassification::StopErrorPattern,
+            400,
+        ));
+        assert!(!local_candidate_failure_should_record_pool_error(
+            LocalFailoverClassification::RetryUpstreamFailure,
             400,
         ));
         assert!(local_candidate_failure_should_record_pool_error(

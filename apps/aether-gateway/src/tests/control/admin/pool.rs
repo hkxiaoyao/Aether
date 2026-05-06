@@ -798,6 +798,28 @@ async fn gateway_sorts_admin_pool_keys_by_imported_and_last_used_time() {
             provider_catalog_repository,
         ));
 
+    let default_response = local_admin_pool_response(
+        &state,
+        http::Method::GET,
+        "/api/admin/pool/provider-openai/keys?page=1&page_size=50&status=all",
+        None,
+    )
+    .await;
+    assert_eq!(default_response.status(), StatusCode::OK);
+    let default_payload: serde_json::Value = serde_json::from_slice(
+        &to_bytes(default_response.into_body(), usize::MAX)
+            .await
+            .expect("body should read"),
+    )
+    .expect("json body should parse");
+    let default_names = default_payload["keys"]
+        .as_array()
+        .expect("keys should be array")
+        .iter()
+        .map(|item| item["key_name"].as_str().unwrap_or_default())
+        .collect::<Vec<_>>();
+    assert_eq!(default_names, vec!["fresh", "active", "old"]);
+
     let imported_response = local_admin_pool_response(
         &state,
         http::Method::GET,

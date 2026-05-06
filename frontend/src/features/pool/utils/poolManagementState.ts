@@ -43,7 +43,7 @@ export const DEFAULT_POOL_MANAGEMENT_VIEW_STATE: PoolManagementViewState = {
   status: 'all',
   page: 1,
   pageSize: 50,
-  sortBy: null,
+  sortBy: 'imported_at',
   sortOrder: 'desc',
   statsMode: 'current_cycle',
 }
@@ -76,7 +76,7 @@ function normalizeSortBy(value: unknown): PoolManagementSortBy | null {
   if (value === 'imported_at' || value === 'last_used_at') {
     return value
   }
-  return null
+  return DEFAULT_POOL_MANAGEMENT_VIEW_STATE.sortBy
 }
 
 function normalizeSortOrder(value: unknown): PoolManagementSortOrder {
@@ -156,6 +156,8 @@ export function buildPoolManagementQueryPatch(
 ): Record<string, string | undefined> {
   const normalized = normalizeViewState(state)
   const search = normalized.search.trim()
+  const isDefaultSort = normalized.sortBy === DEFAULT_POOL_MANAGEMENT_VIEW_STATE.sortBy
+    && normalized.sortOrder === DEFAULT_POOL_MANAGEMENT_VIEW_STATE.sortOrder
 
   return {
     providerId: normalized.providerId || undefined,
@@ -166,8 +168,8 @@ export function buildPoolManagementQueryPatch(
       normalized.pageSize === DEFAULT_POOL_MANAGEMENT_VIEW_STATE.pageSize
         ? undefined
         : String(normalized.pageSize),
-    sortBy: normalized.sortBy || undefined,
-    sortOrder: normalized.sortBy ? normalized.sortOrder : undefined,
+    sortBy: isDefaultSort ? undefined : normalized.sortBy || undefined,
+    sortOrder: isDefaultSort ? undefined : normalized.sortBy ? normalized.sortOrder : undefined,
     statsMode: normalized.statsMode === 'account_total' ? 'account_total' : undefined,
   }
 }

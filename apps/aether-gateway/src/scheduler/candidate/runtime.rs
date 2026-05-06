@@ -366,6 +366,12 @@ fn oauth_invalid_reason_is_hard_account_block(
     provider_type: &str,
     invalid_reason: &str,
 ) -> bool {
+    if provider_type.trim().eq_ignore_ascii_case("kiro")
+        && invalid_reason.trim().starts_with("[REFRESH_FAILED] ")
+    {
+        return true;
+    }
+
     let account_state = admin_provider_status_pure::resolve_pool_account_state(
         Some(provider_type),
         key.upstream_metadata.as_ref(),
