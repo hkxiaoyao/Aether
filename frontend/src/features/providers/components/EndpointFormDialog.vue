@@ -306,7 +306,7 @@
                   >
                     <Textarea
                       :model-value="getEndpointRulesJsonDraft(endpoint)"
-                      class="min-h-[360px] font-mono text-xs leading-relaxed"
+                      class="min-h-[220px] font-mono text-xs leading-relaxed"
                       spellcheck="false"
                       placeholder="{ &quot;header_rules&quot;: [], &quot;body_rules&quot;: [], &quot;response_header_rules&quot;: [] }"
                       @update:model-value="(value) => updateEndpointRulesJsonDraft(endpoint.id, value)"
