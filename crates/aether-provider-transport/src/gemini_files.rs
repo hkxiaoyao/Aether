@@ -4,7 +4,9 @@ use serde_json::{json, Value};
 
 use crate::auth::{build_passthrough_headers_with_auth, resolve_local_gemini_auth};
 use crate::policy::local_gemini_transport_unsupported_reason_with_network;
-use crate::rules::{apply_local_body_rules, apply_local_header_rules};
+use crate::rules::{
+    apply_local_body_rules_with_request_headers, apply_local_header_rules_with_request_headers,
+};
 use crate::snapshot::GatewayProviderTransportSnapshot;
 use crate::url::build_gemini_files_passthrough_url;
 
@@ -70,6 +72,7 @@ pub fn build_gemini_files_request_body(
     body_is_empty: bool,
     is_upload: bool,
     body_rules: Option<&Value>,
+    request_headers: Option<&http::HeaderMap>,
 ) -> Result<GeminiFilesRequestBodyParts, GeminiFilesRequestBodyError> {
     let mut provider_request_body = if is_upload && !body_is_empty && body_base64.is_none() {
         Some(body_json.clone())
@@ -88,7 +91,12 @@ pub fn build_gemini_files_request_body(
         return Err(GeminiFilesRequestBodyError::BodyRulesUnsupportedForBinaryUpload);
     }
     if let Some(body) = provider_request_body.as_mut() {
-        if !apply_local_body_rules(body, body_rules, Some(body_json)) {
+        if !apply_local_body_rules_with_request_headers(
+            body,
+            body_rules,
+            Some(body_json),
+            request_headers,
+        ) {
             return Err(GeminiFilesRequestBodyError::BodyRulesApplyFailed);
         }
     }
@@ -116,12 +124,13 @@ pub fn build_gemini_files_headers(
         .as_ref()
         .or_else(|| (!input.original_body_is_empty).then_some(input.original_request_body_json))
         .unwrap_or(&null_original_request_body);
-    if !apply_local_header_rules(
+    if !apply_local_header_rules_with_request_headers(
         &mut provider_request_headers,
         input.header_rules,
         &[input.auth_header, "content-type"],
         input.provider_request_body.unwrap_or(original_request_body),
         Some(original_request_body),
+        Some(input.headers),
     ) {
         return None;
     }
@@ -216,6 +225,7 @@ mod tests {
             Some(&json!([
                 {"action":"set","path":"metadata.source","value":"local"}
             ])),
+            None,
         )
         .expect("body should build");
 
@@ -236,7 +246,8 @@ mod tests {
                 Some("YWJj"),
                 false,
                 true,
-                Some(&json!([{"action":"set","path":"x","value":1}]))
+                Some(&json!([{"action":"set","path":"x","value":1}])),
+                None,
             ),
             Err(GeminiFilesRequestBodyError::BodyRulesUnsupportedForBinaryUpload)
         );

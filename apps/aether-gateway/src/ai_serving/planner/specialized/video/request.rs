@@ -124,6 +124,7 @@ pub(super) async fn resolve_local_video_create_candidate_payload_parts(
         provider_family,
         &mapped_model,
         transport.endpoint.body_rules.as_ref(),
+        Some(&parts.headers),
     ) else {
         mark_skipped_local_video_candidate_with_failure_diagnostic(
             state,

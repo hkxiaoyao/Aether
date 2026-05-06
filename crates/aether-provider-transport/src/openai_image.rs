@@ -4,7 +4,7 @@ use serde_json::Value;
 
 use crate::auth::{build_passthrough_headers_with_auth, resolve_local_openai_bearer_auth};
 use crate::policy::local_standard_transport_unsupported_reason_with_network;
-use crate::rules::apply_local_header_rules;
+use crate::rules::apply_local_header_rules_with_request_headers;
 use crate::snapshot::GatewayProviderTransportSnapshot;
 use crate::url::build_openai_responses_url;
 
@@ -59,12 +59,13 @@ pub fn build_openai_image_headers(
     );
     provider_request_headers.insert("content-type".to_string(), "application/json".to_string());
     provider_request_headers.insert("accept".to_string(), "text/event-stream".to_string());
-    if !apply_local_header_rules(
+    if !apply_local_header_rules_with_request_headers(
         &mut provider_request_headers,
         input.header_rules,
         &[input.auth_header, "content-type", "accept"],
         input.provider_request_body,
         Some(input.original_request_body),
+        Some(input.headers),
     ) {
         return None;
     }

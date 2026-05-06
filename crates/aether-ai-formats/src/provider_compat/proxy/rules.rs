@@ -9,10 +9,16 @@ use serde_json::{Map, Value};
 const ORIGINAL_PLACEHOLDER: &str = "{{$original}}";
 const ITEM_PREFIX: &str = "$item.";
 const ITEM_EXACT: &str = "$item";
-const CONDITION_SOURCES: &[&str] = &["current", "original"];
+const CONDITION_SOURCES: &[&str] = &["body", "request_headers", "headers", "original", "current"];
 const CONDITION_TYPE_VALUES: &[&str] = &["string", "number", "boolean", "array", "object", "null"];
 
 static RANGE_RE: OnceLock<Regex> = OnceLock::new();
+
+#[derive(Clone, Copy)]
+enum ConditionHeaders<'a> {
+    Request(&'a http::HeaderMap),
+    Map(&'a BTreeMap<String, String>),
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum BodyPathSegment {
@@ -35,6 +41,35 @@ pub fn apply_local_header_rules(
     body: &Value,
     original_body: Option<&Value>,
 ) -> bool {
+    apply_local_header_rules_inner(headers, rules, protected_keys, body, original_body, None)
+}
+
+pub fn apply_local_header_rules_with_request_headers(
+    headers: &mut BTreeMap<String, String>,
+    rules: Option<&Value>,
+    protected_keys: &[&str],
+    body: &Value,
+    original_body: Option<&Value>,
+    request_headers: Option<&http::HeaderMap>,
+) -> bool {
+    apply_local_header_rules_inner(
+        headers,
+        rules,
+        protected_keys,
+        body,
+        original_body,
+        request_headers.map(ConditionHeaders::Request),
+    )
+}
+
+fn apply_local_header_rules_inner(
+    headers: &mut BTreeMap<String, String>,
+    rules: Option<&Value>,
+    protected_keys: &[&str],
+    body: &Value,
+    original_body: Option<&Value>,
+    request_headers: Option<ConditionHeaders<'_>>,
+) -> bool {
     let Some(rules) = rules else {
         return true;
     };
@@ -54,7 +89,8 @@ pub fn apply_local_header_rules(
             if !condition_is_locally_supported(condition) {
                 continue;
             }
-            if !evaluate_local_condition(body, condition, original_body) {
+            let condition_headers = request_headers.or(Some(ConditionHeaders::Map(&*headers)));
+            if !evaluate_local_condition(body, condition, original_body, condition_headers) {
                 continue;
             }
         }
@@ -179,6 +215,29 @@ pub fn apply_local_body_rules(
     rules: Option<&Value>,
     original_body: Option<&Value>,
 ) -> bool {
+    apply_local_body_rules_inner(body, rules, original_body, None)
+}
+
+pub fn apply_local_body_rules_with_request_headers(
+    body: &mut Value,
+    rules: Option<&Value>,
+    original_body: Option<&Value>,
+    request_headers: Option<&http::HeaderMap>,
+) -> bool {
+    apply_local_body_rules_inner(
+        body,
+        rules,
+        original_body,
+        request_headers.map(ConditionHeaders::Request),
+    )
+}
+
+fn apply_local_body_rules_inner(
+    body: &mut Value,
+    rules: Option<&Value>,
+    original_body: Option<&Value>,
+    request_headers: Option<ConditionHeaders<'_>>,
+) -> bool {
     let Some(rules) = rules else {
         return true;
     };
@@ -197,7 +256,9 @@ pub fn apply_local_body_rules(
             if !condition_is_locally_supported(condition) {
                 continue;
             }
-            if !item_condition && !evaluate_local_condition(body, condition, original_body) {
+            if !item_condition
+                && !evaluate_local_condition(body, condition, original_body, request_headers)
+            {
                 continue;
             }
         }
@@ -220,11 +281,14 @@ pub fn apply_local_body_rules(
                 let targets = iter_wildcard_targets(
                     body,
                     &path,
-                    condition,
-                    item_condition,
-                    original_body,
-                    false,
-                    false,
+                    WildcardTargetOptions {
+                        condition,
+                        item_condition,
+                        original_body,
+                        request_headers,
+                        require_leaf: false,
+                        reverse: false,
+                    },
                 );
                 let value_template = rule.get("value").cloned().unwrap_or(Value::Null);
                 for target_path in targets {
@@ -248,11 +312,14 @@ pub fn apply_local_body_rules(
                 for target_path in iter_wildcard_targets(
                     body,
                     &path,
-                    condition,
-                    item_condition,
-                    original_body,
-                    true,
-                    true,
+                    WildcardTargetOptions {
+                        condition,
+                        item_condition,
+                        original_body,
+                        request_headers,
+                        require_leaf: true,
+                        reverse: true,
+                    },
                 ) {
                     let _ = delete_nested_value(body, &target_path);
                 }
@@ -289,11 +356,14 @@ pub fn apply_local_body_rules(
                 for target_path in iter_wildcard_targets(
                     body,
                     &path,
-                    condition,
-                    item_condition,
-                    original_body,
-                    true,
-                    false,
+                    WildcardTargetOptions {
+                        condition,
+                        item_condition,
+                        original_body,
+                        request_headers,
+                        require_leaf: true,
+                        reverse: false,
+                    },
                 ) {
                     if let Some(target) = get_nested_value_mut(body, &target_path) {
                         if let Some(values) = target.as_array_mut() {
@@ -352,11 +422,14 @@ pub fn apply_local_body_rules(
                 for target_path in iter_wildcard_targets(
                     body,
                     &path,
-                    condition,
-                    item_condition,
-                    original_body,
-                    true,
-                    false,
+                    WildcardTargetOptions {
+                        condition,
+                        item_condition,
+                        original_body,
+                        request_headers,
+                        require_leaf: true,
+                        reverse: false,
+                    },
                 ) {
                     if let Some(target) = get_nested_value_mut(body, &target_path) {
                         let Some(current) = target.as_str().map(str::to_owned) else {
@@ -394,7 +467,7 @@ fn condition_is_locally_supported(condition: &Value) -> bool {
         .get("source")
         .and_then(Value::as_str)
         .map(str::trim)
-        .unwrap_or("current");
+        .unwrap_or("body");
     if !CONDITION_SOURCES.contains(&source) {
         return false;
     }
@@ -402,15 +475,13 @@ fn condition_is_locally_supported(condition: &Value) -> bool {
     let Some(op) = condition.get("op").and_then(Value::as_str).map(str::trim) else {
         return false;
     };
-    let Some(path) = condition
-        .get("path")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .and_then(parse_body_path)
-    else {
+    let Some(path) = condition.get("path").and_then(Value::as_str) else {
         return false;
     };
-    if path.is_empty() {
+    if path.trim().is_empty() {
+        return false;
+    }
+    if !condition_source_is_headers(source) && parse_body_path(path).is_none() {
         return false;
     }
 
@@ -443,6 +514,7 @@ fn evaluate_local_condition(
     body: &Value,
     condition: &Value,
     original_body: Option<&Value>,
+    request_headers: Option<ConditionHeaders<'_>>,
 ) -> bool {
     let Some(condition) = condition.as_object() else {
         return false;
@@ -450,41 +522,40 @@ fn evaluate_local_condition(
 
     if let Some(children) = condition.get("all").and_then(Value::as_array) {
         return !children.is_empty()
-            && children
-                .iter()
-                .all(|child| evaluate_local_condition(body, child, original_body));
+            && children.iter().all(|child| {
+                evaluate_local_condition(body, child, original_body, request_headers)
+            });
     }
     if let Some(children) = condition.get("any").and_then(Value::as_array) {
         return !children.is_empty()
-            && children
-                .iter()
-                .any(|child| evaluate_local_condition(body, child, original_body));
+            && children.iter().any(|child| {
+                evaluate_local_condition(body, child, original_body, request_headers)
+            });
     }
 
     let source = condition
         .get("source")
         .and_then(Value::as_str)
         .map(str::trim)
-        .unwrap_or("current");
-    let target = if source.eq_ignore_ascii_case("original") {
-        original_body.unwrap_or(body)
-    } else {
-        body
-    };
+        .unwrap_or("body");
 
     let Some(op) = condition.get("op").and_then(Value::as_str).map(str::trim) else {
         return false;
     };
-    let Some(path) = condition
-        .get("path")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .and_then(parse_body_path)
-    else {
+    let Some(path) = condition.get("path").and_then(Value::as_str).map(str::trim) else {
         return false;
     };
 
-    let current_value = get_nested_value(target, &path);
+    let current_value = if condition_source_is_headers(source) {
+        request_headers.and_then(|headers| get_header_condition_value(headers, path))
+    } else {
+        let target = if source.eq_ignore_ascii_case("current") {
+            body
+        } else {
+            original_body.unwrap_or(body)
+        };
+        parse_body_path(path).and_then(|path| get_nested_value(target, &path))
+    };
     if op == "exists" {
         return current_value.is_some();
     }
@@ -553,6 +624,24 @@ fn evaluate_local_condition(
                 _ => false,
             }),
         _ => false,
+    }
+}
+
+fn condition_source_is_headers(source: &str) -> bool {
+    source.eq_ignore_ascii_case("request_headers") || source.eq_ignore_ascii_case("headers")
+}
+
+fn get_header_condition_value(headers: ConditionHeaders<'_>, path: &str) -> Option<Value> {
+    let key = path.trim().to_ascii_lowercase();
+    if key.is_empty() {
+        return None;
+    }
+    match headers {
+        ConditionHeaders::Request(headers) => headers
+            .get(key.as_str())
+            .and_then(|value| value.to_str().ok())
+            .map(|value| Value::String(value.trim().to_string())),
+        ConditionHeaders::Map(headers) => headers.get(&key).cloned().map(Value::String),
     }
 }
 
@@ -887,29 +976,34 @@ fn expand_wildcard_paths_recursive(
     }
 }
 
+struct WildcardTargetOptions<'a> {
+    condition: Option<&'a Value>,
+    item_condition: bool,
+    original_body: Option<&'a Value>,
+    request_headers: Option<ConditionHeaders<'a>>,
+    require_leaf: bool,
+    reverse: bool,
+}
+
 fn iter_wildcard_targets(
     body: &Value,
     path: &[BodyPathSegment],
-    condition: Option<&Value>,
-    item_condition: bool,
-    original_body: Option<&Value>,
-    require_leaf: bool,
-    reverse: bool,
+    options: WildcardTargetOptions<'_>,
 ) -> Vec<Vec<BodyPathSegment>> {
     if !has_wildcard(path) {
         return vec![path.to_vec()];
     }
 
-    let mut expanded = expand_wildcard_paths(body, path, require_leaf);
-    if reverse {
+    let mut expanded = expand_wildcard_paths(body, path, options.require_leaf);
+    if options.reverse {
         expanded.reverse();
     }
 
-    if !item_condition {
+    if !options.item_condition {
         return expanded;
     }
 
-    let Some(condition) = condition else {
+    let Some(condition) = options.condition else {
         return expanded;
     };
 
@@ -918,7 +1012,12 @@ fn iter_wildcard_targets(
         .filter(|concrete_path| {
             let prefix = get_item_prefix_from_concrete(concrete_path, path);
             let resolved = resolve_item_condition(condition, &prefix);
-            evaluate_local_condition(body, &resolved, original_body)
+            evaluate_local_condition(
+                body,
+                &resolved,
+                options.original_body,
+                options.request_headers,
+            )
         })
         .collect()
 }
@@ -1194,8 +1293,10 @@ fn rename_nested_value(
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_local_body_rules, apply_local_header_rules, body_rules_are_locally_supported,
-        body_rules_handle_path, header_rules_are_locally_supported,
+        apply_local_body_rules, apply_local_body_rules_with_request_headers,
+        apply_local_header_rules, apply_local_header_rules_with_request_headers,
+        body_rules_are_locally_supported, body_rules_handle_path,
+        header_rules_are_locally_supported,
     };
 
     #[test]
@@ -1242,13 +1343,39 @@ mod tests {
             Some(&rules),
             &[],
             &serde_json::json!({"metadata":{"mode":"safe"}}),
-            Some(&serde_json::json!({"metadata":{"client":"desktop"}})),
+            Some(&serde_json::json!({"metadata":{"mode":"safe","client":"desktop"}})),
         ));
         assert_eq!(headers.get("x-added").map(String::as_str), Some("1"));
         assert_eq!(
             headers.get("x-from-original").map(String::as_str),
             Some("1")
         );
+    }
+
+    #[test]
+    fn header_rules_can_read_original_request_header_conditions() {
+        let rules = serde_json::json!([
+            {"action":"set","key":"x-applied","value":"yes","condition":{"source":"request_headers","path":"X-Mode","op":"eq","value":"debug"}},
+            {"action":"set","key":"x-skipped","value":"yes","condition":{"source":"request_headers","path":"x-missing","op":"exists"}}
+        ]);
+        let mut request_headers = http::HeaderMap::new();
+        request_headers.insert("x-mode", "debug".parse().unwrap());
+
+        let mut headers = std::collections::BTreeMap::from([(
+            "x-mode".to_string(),
+            "provider-value".to_string(),
+        )]);
+        assert!(apply_local_header_rules_with_request_headers(
+            &mut headers,
+            Some(&rules),
+            &[],
+            &serde_json::json!({}),
+            None,
+            Some(&request_headers),
+        ));
+
+        assert_eq!(headers.get("x-applied").map(String::as_str), Some("yes"));
+        assert!(!headers.contains_key("x-skipped"));
     }
 
     #[test]
@@ -1333,6 +1460,15 @@ mod tests {
         assert!(body_rules_are_locally_supported(Some(&rules)));
 
         let original = serde_json::json!({
+            "num": 10,
+            "text": "alpha-beta",
+            "tags": ["red", "green"],
+            "choice": "b",
+            "flag": true,
+            "maybe_null": null,
+            "profile": {
+                "name": "Ada"
+            },
             "legacy": {
                 "present": 1
             }
@@ -1376,6 +1512,53 @@ mod tests {
             "any": true
         });
         assert_eq!(body["results"], expected);
+    }
+
+    #[test]
+    fn body_conditions_default_to_original_request_body() {
+        let rules = serde_json::json!([
+            {"action":"set","path":"model","value":"provider-model"},
+            {"action":"set","path":"metadata.original_hit","value":true,"condition":{"path":"model","op":"eq","value":"client-model"}},
+            {"action":"set","path":"metadata.current_hit","value":true,"condition":{"path":"model","op":"eq","value":"provider-model"}}
+        ]);
+        let original = serde_json::json!({
+            "model": "client-model"
+        });
+        let mut body = original.clone();
+
+        assert!(apply_local_body_rules(
+            &mut body,
+            Some(&rules),
+            Some(&original)
+        ));
+
+        assert_eq!(body["model"], "provider-model");
+        assert_eq!(body["metadata"]["original_hit"], true);
+        assert!(body["metadata"].get("current_hit").is_none());
+    }
+
+    #[test]
+    fn body_rules_can_read_original_request_header_conditions() {
+        let rules = serde_json::json!([
+            {"action":"set","path":"metadata.from_header","value":true,"condition":{"source":"request_headers","path":"X-Mode","op":"eq","value":"debug"}},
+            {"action":"set","path":"metadata.contains","value":true,"condition":{"source":"headers","path":"x-feature","op":"contains","value":"beta"}},
+            {"action":"set","path":"metadata.skipped","value":true,"condition":{"source":"request_headers","path":"x-mode","op":"eq","value":"prod"}}
+        ]);
+        let mut request_headers = http::HeaderMap::new();
+        request_headers.insert("x-mode", "debug".parse().unwrap());
+        request_headers.insert("x-feature", "alpha,beta".parse().unwrap());
+        let mut body = serde_json::json!({});
+
+        assert!(apply_local_body_rules_with_request_headers(
+            &mut body,
+            Some(&rules),
+            None,
+            Some(&request_headers),
+        ));
+
+        assert_eq!(body["metadata"]["from_header"], true);
+        assert_eq!(body["metadata"]["contains"], true);
+        assert!(body["metadata"].get("skipped").is_none());
     }
 
     #[test]

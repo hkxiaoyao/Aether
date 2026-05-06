@@ -2632,7 +2632,7 @@ fn ai_serving_standard_attempts_consume_eligible_local_candidates_without_transp
         "build_complete_passthrough_headers_with_auth(",
         "build_claude_passthrough_headers(",
         "build_openai_passthrough_headers(",
-        "apply_local_header_rules(",
+        "apply_local_header_rules_with_request_headers(",
         "uses_vertex_api_key_query_auth(",
     ] {
         assert!(

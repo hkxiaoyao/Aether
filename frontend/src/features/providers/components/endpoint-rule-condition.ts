@@ -1,6 +1,6 @@
 import type { BodyRuleCondition, BodyRuleConditionOp } from '@/api/endpoints'
 
-export type ConditionSource = 'current' | 'original'
+export type ConditionSource = 'body' | 'request_headers'
 export type ConditionGroupMode = 'all' | 'any'
 
 export interface EditableConditionLeaf {
@@ -46,7 +46,7 @@ export function createEmptyConditionLeaf(): EditableConditionLeaf {
     path: '',
     op: 'eq',
     value: '',
-    source: 'current',
+    source: 'body',
   }
 }
 
@@ -86,6 +86,7 @@ export function conditionToEditable(condition?: BodyRuleCondition | null): Edita
       condition.any.map(child => conditionToEditable(child) || createEmptyConditionLeaf()),
     )
   }
+  const source = (condition as { source?: unknown }).source
   return {
     kind: 'leaf',
     path: condition.path || '',
@@ -93,7 +94,9 @@ export function conditionToEditable(condition?: BodyRuleCondition | null): Edita
     value: condition.value !== undefined
       ? (typeof condition.value === 'string' ? condition.value : JSON.stringify(condition.value))
       : '',
-    source: condition.source === 'original' ? 'original' : 'current',
+    source: source === 'request_headers' || source === 'headers'
+        ? 'request_headers'
+        : 'body',
   }
 }
 
@@ -114,7 +117,7 @@ export function editableConditionToApi(node: EditableConditionNode | null): Body
   const base = {
     path,
     op: node.op,
-    ...(node.source === 'original' ? { source: 'original' as const } : {}),
+    ...(node.source === 'request_headers' ? { source: 'request_headers' as const } : {}),
   }
 
   if (node.op === 'exists' || node.op === 'not_exists') {

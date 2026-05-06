@@ -6,7 +6,10 @@ use crate::auth::{
     build_claude_passthrough_headers, build_complete_passthrough_headers_with_auth,
     build_openai_passthrough_headers, build_passthrough_headers, ensure_upstream_auth_header,
 };
-use crate::rules::{apply_local_body_rules, apply_local_header_rules};
+use crate::rules::{
+    apply_local_body_rules, apply_local_body_rules_with_request_headers,
+    apply_local_header_rules_with_request_headers,
+};
 use crate::snapshot::GatewayProviderTransportSnapshot;
 use crate::url::{build_openai_chat_url, build_openai_responses_url};
 use crate::vertex::uses_vertex_api_key_query_auth;
@@ -157,6 +160,23 @@ pub fn apply_standard_provider_request_body_rules(
     Some(provider_request_body)
 }
 
+pub fn apply_standard_provider_request_body_rules_with_request_headers(
+    mut provider_request_body: Value,
+    body_rules: Option<&Value>,
+    original_request_body: &Value,
+    request_headers: &http::HeaderMap,
+) -> Option<Value> {
+    if !apply_local_body_rules_with_request_headers(
+        &mut provider_request_body,
+        body_rules,
+        Some(original_request_body),
+        Some(request_headers),
+    ) {
+        return None;
+    }
+    Some(provider_request_body)
+}
+
 pub fn build_standard_provider_request_headers(
     input: StandardProviderRequestHeadersInput<'_>,
 ) -> Option<StandardProviderRequestHeaders> {
@@ -193,12 +213,13 @@ pub fn build_standard_provider_request_headers(
     } else {
         &[input.auth_header, "content-type"][..]
     };
-    if !apply_local_header_rules(
+    if !apply_local_header_rules_with_request_headers(
         &mut headers,
         input.header_rules,
         protected_headers,
         input.provider_request_body,
         Some(input.original_request_body),
+        Some(input.headers),
     ) {
         return None;
     }

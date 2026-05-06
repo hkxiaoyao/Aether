@@ -8,7 +8,7 @@ use aether_ai_formats::protocol::conversion::request::{
     normalize_openai_responses_request_to_openai_chat_request,
 };
 use aether_ai_formats::protocol::registry::{convert_request, FormatContext};
-use aether_ai_formats::provider_compat::proxy::rules::apply_local_body_rules;
+use aether_ai_formats::provider_compat::proxy::rules::apply_local_body_rules_with_request_headers;
 use serde_json::Value;
 
 use crate::request::model_directives::apply_model_directive_overrides_from_request;
@@ -58,6 +58,35 @@ pub fn build_standard_request_body_with_model_directives(
     user_api_key_id: Option<&str>,
     enable_model_directives: bool,
 ) -> Option<Value> {
+    build_standard_request_body_with_model_directives_and_request_headers(
+        body_json,
+        client_api_format,
+        mapped_model,
+        provider_type,
+        provider_api_format,
+        request_path,
+        upstream_is_stream,
+        body_rules,
+        user_api_key_id,
+        None,
+        enable_model_directives,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn build_standard_request_body_with_model_directives_and_request_headers(
+    body_json: &Value,
+    client_api_format: &str,
+    mapped_model: &str,
+    provider_type: &str,
+    provider_api_format: &str,
+    request_path: &str,
+    upstream_is_stream: bool,
+    body_rules: Option<&Value>,
+    user_api_key_id: Option<&str>,
+    request_headers: Option<&http::HeaderMap>,
+    enable_model_directives: bool,
+) -> Option<Value> {
     let format_context = FormatContext::default()
         .with_mapped_model(mapped_model)
         .with_request_path(request_path)
@@ -80,7 +109,12 @@ pub fn build_standard_request_body_with_model_directives(
         );
     }
 
-    if !apply_local_body_rules(&mut provider_request_body, body_rules, Some(body_json)) {
+    if !apply_local_body_rules_with_request_headers(
+        &mut provider_request_body,
+        body_rules,
+        Some(body_json),
+        request_headers,
+    ) {
         return None;
     }
     apply_codex_openai_responses_special_body_edits(

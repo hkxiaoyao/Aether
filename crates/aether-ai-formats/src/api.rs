@@ -119,6 +119,7 @@ pub use crate::request::standard::{
     build_local_openai_responses_request_body,
     build_local_openai_responses_request_body_with_model_directives, build_standard_request_body,
     build_standard_request_body_with_model_directives,
+    build_standard_request_body_with_model_directives_and_request_headers,
     claude::{
         resolve_stream_spec as resolve_claude_stream_spec,
         resolve_sync_spec as resolve_claude_sync_spec,

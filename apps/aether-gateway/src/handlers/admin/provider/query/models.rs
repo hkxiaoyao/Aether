@@ -245,11 +245,35 @@ fn provider_query_extract_request_headers(payload: &Value) -> HeaderMap {
 }
 
 fn provider_query_build_test_request_body(payload: &Value, model: &str) -> Value {
+    provider_query_build_test_request_body_with_model_policy(payload, model, false)
+}
+
+fn provider_query_build_test_request_body_for_route(
+    payload: &Value,
+    model: &str,
+    route_path: &str,
+) -> Value {
+    provider_query_build_test_request_body_with_model_policy(
+        payload,
+        model,
+        route_path.ends_with("/test-model-failover"),
+    )
+}
+
+fn provider_query_build_test_request_body_with_model_policy(
+    payload: &Value,
+    model: &str,
+    override_custom_model: bool,
+) -> Value {
     if let Some(mut body) = provider_query_extract_request_body(payload) {
         if let Some(object) = body.as_object_mut() {
-            object
-                .entry("model".to_string())
-                .or_insert_with(|| Value::String(model.to_string()));
+            if override_custom_model {
+                object.insert("model".to_string(), Value::String(model.to_string()));
+            } else {
+                object
+                    .entry("model".to_string())
+                    .or_insert_with(|| Value::String(model.to_string()));
+            }
         }
         return body;
     }
@@ -791,7 +815,12 @@ async fn provider_query_execute_kiro_test_candidate(
         });
     };
 
-    let request_body = provider_query_build_test_request_body(payload, &candidate.effective_model);
+    let request_body = provider_query_build_test_request_body_for_route(
+        payload,
+        &candidate.effective_model,
+        route_path,
+    );
+    let incoming_request_headers = provider_query_extract_request_headers(payload);
     let request_model =
         provider_query_request_body_model(&request_body, &candidate.effective_model);
     let provider_request_body = match build_kiro_provider_request_body(
@@ -799,6 +828,7 @@ async fn provider_query_execute_kiro_test_candidate(
         request_model,
         &kiro_auth.auth_config,
         transport.endpoint.body_rules.as_ref(),
+        Some(&incoming_request_headers),
     ) {
         Some(body) => body,
         None => {
@@ -821,7 +851,7 @@ async fn provider_query_execute_kiro_test_candidate(
         .uri(route_path)
         .body(())
         .map_err(|err| GatewayError::Internal(err.to_string()))?;
-    *synthetic_request.headers_mut() = provider_query_extract_request_headers(payload);
+    *synthetic_request.headers_mut() = incoming_request_headers;
     let (parts, _) = synthetic_request.into_parts();
 
     let request_url = build_kiro_generate_assistant_response_url(
@@ -949,8 +979,12 @@ async fn provider_query_execute_standard_test_candidate(
         });
     }
 
-    let original_request_body =
-        provider_query_build_test_request_body(payload, &candidate.effective_model);
+    let original_request_body = provider_query_build_test_request_body_for_route(
+        payload,
+        &candidate.effective_model,
+        route_path,
+    );
+    let incoming_request_headers = provider_query_extract_request_headers(payload);
     let mut request_body = original_request_body.clone();
     if let Some(object) = request_body.as_object_mut() {
         object.insert("stream".to_string(), Value::Bool(false));
@@ -975,10 +1009,11 @@ async fn provider_query_execute_standard_test_candidate(
                     format!("Provider request body could not be built for {provider_api_format}"),
                 ));
             };
-            if !crate::provider_transport::apply_local_body_rules(
+            if !crate::provider_transport::apply_local_body_rules_with_request_headers(
                 &mut provider_request_body,
                 transport.endpoint.body_rules.as_ref(),
                 Some(&request_body),
+                Some(&incoming_request_headers),
             ) {
                 return Ok(provider_query_skipped_execution_outcome(
                     request_body.clone(),
@@ -1001,10 +1036,11 @@ async fn provider_query_execute_standard_test_candidate(
                     format!("Provider request body could not be built for {provider_api_format}"),
                 ));
             };
-            if !crate::provider_transport::apply_local_body_rules(
+            if !crate::provider_transport::apply_local_body_rules_with_request_headers(
                 &mut provider_request_body,
                 transport.endpoint.body_rules.as_ref(),
                 Some(&request_body),
+                Some(&incoming_request_headers),
             ) {
                 return Ok(provider_query_skipped_execution_outcome(
                     request_body.clone(),
@@ -1027,10 +1063,11 @@ async fn provider_query_execute_standard_test_candidate(
                     format!("Provider request body could not be built for {provider_api_format}"),
                 ));
             };
-            if !crate::provider_transport::apply_local_body_rules(
+            if !crate::provider_transport::apply_local_body_rules_with_request_headers(
                 &mut provider_request_body,
                 transport.endpoint.body_rules.as_ref(),
                 Some(&request_body),
+                Some(&incoming_request_headers),
             ) {
                 return Ok(provider_query_skipped_execution_outcome(
                     request_body.clone(),
@@ -1104,7 +1141,7 @@ async fn provider_query_execute_standard_test_candidate(
         .uri(route_path)
         .body(())
         .map_err(|err| GatewayError::Internal(err.to_string()))?;
-    *synthetic_request.headers_mut() = provider_query_extract_request_headers(payload);
+    *synthetic_request.headers_mut() = incoming_request_headers;
     let (parts, _) = synthetic_request.into_parts();
 
     let request_url = crate::provider_transport::build_transport_request_url(
@@ -1166,12 +1203,13 @@ async fn provider_query_execute_standard_test_candidate(
     } else {
         vec![auth_header.as_deref().unwrap_or_default(), "content-type"]
     };
-    if !state.apply_local_header_rules(
+    if !crate::provider_transport::apply_local_header_rules_with_request_headers(
         &mut request_headers,
         transport.endpoint.header_rules.as_ref(),
         &protected_headers,
         &provider_request_body,
         Some(&request_body),
+        Some(&parts.headers),
     ) {
         return Ok(ProviderQueryExecutionOutcome {
             status: "failed",
@@ -1981,6 +2019,24 @@ mod tests {
         let body = provider_query_build_test_request_body(&payload, "fallback-model");
 
         assert_eq!(body["model"], json!("fallback-model"));
+    }
+
+    #[test]
+    fn provider_query_failover_request_body_overrides_custom_model() {
+        let payload = json!({
+            "request_body": {
+                "model": "custom-upstream-model",
+                "messages": []
+            }
+        });
+
+        let body = provider_query_build_test_request_body_for_route(
+            &payload,
+            "failover-model",
+            "/api/admin/provider-query/test-model-failover",
+        );
+
+        assert_eq!(body["model"], json!("failover-model"));
     }
 
     #[test]

@@ -129,6 +129,7 @@ pub(crate) async fn resolve_local_same_format_provider_candidate_payload_parts(
             &prepared.mapped_model,
             spec,
             prepared.transport.endpoint.body_rules.as_ref(),
+            Some(&parts.headers),
             prepared.upstream_is_stream,
             prepared.kiro_auth.as_ref(),
             prepared.is_claude_code,

@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use crate::ai_serving::transport::apply_standard_provider_request_body_rules;
+use crate::ai_serving::transport::apply_standard_provider_request_body_rules_with_request_headers;
 use crate::ai_serving::{
     apply_codex_openai_responses_special_body_edits,
     apply_openai_responses_compact_special_body_edits,
@@ -17,6 +17,7 @@ pub(crate) fn build_local_openai_responses_request_body(
     provider_api_format: &str,
     body_rules: Option<&Value>,
     user_api_key_id: Option<&str>,
+    request_headers: &http::HeaderMap,
     enable_model_directives: bool,
 ) -> Option<Value> {
     let provider_request_body = surface_build_local_openai_responses_request_body(
@@ -26,7 +27,12 @@ pub(crate) fn build_local_openai_responses_request_body(
         enable_model_directives,
     )?;
     let mut provider_request_body =
-        apply_standard_provider_request_body_rules(provider_request_body, body_rules, body_json)?;
+        apply_standard_provider_request_body_rules_with_request_headers(
+            provider_request_body,
+            body_rules,
+            body_json,
+            request_headers,
+        )?;
     apply_codex_openai_responses_special_body_edits(
         &mut provider_request_body,
         provider_type,
@@ -50,6 +56,7 @@ pub(crate) fn build_cross_format_openai_responses_request_body(
     provider_type: &str,
     body_rules: Option<&Value>,
     user_api_key_id: Option<&str>,
+    request_headers: &http::HeaderMap,
     enable_model_directives: bool,
 ) -> Option<Value> {
     let provider_request_body = surface_build_cross_format_openai_responses_request_body(
@@ -61,7 +68,12 @@ pub(crate) fn build_cross_format_openai_responses_request_body(
         enable_model_directives,
     )?;
     let mut provider_request_body =
-        apply_standard_provider_request_body_rules(provider_request_body, body_rules, body_json)?;
+        apply_standard_provider_request_body_rules_with_request_headers(
+            provider_request_body,
+            body_rules,
+            body_json,
+            request_headers,
+        )?;
     apply_codex_openai_responses_special_body_edits(
         &mut provider_request_body,
         provider_type,

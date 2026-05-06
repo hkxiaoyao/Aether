@@ -103,6 +103,7 @@ pub(super) async fn resolve_local_gemini_files_candidate_payload_parts(
         body_is_empty,
         spec_metadata.decision_kind == GEMINI_FILES_UPLOAD_PLAN_KIND,
         transport.endpoint.body_rules.as_ref(),
+        Some(&parts.headers),
     ) {
         Ok(parts) => parts,
         Err(GeminiFilesRequestBodyError::BodyRulesUnsupportedForBinaryUpload) => {

@@ -90,6 +90,7 @@ fn builds_openai_chat_cross_format_request_body_from_openai_responses_source() {
         "openai",
         None,
         None,
+        &http::HeaderMap::new(),
         false,
     )
     .expect("openai responses to openai chat body should build");
@@ -124,6 +125,7 @@ fn local_openai_responses_wrapper_preserves_body_order_after_edits() {
         "openai:responses",
         None,
         Some("key-123"),
+        &http::HeaderMap::new(),
         false,
     )
     .expect("local openai responses body should build");
@@ -162,6 +164,7 @@ fn local_openai_responses_compact_wrapper_strips_store_for_same_format_requests(
         "openai:responses:compact",
         None,
         None,
+        &http::HeaderMap::new(),
         false,
     )
     .expect("local openai compact body should build");
@@ -188,6 +191,7 @@ fn local_openai_responses_wrapper_applies_model_directive_before_body_rules() {
         "openai:responses",
         Some(&body_rules),
         None,
+        &http::HeaderMap::new(),
         true,
     )
     .expect("local openai responses body should build");
@@ -236,6 +240,7 @@ fn strips_metadata_for_codex_openai_responses_requests() {
         "codex",
         None,
         None,
+        &http::HeaderMap::new(),
         false,
     )
     .expect("claude cli to codex request should build");
@@ -269,6 +274,7 @@ fn applies_codex_defaults_unless_body_rules_handle_the_field() {
         "codex",
         Some(&body_rules),
         None,
+        &http::HeaderMap::new(),
         false,
     )
     .expect("claude cli to codex request should build");
@@ -297,6 +303,7 @@ fn injects_codex_prompt_cache_key_for_openai_responses_cross_format_requests() {
         "codex",
         None,
         Some("key-123"),
+        &http::HeaderMap::new(),
         false,
     )
     .expect("claude cli to codex request should build");
@@ -325,6 +332,7 @@ fn injects_codex_prompt_cache_key_for_openai_chat_cross_format_requests() {
         false,
         None,
         Some("key-123"),
+        &http::HeaderMap::new(),
         false,
     )
     .expect("openai chat to codex request should build");

@@ -3,8 +3,8 @@ use std::collections::BTreeMap;
 use serde_json::{json, Value};
 
 pub use super::super::rules::{
-    apply_local_body_rules, apply_local_header_rules, body_rules_are_locally_supported,
-    header_rules_are_locally_supported,
+    apply_local_body_rules_with_request_headers, apply_local_header_rules_with_request_headers,
+    body_rules_are_locally_supported, header_rules_are_locally_supported,
 };
 use super::super::should_skip_upstream_passthrough_header;
 use super::converter::convert_claude_messages_to_conversation_state;
@@ -23,6 +23,7 @@ pub fn build_kiro_provider_request_body(
     mapped_model: &str,
     auth_config: &KiroAuthConfig,
     body_rules: Option<&Value>,
+    request_headers: Option<&http::HeaderMap>,
 ) -> Option<Value> {
     let conversation_state =
         convert_claude_messages_to_conversation_state(body_json, mapped_model)?;
@@ -70,7 +71,12 @@ pub fn build_kiro_provider_request_body(
         );
     }
 
-    if !apply_local_body_rules(&mut provider_request_body, body_rules, Some(body_json)) {
+    if !apply_local_body_rules_with_request_headers(
+        &mut provider_request_body,
+        body_rules,
+        Some(body_json),
+        request_headers,
+    ) {
         return None;
     }
 
@@ -119,12 +125,13 @@ pub fn build_kiro_provider_headers(
         out.insert(key, value.to_string());
     }
 
-    if !apply_local_header_rules(
+    if !apply_local_header_rules_with_request_headers(
         &mut out,
         header_rules,
         &[auth_header, "content-type"],
         provider_request_body,
         Some(original_request_body),
+        Some(headers),
     ) {
         return None;
     }
@@ -202,6 +209,7 @@ mod tests {
             Some(&json!([
                 {"action":"set","path":"debugTag","value":"kiro-local"}
             ])),
+            None,
         )
         .expect("payload should build");
 
@@ -291,6 +299,7 @@ mod tests {
             }),
             "claude-sonnet-4-upstream",
             &auth_config,
+            None,
             None,
         )
         .expect("payload should build");

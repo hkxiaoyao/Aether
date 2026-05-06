@@ -17,7 +17,9 @@ use super::policy::{
     local_standard_transport_unsupported_reason_with_network, supports_local_gemini_transport,
     supports_local_standard_transport,
 };
-use super::rules::{apply_local_body_rules, apply_local_header_rules};
+use super::rules::{
+    apply_local_body_rules_with_request_headers, apply_local_header_rules_with_request_headers,
+};
 use super::snapshot::GatewayProviderTransportSnapshot;
 use super::url::{build_gemini_video_predict_long_running_url, build_passthrough_path_url};
 
@@ -117,6 +119,7 @@ pub fn build_video_create_request_body(
     family: ProviderVideoCreateFamily,
     mapped_model: &str,
     body_rules: Option<&Value>,
+    request_headers: Option<&http::HeaderMap>,
 ) -> Option<Value> {
     let mut provider_request_body = match family {
         ProviderVideoCreateFamily::OpenAi => {
@@ -127,7 +130,12 @@ pub fn build_video_create_request_body(
         }
         ProviderVideoCreateFamily::Gemini => body_json.clone(),
     };
-    if !apply_local_body_rules(&mut provider_request_body, body_rules, Some(body_json)) {
+    if !apply_local_body_rules_with_request_headers(
+        &mut provider_request_body,
+        body_rules,
+        Some(body_json),
+        request_headers,
+    ) {
         return None;
     }
     Some(provider_request_body)
@@ -184,12 +192,13 @@ pub fn build_video_create_headers(
         input.auth_value,
         &BTreeMap::new(),
     );
-    if !apply_local_header_rules(
+    if !apply_local_header_rules_with_request_headers(
         &mut provider_request_headers,
         input.header_rules,
         &[input.auth_header, "content-type"],
         input.provider_request_body,
         Some(input.original_request_body),
+        Some(input.headers),
     ) {
         return None;
     }
@@ -408,6 +417,7 @@ mod tests {
             &json!({"prompt": "make a clip", "model": "client-model"}),
             ProviderVideoCreateFamily::OpenAi,
             "upstream-video-model",
+            None,
             None,
         )
         .expect("body should build");

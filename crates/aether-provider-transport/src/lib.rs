@@ -75,7 +75,8 @@ pub use request_url::{
     TransportRequestUrlParams,
 };
 pub use rules::{
-    apply_local_body_rules, apply_local_header_rules, body_rules_are_locally_supported,
+    apply_local_body_rules, apply_local_body_rules_with_request_headers, apply_local_header_rules,
+    apply_local_header_rules_with_request_headers, body_rules_are_locally_supported,
     body_rules_handle_path, header_rules_are_locally_supported,
 };
 pub use same_format_provider::{
@@ -94,8 +95,9 @@ pub use snapshot::{
     ProviderTransportSnapshotSource,
 };
 pub use standard::{
-    apply_standard_provider_request_body_rules, build_standard_plan_fallback_headers,
-    build_standard_plan_fallback_openai_chat_url,
+    apply_standard_provider_request_body_rules,
+    apply_standard_provider_request_body_rules_with_request_headers,
+    build_standard_plan_fallback_headers, build_standard_plan_fallback_openai_chat_url,
     build_standard_plan_fallback_openai_responses_url, build_standard_provider_request_headers,
     StandardPlanFallbackAcceptPolicy, StandardPlanFallbackHeadersInput,
     StandardProviderRequestHeaders, StandardProviderRequestHeadersInput,

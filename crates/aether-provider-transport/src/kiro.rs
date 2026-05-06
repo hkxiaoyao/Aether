@@ -25,10 +25,10 @@ pub use policy::{
 };
 pub use refresh::KiroOAuthRefreshAdapter;
 pub use request::{
-    apply_local_body_rules, apply_local_header_rules, body_rules_are_locally_supported,
-    build_kiro_provider_headers, build_kiro_provider_request_body,
-    header_rules_are_locally_supported, supports_local_kiro_request_shape,
-    KiroProviderHeadersInput,
+    apply_local_body_rules_with_request_headers, apply_local_header_rules_with_request_headers,
+    body_rules_are_locally_supported, build_kiro_provider_headers,
+    build_kiro_provider_request_body, header_rules_are_locally_supported,
+    supports_local_kiro_request_shape, KiroProviderHeadersInput,
 };
 pub use url::{
     build_kiro_generate_assistant_response_url, build_kiro_mcp_url,

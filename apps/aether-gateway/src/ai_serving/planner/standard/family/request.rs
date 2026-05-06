@@ -176,7 +176,7 @@ pub(crate) async fn resolve_local_standard_candidate_payload_parts(
         )
         .await;
     let mut provider_request_body =
-        match crate::ai_serving::planner::standard::build_standard_request_body_with_model_directives(
+        match crate::ai_serving::planner::standard::build_standard_request_body_with_model_directives_and_request_headers(
             body_json,
             spec_metadata.api_format,
             &prepared_candidate.mapped_model,
@@ -190,6 +190,7 @@ pub(crate) async fn resolve_local_standard_candidate_payload_parts(
                 transport.endpoint.body_rules.as_ref()
             },
             Some(input.auth_context.api_key_id.as_str()),
+            Some(&parts.headers),
             enable_model_directives,
         ) {
             Some(body) => body,
@@ -353,6 +354,7 @@ async fn build_kiro_cross_format_payload_parts(
         &mapped_model,
         &kiro_auth.auth_config,
         transport.endpoint.body_rules.as_ref(),
+        Some(&parts.headers),
     ) {
         Some(body) => body,
         None => {

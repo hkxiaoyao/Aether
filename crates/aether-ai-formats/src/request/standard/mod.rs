@@ -16,6 +16,7 @@ pub use family::{LocalStandardSourceFamily, LocalStandardSourceMode, LocalStanda
 pub use matrix::{
     build_standard_request_body, build_standard_request_body_from_canonical_with_model_directives,
     build_standard_request_body_with_model_directives,
+    build_standard_request_body_with_model_directives_and_request_headers,
     normalize_standard_request_to_openai_chat_request,
 };
 pub use normalize::{

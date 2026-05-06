@@ -18,7 +18,9 @@ use crate::policy::{
     local_gemini_transport_unsupported_reason_with_network,
     local_standard_transport_unsupported_reason_with_network,
 };
-use crate::rules::{apply_local_body_rules, apply_local_header_rules};
+use crate::rules::{
+    apply_local_body_rules_with_request_headers, apply_local_header_rules_with_request_headers,
+};
 use crate::snapshot::GatewayProviderTransportSnapshot;
 use crate::vertex::{
     is_vertex_api_key_transport_context,
@@ -57,6 +59,7 @@ pub struct SameFormatProviderRequestBodyInput<'a> {
     pub source_model: Option<&'a str>,
     pub family: SameFormatProviderFamily,
     pub body_rules: Option<&'a Value>,
+    pub request_headers: Option<&'a http::HeaderMap>,
     pub upstream_is_stream: bool,
     pub kiro_auth_config: Option<&'a KiroAuthConfig>,
     pub is_claude_code: bool,
@@ -131,6 +134,7 @@ pub fn build_same_format_provider_request_body(
             input.mapped_model,
             kiro_auth_config,
             input.body_rules,
+            input.request_headers,
         );
     }
 
@@ -183,10 +187,11 @@ pub fn build_same_format_provider_request_body(
             );
         }
     }
-    if !apply_local_body_rules(
+    if !apply_local_body_rules_with_request_headers(
         &mut provider_request_body,
         input.body_rules,
         Some(input.body_json),
+        input.request_headers,
     ) {
         return None;
     }
@@ -257,12 +262,13 @@ pub fn build_same_format_provider_headers(
         .filter(|value| !value.trim().is_empty())
         .map(|value| vec![value, "content-type"])
         .unwrap_or_else(|| vec!["content-type"]);
-    if !apply_local_header_rules(
+    if !apply_local_header_rules_with_request_headers(
         &mut provider_request_headers,
         input.header_rules,
         &protected_headers,
         input.provider_request_body,
         Some(input.original_request_body),
+        Some(input.headers),
     ) {
         return None;
     }
@@ -509,6 +515,7 @@ mod tests {
             source_model: Some("client-model"),
             family: SameFormatProviderFamily::Standard,
             body_rules: None,
+            request_headers: None,
             upstream_is_stream: true,
             kiro_auth_config: None,
             is_claude_code: false,
@@ -536,6 +543,7 @@ mod tests {
             body_rules: Some(&json!([
                 {"action":"set","path":"metadata.body_rule_seen","value":true}
             ])),
+            request_headers: None,
             upstream_is_stream: false,
             kiro_auth_config: None,
             is_claude_code: false,

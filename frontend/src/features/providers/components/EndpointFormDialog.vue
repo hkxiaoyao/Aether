@@ -635,14 +635,14 @@
                                 <code>in</code> 在列表中（值填 <code>["a","b"]</code>）<br>
                                 <code>type_is</code> 类型判断（string/number/boolean/array/object/null）<br>
                                 条件路径支持 <code>$item.xxx</code> 引用通配符当前元素<br>
-                                可切换 <code>Current</code>/<code>Original</code> 数据源，并支持 <code>ALL</code>/<code>ANY</code> 组合条件
+                                可切换 <code>请求体</code>/<code>请求头</code> 数据源，并支持 <code>ALL</code>/<code>ANY</code> 组合条件
                               </div>
                             </div>
                             <div class="text-muted-foreground">
-                              规则按顺序执行，前面的修改对后续规则可见。
+                              规则按顺序执行；条件判断使用客户端原始请求体或原始请求头，不受前面规则修改影响。
                             </div>
                             <div class="text-muted-foreground">
-                              规则默认在格式转换后按目标提供商结构匹配；条件切到 <code>Original</code> 时则按客户端原始请求体匹配。
+                              条件默认按客户端原始请求体匹配；切到 <code>请求头</code> 时按客户端原始请求头匹配。
                             </div>
                           </div>
                         </PopoverContent>
@@ -1484,8 +1484,8 @@ function validateJsonConditionShape(condition: Record<string, unknown>, label: s
   if (typeof condition.op !== 'string' || !CONDITION_JSON_OPS.has(condition.op)) {
     return `${label}.op 无效`
   }
-  if (condition.source !== undefined && condition.source !== 'original' && condition.source !== 'current') {
-    return `${label}.source 只能是 original/current`
+  if (condition.source !== undefined && condition.source !== 'request_headers') {
+    return `${label}.source 只能是 request_headers；请求体条件不要填写 source`
   }
   return null
 }

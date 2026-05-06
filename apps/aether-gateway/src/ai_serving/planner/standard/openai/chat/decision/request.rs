@@ -129,6 +129,7 @@ pub(crate) async fn resolve_local_openai_chat_candidate_payload_parts(
             &prepared_candidate.mapped_model,
             upstream_is_stream,
             transport.endpoint.body_rules.as_ref(),
+            &parts.headers,
             enable_model_directives,
         ) else {
             mark_skipped_local_openai_chat_candidate_with_extra_data(
@@ -354,6 +355,7 @@ pub(crate) async fn resolve_local_openai_chat_candidate_payload_parts(
             transport.endpoint.body_rules.as_ref()
         },
         Some(input.auth_context.api_key_id.as_str()),
+        &parts.headers,
         enable_model_directives,
     ) else {
         mark_skipped_local_openai_chat_candidate_with_extra_data(
@@ -527,6 +529,7 @@ async fn build_kiro_openai_chat_cross_format_payload_parts(
         &mapped_model,
         &kiro_auth.auth_config,
         transport.endpoint.body_rules.as_ref(),
+        Some(&parts.headers),
     ) {
         Some(body) => body,
         None => {

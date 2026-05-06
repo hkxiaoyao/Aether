@@ -244,6 +244,7 @@ pub(crate) async fn resolve_local_openai_responses_candidate_payload_parts(
                 transport.endpoint.body_rules.as_ref()
             },
             Some(input.auth_context.api_key_id.as_str()),
+            &parts.headers,
             enable_model_directives,
         )
     } else {
@@ -259,6 +260,7 @@ pub(crate) async fn resolve_local_openai_responses_candidate_payload_parts(
                 transport.endpoint.body_rules.as_ref()
             },
             Some(input.auth_context.api_key_id.as_str()),
+            &parts.headers,
             enable_model_directives,
         )
     }) else {
@@ -532,6 +534,7 @@ async fn build_kiro_openai_responses_payload_parts(
         &mapped_model,
         &kiro_auth.auth_config,
         transport.endpoint.body_rules.as_ref(),
+        Some(&parts.headers),
     ) {
         Some(body) => body,
         None => {
