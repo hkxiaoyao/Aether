@@ -10,6 +10,7 @@ use aether_admin::system::{
     serialize_admin_system_users_export_wallet, AdminSystemConfigDocument, AdminSystemConfigEntry,
     AdminSystemConfigGlobalModel, AdminSystemConfigLdap, AdminSystemConfigOAuthProvider,
     AdminSystemConfigProxyNode, ADMIN_SYSTEM_CONFIG_EXPORT_VERSION,
+    ADMIN_SYSTEM_USERS_EXPORT_VERSION,
 };
 use aether_data_contracts::repository::global_models::AdminGlobalModelListQuery;
 use chrono::Utc;
@@ -165,8 +166,6 @@ impl<'a> AdminAppState<'a> {
     pub(crate) async fn build_admin_system_users_export_payload(
         &self,
     ) -> Result<serde_json::Value, GatewayError> {
-        const ADMIN_SYSTEM_USERS_EXPORT_VERSION: &str = "1.3";
-
         let users = self.list_non_admin_export_users().await?;
         let user_ids = users.iter().map(|user| user.id.clone()).collect::<Vec<_>>();
         let user_wallets = self.list_wallet_snapshots_by_user_ids(&user_ids).await?;

@@ -575,7 +575,7 @@ async fn gateway_imports_admin_system_users_locally_and_persists_data() {
         .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
         .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
         .json(&json!({
-            "version": "2.2",
+            "version": "1.3",
             "merge_mode": "overwrite",
             "users": [{
                 "email": "alice@example.com",
@@ -867,7 +867,7 @@ async fn gateway_rejects_legacy_user_import_string_bool_field() {
         .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
         .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
         .json(&json!({
-            "version": "2.2",
+            "version": "1.3",
             "merge_mode": "overwrite",
             "users": [{
                 "email": "legacy@example.com",

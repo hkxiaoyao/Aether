@@ -14,6 +14,31 @@ import type { SystemConfig } from './useSystemConfig'
 // 文件大小限制 (10MB)
 const MAX_FILE_SIZE = 10 * 1024 * 1024
 
+type JsonObject = Record<string, unknown>
+
+function asJsonObject(value: unknown): JsonObject | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as JsonObject
+    : null
+}
+
+function hasArrayField(value: JsonObject, key: string): boolean {
+  return Array.isArray(value[key])
+}
+
+function looksLikeConfigExport(value: JsonObject): boolean {
+  return hasArrayField(value, 'global_models')
+    || hasArrayField(value, 'providers')
+    || hasArrayField(value, 'proxy_nodes')
+    || hasArrayField(value, 'oauth_providers')
+    || hasArrayField(value, 'system_configs')
+    || Object.prototype.hasOwnProperty.call(value, 'ldap_config')
+}
+
+function looksLikeUsersExport(value: JsonObject): boolean {
+  return hasArrayField(value, 'users') || hasArrayField(value, 'standalone_keys')
+}
+
 export function useConfigExportImport(systemConfig: { value: SystemConfig }) {
   const { success, error } = useToast()
 
@@ -83,13 +108,28 @@ export function useConfigExportImport(systemConfig: { value: SystemConfig }) {
     reader.onload = (e) => {
       try {
         const content = e.target?.result as string
-        const data = JSON.parse(content) as ConfigExportData
+        const root = asJsonObject(JSON.parse(content))
+        if (!root) {
+          error('无效的配置文件：JSON 顶层必须是对象')
+          return
+        }
 
-        if (!data.version) {
+        if (looksLikeUsersExport(root) && !looksLikeConfigExport(root)) {
+          error('这是用户数据导出文件，请使用“导入用户数据”')
+          return
+        }
+
+        if (!root.version) {
           error('无效的配置文件：缺少版本信息')
           return
         }
 
+        if (!looksLikeConfigExport(root)) {
+          error('无效的配置文件：未找到配置导出内容')
+          return
+        }
+
+        const data = root as unknown as ConfigExportData
         importPreview.value = data
         mergeMode.value = 'skip'
         importDialogOpen.value = true
@@ -170,8 +210,33 @@ export function useConfigExportImport(systemConfig: { value: SystemConfig }) {
     reader.onload = (e) => {
       try {
         const content = e.target?.result as string
-        const data = JSON.parse(content) as UsersExportData
+        const root = asJsonObject(JSON.parse(content))
+        if (!root) {
+          error('无效的用户数据文件：JSON 顶层必须是对象')
+          return
+        }
 
+        if (looksLikeConfigExport(root) && !looksLikeUsersExport(root)) {
+          error('这是配置导出文件，请使用“导入配置”')
+          return
+        }
+
+        if (!root.version) {
+          error('无效的用户数据文件：缺少版本信息')
+          return
+        }
+
+        if (!Array.isArray(root.users)) {
+          error('无效的用户数据文件：缺少 users 数组')
+          return
+        }
+
+        if (root.standalone_keys != null && !Array.isArray(root.standalone_keys)) {
+          error('无效的用户数据文件：standalone_keys 必须是数组')
+          return
+        }
+
+        const data = root as unknown as UsersExportData
         importUsersPreview.value = data
         usersMergeMode.value = 'skip'
         importUsersDialogOpen.value = true

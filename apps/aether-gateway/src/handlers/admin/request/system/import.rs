@@ -28,7 +28,7 @@ use aether_admin::system::{
     AdminSystemConfigProviderKey as ImportedProviderKey,
     AdminSystemConfigProviderModel as ImportedProviderModel,
     AdminSystemConfigProxyNode as ImportedProxyNode,
-    ADMIN_SYSTEM_PROVIDER_OPS_SENSITIVE_CREDENTIAL_FIELDS,
+    ADMIN_SYSTEM_PROVIDER_OPS_SENSITIVE_CREDENTIAL_FIELDS, ADMIN_SYSTEM_USERS_SUPPORTED_VERSIONS,
 };
 use aether_data::repository::auth_modules::StoredLdapModuleConfig;
 use aether_data::repository::oauth_providers::{
@@ -46,7 +46,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 const ADMIN_SYSTEM_IMPORT_MAX_SIZE_BYTES: usize = 10 * 1024 * 1024;
-const MIN_ADMIN_SYSTEM_IMPORT_VERSION: (u32, u32) = (2, 2);
 
 fn invalid_request(detail: impl Into<String>) -> (http::StatusCode, Value) {
     (
@@ -436,12 +435,19 @@ fn imported_system_export_version(version: Option<&Value>) -> Result<(u32, u32),
     Ok((major, minor))
 }
 
-fn validate_imported_system_export_version(version: Option<&Value>) -> Result<(), String> {
-    let parsed = imported_system_export_version(version)?;
-    if parsed < MIN_ADMIN_SYSTEM_IMPORT_VERSION {
+fn validate_imported_system_users_export_version(version: Option<&Value>) -> Result<(), String> {
+    let Some(Value::String(raw_version)) = version else {
+        return Err("version 必须是 x.y 字符串".to_string());
+    };
+    let normalized = raw_version.trim();
+    if normalized.is_empty() {
+        return Err("version 必须是 x.y 字符串".to_string());
+    }
+    let _ = imported_system_export_version(version)?;
+    if !ADMIN_SYSTEM_USERS_SUPPORTED_VERSIONS.contains(&normalized) {
         return Err(format!(
-            "version {}.{} 已不再支持；仅支持 2.2+ 导出格式",
-            parsed.0, parsed.1
+            "不支持的用户数据版本: {normalized}，支持的版本: {}",
+            ADMIN_SYSTEM_USERS_SUPPORTED_VERSIONS.join(", ")
         ));
     }
     Ok(())
@@ -1687,7 +1693,9 @@ impl<'a> AdminAppState<'a> {
             };
         }
 
-        invalid_value!(validate_imported_system_export_version(root.get("version")));
+        invalid_value!(validate_imported_system_users_export_version(
+            root.get("version")
+        ));
 
         let mut stats = AdminSystemUsersImportStats::default();
 
@@ -2428,18 +2436,18 @@ mod tests {
     use super::{
         imported_optional_bool, imported_optional_f64, imported_optional_i32,
         imported_optional_u64, imported_string_list_from_value,
-        validate_imported_system_export_version,
+        validate_imported_system_users_export_version,
     };
 
     #[test]
-    fn import_requires_supported_export_version() {
-        assert!(validate_imported_system_export_version(Some(&json!("2.2"))).is_ok());
+    fn users_import_requires_supported_export_version() {
+        assert!(validate_imported_system_users_export_version(Some(&json!("1.3"))).is_ok());
         assert_eq!(
-            validate_imported_system_export_version(Some(&json!("2.1"))).unwrap_err(),
-            "version 2.1 已不再支持；仅支持 2.2+ 导出格式"
+            validate_imported_system_users_export_version(Some(&json!("2.2"))).unwrap_err(),
+            "不支持的用户数据版本: 2.2，支持的版本: 1.3"
         );
         assert_eq!(
-            validate_imported_system_export_version(Some(&json!(null))).unwrap_err(),
+            validate_imported_system_users_export_version(Some(&json!(null))).unwrap_err(),
             "version 必须是 x.y 字符串"
         );
     }
