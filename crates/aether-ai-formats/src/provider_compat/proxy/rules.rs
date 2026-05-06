@@ -11,13 +11,6 @@ const ITEM_PREFIX: &str = "$item.";
 const ITEM_EXACT: &str = "$item";
 const CONDITION_SOURCES: &[&str] = &["current", "original"];
 const CONDITION_TYPE_VALUES: &[&str] = &["string", "number", "boolean", "array", "object", "null"];
-const NAME_STYLE_VALUES: &[&str] = &[
-    "snake_case",
-    "camelCase",
-    "PascalCase",
-    "kebab-case",
-    "capitalize",
-];
 
 static RANGE_RE: OnceLock<Regex> = OnceLock::new();
 
@@ -160,8 +153,7 @@ pub fn body_rules_handle_path(rules: Option<&Value>, path: &str) -> bool {
             | Some("drop")
             | Some("append")
             | Some("insert")
-            | Some("regex_replace")
-            | Some("name_style") => rule
+            | Some("regex_replace") => rule
                 .get("path")
                 .and_then(Value::as_str)
                 .and_then(parse_body_path)
@@ -376,37 +368,6 @@ pub fn apply_local_body_rules(
                             pattern.replacen(&current, count, replacement).to_string()
                         };
                         *target = Value::String(replaced);
-                    }
-                }
-            }
-            Some("name_style") => {
-                let Some(path) = rule
-                    .get("path")
-                    .and_then(Value::as_str)
-                    .and_then(parse_body_path)
-                else {
-                    continue;
-                };
-                let Some(style) = rule.get("style").and_then(Value::as_str) else {
-                    continue;
-                };
-                if !valid_name_style(style) {
-                    continue;
-                }
-                for target_path in iter_wildcard_targets(
-                    body,
-                    &path,
-                    condition,
-                    item_condition,
-                    original_body,
-                    true,
-                    false,
-                ) {
-                    if let Some(target) = get_nested_value_mut(body, &target_path) {
-                        let Some(current) = target.as_str().map(str::to_owned) else {
-                            continue;
-                        };
-                        *target = Value::String(convert_name_style(&current, style));
                     }
                 }
             }
@@ -1068,97 +1029,6 @@ fn parse_non_negative_count(value: &Value) -> Option<usize> {
         })
 }
 
-fn valid_name_style(style: &str) -> bool {
-    NAME_STYLE_VALUES.contains(&style)
-}
-
-fn convert_name_style(name: &str, style: &str) -> String {
-    let words = split_identifier(name);
-    if words.is_empty() {
-        return name.to_string();
-    }
-
-    match style {
-        "snake_case" => words.join("_"),
-        "camelCase" => {
-            let mut result = words[0].clone();
-            for word in words.iter().skip(1) {
-                result.push_str(&capitalize_ascii(word));
-            }
-            result
-        }
-        "PascalCase" => words
-            .iter()
-            .map(|word| capitalize_ascii(word))
-            .collect::<String>(),
-        "kebab-case" => words.join("-"),
-        "capitalize" => name
-            .chars()
-            .next()
-            .map(|first| {
-                let mut result = first.to_uppercase().collect::<String>();
-                result.push_str(name.chars().skip(1).collect::<String>().as_str());
-                result
-            })
-            .unwrap_or_default(),
-        _ => name.to_string(),
-    }
-}
-
-fn split_identifier(name: &str) -> Vec<String> {
-    let normalized = name.replace(['_', '-'], " ");
-    let chars: Vec<char> = normalized.chars().collect();
-    let mut words = Vec::new();
-    let mut current = String::new();
-
-    for (index, ch) in chars.iter().copied().enumerate() {
-        if ch.is_whitespace() {
-            if !current.is_empty() {
-                words.push(std::mem::take(&mut current));
-            }
-            continue;
-        }
-
-        let boundary = if current.is_empty() {
-            false
-        } else {
-            let prev = chars[index - 1];
-            let next = chars.get(index + 1).copied();
-            (prev.is_ascii_lowercase() && ch.is_ascii_uppercase())
-                || (prev.is_ascii_alphabetic() && ch.is_ascii_digit())
-                || (prev.is_ascii_digit() && ch.is_ascii_alphabetic())
-                || (prev.is_ascii_uppercase()
-                    && ch.is_ascii_uppercase()
-                    && next.is_some_and(|next| next.is_ascii_lowercase()))
-        };
-
-        if boundary {
-            words.push(std::mem::take(&mut current));
-        }
-        current.push(ch);
-    }
-
-    if !current.is_empty() {
-        words.push(current);
-    }
-
-    words
-        .into_iter()
-        .filter(|word| !word.is_empty())
-        .map(|word| word.to_ascii_lowercase())
-        .collect()
-}
-
-fn capitalize_ascii(word: &str) -> String {
-    let mut chars = word.chars();
-    let Some(first) = chars.next() else {
-        return String::new();
-    };
-    let mut result = first.to_uppercase().collect::<String>();
-    result.push_str(chars.as_str());
-    result
-}
-
 fn get_nested_value(value: &Value, path: &[BodyPathSegment]) -> Option<Value> {
     let mut current = value;
     for segment in path {
@@ -1390,7 +1260,6 @@ mod tests {
             {"action":"append","path":"messages","value":{"role":"assistant","content":"done"}},
             {"action":"insert","path":"messages","index":-1,"value":{"role":"system","content":"before-last"}},
             {"action":"regex_replace","path":"tools[*].name","pattern":"tool","replacement":"utility","flags":"i","count":1},
-            {"action":"name_style","path":"tools[*].kind","style":"camelCase","condition":{"path":"$item.name","op":"starts_with","value":"Writer"}},
             {"action":"drop","path":"tools[1-2].deprecated"}
         ]);
         assert!(body_rules_are_locally_supported(Some(&rules)));
@@ -1434,9 +1303,6 @@ mod tests {
         assert_eq!(body["tools"][0]["name"], "Writerutility");
         assert_eq!(body["tools"][1]["name"], "Readutility");
         assert_eq!(body["tools"][2]["name"], "Otherutility");
-        assert_eq!(body["tools"][0]["kind"], "snakeCaseName");
-        assert_eq!(body["tools"][1]["kind"], "Pascal Case");
-        assert_eq!(body["tools"][2]["kind"], "kebab-case-value");
         assert_eq!(body["tools"][0]["deprecated"], true);
         assert!(body["tools"][1].get("deprecated").is_none());
         assert!(body["tools"][2].get("deprecated").is_none());
@@ -1601,15 +1467,14 @@ mod tests {
         let rules = serde_json::json!([
             {"action":"append","path":"messages","value":{}},
             {"action":"regex_replace","path":"tools[*].name","pattern":"foo","replacement":"bar"},
-            {"action":"name_style","path":"tools[0-2].kind","style":"snake_case"},
             {"action":"rename","from":"metadata.old","to":"metadata.new"}
         ]);
 
         assert!(body_rules_handle_path(Some(&rules), "messages"));
         assert!(body_rules_handle_path(Some(&rules), "tools[1].name"));
-        assert!(body_rules_handle_path(Some(&rules), "tools[2].kind"));
         assert!(body_rules_handle_path(Some(&rules), "metadata.old"));
         assert!(body_rules_handle_path(Some(&rules), "metadata.new"));
+        assert!(!body_rules_handle_path(Some(&rules), "tools[2].kind"));
         assert!(!body_rules_handle_path(Some(&rules), "tools[3].kind"));
         assert!(!body_rules_handle_path(Some(&rules), "instructions"));
     }

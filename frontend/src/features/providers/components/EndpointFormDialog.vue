@@ -624,14 +624,6 @@
                             </div>
                             <div>
                               <div class="font-medium mb-0.5">
-                                命名风格
-                              </div>
-                              <div class="text-muted-foreground">
-                                批量转换字段命名：capitalize / snake_case / camelCase / PascalCase / kebab-case
-                              </div>
-                            </div>
-                            <div>
-                              <div class="font-medium mb-0.5">
                                 条件运算符
                               </div>
                               <div class="text-muted-foreground">
@@ -692,7 +684,7 @@
                           @update:model-value="(v: string) => updateEndpointBodyRuleAction(endpoint.id, index, v as BodyRuleAction)"
                           @update:open="(v) => handleBodyRuleSelectOpen(endpoint.id, index, v)"
                         >
-                          <SelectTrigger class="w-[96px] h-7 text-xs shrink-0">
+                          <SelectTrigger class="w-[88px] h-7 text-xs shrink-0">
                             <SelectValue />
                           </SelectTrigger>
                           <SelectContent>
@@ -713,9 +705,6 @@
                             </SelectItem>
                             <SelectItem value="regex_replace">
                               正则替换
-                            </SelectItem>
-                            <SelectItem value="name_style">
-                              命名风格
                             </SelectItem>
                           </SelectContent>
                         </Select>
@@ -872,41 +861,6 @@
                             :class="getRegexPatternValidation(rule) === true ? 'text-green-600' : getRegexPatternValidation(rule) === false ? 'text-destructive' : 'text-muted-foreground/40'"
                             :title="getRegexPatternValidationTip(rule)"
                           />
-                        </template>
-                        <template v-else-if="rule.action === 'name_style'">
-                          <Input
-                            :model-value="rule.path"
-                            placeholder="字段路径（如 tools[*].name）"
-                            size="sm"
-                            class="flex-[2] min-w-0 h-7 text-xs"
-                            @update:model-value="(v) => updateEndpointBodyRuleField(endpoint.id, index, 'path', v)"
-                          />
-                          <span class="text-muted-foreground text-xs">→</span>
-                          <Select
-                            :model-value="rule.style || 'capitalize'"
-                            @update:model-value="(v: string) => updateEndpointBodyRuleField(endpoint.id, index, 'style', v)"
-                          >
-                            <SelectTrigger class="w-[120px] h-7 text-xs shrink-0">
-                              <SelectValue />
-                            </SelectTrigger>
-                            <SelectContent>
-                              <SelectItem value="capitalize">
-                                Capitalize
-                              </SelectItem>
-                              <SelectItem value="snake_case">
-                                snake_case
-                              </SelectItem>
-                              <SelectItem value="camelCase">
-                                camelCase
-                              </SelectItem>
-                              <SelectItem value="PascalCase">
-                                PascalCase
-                              </SelectItem>
-                              <SelectItem value="kebab-case">
-                                kebab-case
-                              </SelectItem>
-                            </SelectContent>
-                          </Select>
                         </template>
                         <Button
                           variant="ghost"
@@ -1066,7 +1020,6 @@ import {
   type HeaderRule,
   type BodyRule,
   type BodyRuleRegexReplace,
-  type BodyRuleNameStyle,
 } from '@/api/endpoints'
 import { adminApi } from '@/api/admin'
 import { formatApiFormat } from '@/api/endpoints/types/api-format'
@@ -1091,7 +1044,7 @@ interface EditableRule {
 }
 
 // 编辑用的请求体规则类型
-type BodyRuleAction = 'set' | 'drop' | 'rename' | 'append' | 'insert' | 'regex_replace' | 'name_style'
+type BodyRuleAction = 'set' | 'drop' | 'rename' | 'append' | 'insert' | 'regex_replace'
 
 interface EditableBodyRule {
   action: BodyRuleAction
@@ -1104,7 +1057,6 @@ interface EditableBodyRule {
   replacement: string // regex_replace 用
   flags: string    // regex_replace 用（i/m/s）
   count: string    // regex_replace 用（空=默认全部；0=全部）
-  style: string    // name_style 用（snake_case/camelCase/PascalCase/kebab-case/capitalize）
   condition: EditableConditionNode | null
 }
 
@@ -1481,8 +1433,7 @@ const RESERVED_BODY_FIELDS = new Set([
   'stream',
 ])
 
-const BODY_RULE_JSON_ACTIONS = new Set(['set', 'drop', 'rename', 'append', 'insert', 'regex_replace', 'name_style'])
-const BODY_RULE_JSON_STYLES = new Set(['snake_case', 'camelCase', 'PascalCase', 'kebab-case', 'capitalize'])
+const BODY_RULE_JSON_ACTIONS = new Set(['set', 'drop', 'rename', 'append', 'insert', 'regex_replace'])
 const CONDITION_JSON_OPS = new Set(['eq', 'neq', 'gt', 'lt', 'gte', 'lte', 'starts_with', 'ends_with', 'contains', 'matches', 'exists', 'not_exists', 'in', 'type_is'])
 
 function isJsonObject(value: unknown): value is Record<string, unknown> {
@@ -1598,11 +1549,7 @@ function validateBodyRuleJson(rule: unknown, label: string, index: number): stri
     if (rule.count !== undefined && !Number.isInteger(rule.count)) return `${label}第 ${index + 1} 条：count 必须是整数`
     return validateJsonCondition(rule, label, index)
   }
-  if (requireJsonString(rule, 'path', label, index)) return requireJsonString(rule, 'path', label, index)
-  if (typeof rule.style !== 'string' || !BODY_RULE_JSON_STYLES.has(rule.style)) {
-    return `${label}第 ${index + 1} 条：style 无效`
-  }
-  return validateJsonCondition(rule, label, index)
+  return `${label}第 ${index + 1} 条：action 无效`
 }
 
 function parseEndpointRulesJsonDraft(draft: string): { value: EndpointRulesJsonPayload | null; error: string | null } {
@@ -2023,7 +1970,6 @@ function emptyBodyRule(action: BodyRuleAction = 'set'): EditableBodyRule {
     replacement: '',
     flags: '',
     count: '',
-    style: '',
     condition: null,
   }
 }
@@ -2056,8 +2002,6 @@ function editableBodyRulesFromRules(rules: BodyRule[] | null | undefined): Edita
         count: rule.count === undefined || rule.count === null ? '' : String(rule.count),
         condition: conditionToEditable(rule.condition),
       })
-    } else if (rule.action === 'name_style') {
-      bodyRules.push({ ...emptyBodyRule('name_style'), path: rule.path || '', style: rule.style || 'capitalize', condition: conditionToEditable(rule.condition) })
     }
   }
   return bodyRules
@@ -2457,7 +2401,7 @@ function updateEndpointBodyRuleAction(endpointId: string, index: number, action:
 }
 
 // 更新请求体规则字段
-function updateEndpointBodyRuleField(endpointId: string, index: number, field: 'path' | 'value' | 'from' | 'to' | 'index' | 'pattern' | 'replacement' | 'flags' | 'count' | 'style', value: string) {
+function updateEndpointBodyRuleField(endpointId: string, index: number, field: 'path' | 'value' | 'from' | 'to' | 'index' | 'pattern' | 'replacement' | 'flags' | 'count', value: string) {
   const rules = getEndpointEditBodyRules(endpointId)
   if (rules[index]) {
     rules[index][field] = value
@@ -2685,8 +2629,6 @@ function isBodyRuleEffective(r: EditableBodyRule): boolean {
       return !!(r.path.trim() && r.index.trim())
     case 'regex_replace':
       return !!(r.path.trim() && r.pattern.trim())
-    case 'name_style':
-      return !!(r.path.trim() && r.style.trim())
     default:
       return false
   }
@@ -2753,9 +2695,6 @@ function _formatBodyRuleLabel(rule: EditableBodyRule): string {
     const flags = rule.flags.trim()
     const count = rule.count.trim()
     return `${rule.path}: s/${rule.pattern}/${rule.replacement || ''}/${flags}${count ? ` ×${count}` : ''}`
-  } else if (rule.action === 'name_style') {
-    if (!rule.path || !rule.style) return '(未设置)'
-    return `${rule.path}→${rule.style}`
   }
   return '(未知)'
 }
@@ -2796,9 +2735,6 @@ function hasBodyRulesChanges(endpoint: ProviderEndpoint): boolean {
       if (edited.replacement !== (original.replacement ?? '')) return true
       if (edited.flags !== (original.flags ?? '')) return true
       if (edited.count !== (original.count === undefined || original.count === null ? '' : String(original.count))) return true
-    } else if (edited.action === 'name_style' && original.action === 'name_style') {
-      if (edited.path !== (original.path ?? '')) return true
-      if (edited.style !== (original.style ?? '')) return true
     }
     if (!conditionEquals(edited.condition, conditionToEditable(original.condition))) return true
   }
@@ -2839,8 +2775,6 @@ function rulesToBodyRules(rules: EditableBodyRule[]): BodyRule[] | null {
         ...(isStrictNonNegativeIntegerString(rule.count) ? { count: parseInt(rule.count.trim(), 10) } : {}),
       }
       result.push({ ...entry, ...(condition ? { condition } : {}) })
-    } else if (rule.action === 'name_style' && rule.path.trim() && rule.style.trim()) {
-      result.push({ action: 'name_style', path: rule.path.trim(), style: rule.style.trim() as BodyRuleNameStyle['style'], ...(condition ? { condition } : {}) })
     }
   }
 
@@ -2898,10 +2832,6 @@ function getBodyValidationErrorForEndpoint(endpointId: string): string | null {
       if (count) {
         if (!isStrictNonNegativeIntegerString(count)) return `${prefix}替换次数必须是大于等于 0 的整数`
       }
-    } else if (rule.action === 'name_style') {
-      if (!rule.path.trim()) return `${prefix}路径不能为空`
-      const validStyles = new Set(['snake_case', 'camelCase', 'PascalCase', 'kebab-case', 'capitalize'])
-      if (!rule.style.trim() || !validStyles.has(rule.style.trim())) return `${prefix}请选择有效的命名风格`
     }
 
     const conditionErr = validateEditableCondition(rule.condition)
