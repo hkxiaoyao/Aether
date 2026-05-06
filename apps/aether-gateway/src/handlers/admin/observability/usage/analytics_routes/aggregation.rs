@@ -163,12 +163,19 @@ pub(super) async fn build_admin_usage_aggregation_stats_response(
         "api_format" => UsageAuditAggregationGroupBy::ApiFormat,
         _ => unreachable!(),
     };
+    let exclude_reserved_provider_labels = matches!(
+        group_by_query,
+        UsageAuditAggregationGroupBy::Model
+            | UsageAuditAggregationGroupBy::Provider
+            | UsageAuditAggregationGroupBy::ApiFormat
+    );
     let usage = state
         .aggregate_usage_audits(&UsageAuditAggregationQuery {
             created_from_unix_secs,
             created_until_unix_secs,
             group_by: group_by_query,
             limit,
+            exclude_reserved_provider_labels,
         })
         .await?;
 

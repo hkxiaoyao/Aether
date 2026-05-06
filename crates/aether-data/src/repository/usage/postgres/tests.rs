@@ -420,6 +420,10 @@ fn usage_sql_provider_aggregation_excludes_unknown_provider_labels() {
     assert!(source.contains(
         r#"lower(BTRIM(COALESCE(\"usage\".provider_name, ''))) NOT IN ('unknown', 'unknow', 'pending')"#
     ));
+    assert!(source.contains("exclude_reserved_provider_labels"));
+    assert!(source.contains(
+        r#"lower(BTRIM(COALESCE(provider_name, ''))) NOT IN ('unknown', 'unknow', 'pending')"#
+    ));
     assert!(source.contains("MAX(display_name)"));
     assert!(!source.contains("COALESCE(MAX(NULLIF(display_name, 'Unknown')), 'Unknown')"));
 }

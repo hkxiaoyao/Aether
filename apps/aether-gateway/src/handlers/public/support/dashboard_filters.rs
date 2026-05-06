@@ -780,6 +780,7 @@ async fn dashboard_load_user_counts(
             created_until_unix_secs,
             group_by: UsageAuditAggregationGroupBy::User,
             limit: 10_000,
+            exclude_reserved_provider_labels: false,
         })
         .await?;
     let count = fallback.len() as u64;

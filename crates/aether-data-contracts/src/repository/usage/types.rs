@@ -673,6 +673,7 @@ pub struct UsageAuditAggregationQuery {
     pub created_until_unix_secs: u64,
     pub group_by: UsageAuditAggregationGroupBy,
     pub limit: usize,
+    pub exclude_reserved_provider_labels: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]

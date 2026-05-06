@@ -1155,6 +1155,8 @@ impl UsageReadRepository for InMemoryUsageReadRepository {
             if item.created_at_unix_ms < query.created_from_unix_secs
                 || item.created_at_unix_ms >= query.created_until_unix_secs
                 || matches!(item.status.as_str(), "pending" | "streaming")
+                || (query.exclude_reserved_provider_labels
+                    && usage_provider_display_name(item).is_none())
             {
                 continue;
             }
@@ -3090,6 +3092,7 @@ mod tests {
                 created_until_unix_secs: 1_000,
                 group_by: UsageAuditAggregationGroupBy::Provider,
                 limit: 10,
+                exclude_reserved_provider_labels: false,
             })
             .await
             .expect("aggregation should succeed");
@@ -3097,6 +3100,56 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].group_key, "provider-1");
         assert_eq!(rows[0].display_name.as_deref(), Some("OpenAI"));
+    }
+
+    #[tokio::test]
+    async fn aggregation_can_skip_unknown_provider_records_for_model_and_api_format() {
+        let mut unknown = sample_usage("req-unknown-provider", 100);
+        unknown.provider_id = None;
+        unknown.provider_name = "unknown".to_string();
+
+        let mut typo_unknown = sample_usage("req-unknow-provider", 200);
+        typo_unknown.provider_id = Some("unknow".to_string());
+        typo_unknown.provider_name = "unknow".to_string();
+
+        let mut pending_provider = sample_usage("req-pending-provider", 300);
+        pending_provider.provider_id = None;
+        pending_provider.provider_name = "pending".to_string();
+
+        let repository = InMemoryUsageReadRepository::seed(vec![
+            sample_usage("req-valid-provider", 400),
+            unknown,
+            typo_unknown,
+            pending_provider,
+        ]);
+
+        let model_rows = repository
+            .aggregate_usage_audits(&UsageAuditAggregationQuery {
+                created_from_unix_secs: 0,
+                created_until_unix_secs: 1_000,
+                group_by: UsageAuditAggregationGroupBy::Model,
+                limit: 10,
+                exclude_reserved_provider_labels: true,
+            })
+            .await
+            .expect("model aggregation should succeed");
+        assert_eq!(model_rows.len(), 1);
+        assert_eq!(model_rows[0].group_key, "gpt-4.1");
+        assert_eq!(model_rows[0].request_count, 1);
+
+        let api_format_rows = repository
+            .aggregate_usage_audits(&UsageAuditAggregationQuery {
+                created_from_unix_secs: 0,
+                created_until_unix_secs: 1_000,
+                group_by: UsageAuditAggregationGroupBy::ApiFormat,
+                limit: 10,
+                exclude_reserved_provider_labels: true,
+            })
+            .await
+            .expect("api format aggregation should succeed");
+        assert_eq!(api_format_rows.len(), 1);
+        assert_eq!(api_format_rows[0].group_key, "openai:chat");
+        assert_eq!(api_format_rows[0].request_count, 1);
     }
 
     #[tokio::test]

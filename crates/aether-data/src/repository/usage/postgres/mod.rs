@@ -1336,6 +1336,8 @@ const REBUILD_PROVIDER_API_KEY_USAGE_STATS_SQL: &str =
     include_str!("queries/rebuild_provider_api_key_usage_stats_sql.sql");
 
 const LIST_USAGE_AUDITS_PREFIX: &str = include_str!("queries/list_usage_audits_prefix.sql");
+const USAGE_RESERVED_PROVIDER_LABELS_FILTER_SQL: &str =
+    " AND BTRIM(COALESCE(\"usage\".provider_name, '')) <> '' AND lower(BTRIM(COALESCE(\"usage\".provider_name, ''))) NOT IN ('unknown', 'unknow', 'pending')";
 
 struct UsageAuditAggregationSqlFragments {
     filtered_extra_where: &'static str,
@@ -1363,7 +1365,7 @@ fn usage_audit_aggregation_sql_fragments(
             success_count_expr: "NULL::BIGINT",
         },
         UsageAuditAggregationGroupBy::Provider => UsageAuditAggregationSqlFragments {
-            filtered_extra_where: " AND BTRIM(COALESCE(\"usage\".provider_name, '')) <> '' AND lower(BTRIM(COALESCE(\"usage\".provider_name, ''))) NOT IN ('unknown', 'unknow', 'pending')",
+            filtered_extra_where: "",
             group_key_expr: "provider_group_key",
             display_name_expr: "provider_display_name",
             secondary_name_expr: "NULL::varchar",
@@ -6417,6 +6419,12 @@ WHERE stats_daily_api_key.date >=
                 }
             };
 
+        let provider_extra_where = if matches!(group_by, UsageAuditAggregationGroupBy::Provider) {
+            " AND BTRIM(COALESCE(provider_name, '')) <> '' AND lower(BTRIM(COALESCE(provider_name, ''))) NOT IN ('unknown', 'unknow', 'pending')"
+        } else {
+            ""
+        };
+
         let sql = format!(
             r#"
 SELECT
@@ -6441,6 +6449,7 @@ SELECT
 FROM {table_name}
 WHERE date >= $1
   AND date < $2
+  {provider_extra_where}
 GROUP BY {group_column}
 ORDER BY request_count DESC, group_key ASC
 "#,
@@ -6449,6 +6458,7 @@ ORDER BY request_count DESC, group_key ASC
             avg_response_time_expr = avg_response_time_expr,
             success_count_expr = success_count_expr,
             table_name = table_name,
+            provider_extra_where = provider_extra_where,
         );
 
         let mut rows = sqlx::query(&sql)
@@ -6467,6 +6477,13 @@ ORDER BY request_count DESC, group_key ASC
         query: &UsageAuditAggregationQuery,
     ) -> Result<Vec<StoredUsageAuditAggregation>, DataLayerError> {
         let fragments = usage_audit_aggregation_sql_fragments(query.group_by);
+        let provider_extra_where = if matches!(query.group_by, UsageAuditAggregationGroupBy::Provider)
+            || query.exclude_reserved_provider_labels
+        {
+            USAGE_RESERVED_PROVIDER_LABELS_FILTER_SQL
+        } else {
+            ""
+        };
         let sql = format!(
             r#"
 WITH filtered_usage AS (
@@ -6518,6 +6535,7 @@ WITH filtered_usage AS (
   WHERE "usage".created_at >= TO_TIMESTAMP($1::double precision)
     AND "usage".created_at < TO_TIMESTAMP($2::double precision)
     AND "usage".status NOT IN ('pending', 'streaming')
+    {provider_extra_where}
     {filtered_extra_where}
 ),
 normalized_usage AS (
@@ -6611,6 +6629,7 @@ FROM aggregated_usage
 ORDER BY request_count DESC, group_key ASC
 LIMIT $3
 "#,
+            provider_extra_where = provider_extra_where,
             filtered_extra_where = fragments.filtered_extra_where,
             group_key_expr = fragments.group_key_expr,
             display_name_expr = fragments.display_name_expr,
@@ -6646,6 +6665,11 @@ LIMIT $3
         if matches!(query.group_by, UsageAuditAggregationGroupBy::User) {
             return self.aggregate_usage_audits_raw(query).await;
         }
+        if query.exclude_reserved_provider_labels
+            && !matches!(query.group_by, UsageAuditAggregationGroupBy::Provider)
+        {
+            return self.aggregate_usage_audits_raw(query).await;
+        }
 
         let Some(cutoff_utc) = self.read_stats_daily_cutoff_date().await? else {
             return self.aggregate_usage_audits_raw(query).await;
@@ -6666,6 +6690,7 @@ LIMIT $3
                     created_until_unix_secs: dashboard_utc_to_unix_secs(raw_end),
                     group_by: query.group_by,
                     limit: raw_merge_limit,
+                    exclude_reserved_provider_labels: query.exclude_reserved_provider_labels,
                 })
                 .await?;
             absorb_usage_audit_aggregation_rows(&mut grouped, raw);
@@ -6687,6 +6712,7 @@ LIMIT $3
                     created_until_unix_secs: dashboard_utc_to_unix_secs(raw_end),
                     group_by: query.group_by,
                     limit: raw_merge_limit,
+                    exclude_reserved_provider_labels: query.exclude_reserved_provider_labels,
                 })
                 .await?;
             absorb_usage_audit_aggregation_rows(&mut grouped, raw);

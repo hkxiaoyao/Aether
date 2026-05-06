@@ -528,8 +528,29 @@ async fn gateway_handles_admin_usage_aggregation_stats_locally_with_trusted_admi
     usage_3.endpoint_api_format = Some("claude:messages".to_string());
     usage_3.provider_api_family = Some("claude".to_string());
 
+    let mut unknown_usage = sample_usage_row(
+        "usage-unknown",
+        "req-unknown",
+        Some("user-2"),
+        Some("key-2"),
+        Some("secondary"),
+        "unknow",
+        "gpt-5",
+        "completed",
+        900,
+        300,
+        9.0,
+        10.8,
+        DAY_2_UNIX_SECS,
+    );
+    unknown_usage.provider_id = None;
+    unknown_usage.total_tokens = unknown_usage.input_tokens;
+
     let usage_repository = Arc::new(InMemoryUsageReadRepository::seed(vec![
-        usage_1, usage_2, usage_3,
+        usage_1,
+        usage_2,
+        usage_3,
+        unknown_usage,
     ]));
 
     let gateway = build_router_with_state(
