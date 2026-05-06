@@ -18,12 +18,6 @@ export interface AccountStatusSnapshot {
   recoverable?: boolean
 }
 
-export interface QuotaWindowUsageSnapshot {
-  request_count?: number | null
-  total_tokens?: number | null
-  total_cost_usd?: number | string | null
-}
-
 export interface QuotaWindowSnapshot {
   code: string
   label?: string | null
@@ -39,7 +33,6 @@ export interface QuotaWindowSnapshot {
   reset_seconds?: number | null
   window_minutes?: number | null
   is_exhausted?: boolean | null
-  usage?: QuotaWindowUsageSnapshot | null
 }
 
 export interface QuotaCreditsSnapshot {
