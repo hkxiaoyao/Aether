@@ -474,7 +474,8 @@ async fn gateway_handles_admin_user_batch_actions_locally() {
     let gateway = build_router_with_state(
         AppState::new()
             .expect("gateway should build")
-            .with_auth_users_for_tests([sample_admin_user("user-1")]),
+            .with_auth_users_for_tests([sample_admin_user("user-1")])
+            .with_auth_wallets_for_tests([sample_admin_wallet("user-1", "unlimited")]),
     );
     let (gateway_url, gateway_handle) = start_server(gateway).await;
     let client = reqwest::Client::new();
@@ -534,7 +535,8 @@ async fn gateway_handles_admin_user_batch_actions_locally() {
                 "allowed_providers": null,
                 "allowed_api_formats": ["OPENAI:RESPONSES"],
                 "allowed_models": [],
-                "rate_limit": 0
+                "rate_limit": 0,
+                "unlimited": false
             }
         }))
         .send()
@@ -554,8 +556,101 @@ async fn gateway_handles_admin_user_batch_actions_locally() {
             "allowed_providers",
             "allowed_api_formats",
             "allowed_models",
-            "rate_limit"
+            "rate_limit",
+            "unlimited"
         ])
+    );
+
+    let role_response = client
+        .post(format!("{gateway_url}/api/admin/users/batch-action"))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "selection": {
+                "user_ids": ["user-1"]
+            },
+            "action": "update_role",
+            "payload": {
+                "role": "admin"
+            }
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+    assert_eq!(role_response.status(), StatusCode::OK);
+    let role_payload: serde_json::Value =
+        role_response.json().await.expect("json body should parse");
+    assert_eq!(role_payload["total"], 1);
+    assert_eq!(role_payload["success"], 1);
+    assert_eq!(role_payload["modified_fields"], json!(["role"]));
+
+    let blank_role_response = client
+        .post(format!("{gateway_url}/api/admin/users/batch-action"))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "selection": {
+                "user_ids": ["user-1"]
+            },
+            "action": "update_role",
+            "payload": {
+                "role": ""
+            }
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+    assert_eq!(blank_role_response.status(), StatusCode::BAD_REQUEST);
+
+    let enable_admin_response = client
+        .post(format!("{gateway_url}/api/admin/users/batch-action"))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "selection": {
+                "user_ids": ["user-1"]
+            },
+            "action": "enable"
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+    assert_eq!(enable_admin_response.status(), StatusCode::OK);
+
+    let last_admin_demotion_response = client
+        .post(format!("{gateway_url}/api/admin/users/batch-action"))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "selection": {
+                "user_ids": ["user-1"]
+            },
+            "action": "update_role",
+            "payload": {
+                "role": "user"
+            }
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+    assert_eq!(last_admin_demotion_response.status(), StatusCode::OK);
+    let last_admin_demotion_payload: serde_json::Value = last_admin_demotion_response
+        .json()
+        .await
+        .expect("json body should parse");
+    assert_eq!(last_admin_demotion_payload["success"], 0);
+    assert_eq!(last_admin_demotion_payload["failed"], 1);
+    assert_eq!(
+        last_admin_demotion_payload["failures"][0]["reason"],
+        "不能降级最后一个管理员账户"
     );
 
     let detail_response = client
@@ -572,7 +667,9 @@ async fn gateway_handles_admin_user_batch_actions_locally() {
         .json()
         .await
         .expect("json body should parse");
-    assert_eq!(detail_payload["is_active"], false);
+    assert_eq!(detail_payload["role"], "admin");
+    assert_eq!(detail_payload["is_active"], true);
+    assert_eq!(detail_payload["unlimited"], false);
     assert_eq!(detail_payload["allowed_providers"], serde_json::Value::Null);
     assert_eq!(
         detail_payload["allowed_api_formats"],

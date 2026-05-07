@@ -1,6 +1,6 @@
 use super::{
     build_admin_users_bad_request_response, build_admin_users_read_only_response,
-    normalize_admin_user_api_formats, normalize_admin_user_string_list,
+    normalize_admin_user_api_formats, normalize_admin_user_role, normalize_admin_user_string_list,
 };
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::handlers::admin::shared::attach_admin_audit_response;
@@ -70,6 +70,7 @@ struct ResolvedAdminUserSelection {
 
 #[derive(Debug, Clone, Default)]
 struct AdminUserBatchMutation {
+    role: Option<String>,
     allowed_providers_present: bool,
     allowed_providers: Option<Vec<String>>,
     allowed_api_formats_present: bool,
@@ -79,7 +80,19 @@ struct AdminUserBatchMutation {
     rate_limit_present: bool,
     rate_limit: Option<i32>,
     is_active: Option<bool>,
+    unlimited: Option<bool>,
     modified_fields: Vec<&'static str>,
+}
+
+impl AdminUserBatchMutation {
+    fn has_auth_user_fields(&self) -> bool {
+        self.role.is_some()
+            || self.allowed_providers_present
+            || self.allowed_api_formats_present
+            || self.allowed_models_present
+            || self.rate_limit_present
+            || self.is_active.is_some()
+    }
 }
 
 pub(in super::super) async fn build_admin_resolve_user_selection_response(
@@ -105,15 +118,9 @@ pub(in super::super) async fn build_admin_resolve_user_selection_response(
 
 pub(in super::super) async fn build_admin_user_batch_action_response(
     state: &AdminAppState<'_>,
-    _request_context: &AdminRequestContext<'_>,
+    request_context: &AdminRequestContext<'_>,
     request_body: Option<&Bytes>,
 ) -> Result<Response<Body>, GatewayError> {
-    if !state.has_auth_user_write_capability() {
-        return Ok(build_admin_users_read_only_response(
-            "当前为只读模式，无法批量更新用户",
-        ));
-    }
-
     let request = match parse_batch_action_request(request_body) {
         Ok(value) => value,
         Err(detail) => return Ok(build_admin_user_batch_bad_request_response(detail)),
@@ -122,10 +129,30 @@ pub(in super::super) async fn build_admin_user_batch_action_response(
         Ok(value) => value,
         Err(detail) => return Ok(build_admin_user_batch_bad_request_response(detail)),
     };
+    if mutation.has_auth_user_fields() && !state.has_auth_user_write_capability() {
+        return Ok(build_admin_users_read_only_response(
+            "当前为只读模式，无法批量更新用户",
+        ));
+    }
+    if mutation.unlimited.is_some() && !state.has_auth_wallet_write_capability() {
+        return Ok(build_admin_users_read_only_response(
+            "当前为只读模式，无法批量更新用户钱包",
+        ));
+    }
     let resolved = match resolve_admin_user_selection(state, request.selection).await {
         Ok(value) => value,
         Err(detail) => return Ok(build_admin_user_batch_bad_request_response(detail)),
     };
+    let active_admin_demotions = count_active_admin_demotions(&mutation, &resolved.items);
+    let active_admin_count = if active_admin_demotions > 0 {
+        state.count_active_admin_users().await?
+    } else {
+        0
+    };
+    let current_admin_user_id = request_context
+        .decision()
+        .and_then(|decision| decision.admin_principal.as_ref())
+        .map(|principal| principal.user_id.as_str());
 
     let mut success = 0usize;
     let mut failures = resolved
@@ -135,29 +162,64 @@ pub(in super::super) async fn build_admin_user_batch_action_response(
         .collect::<Vec<_>>();
 
     for item in &resolved.items {
-        let updated = state
-            .update_local_auth_user_admin_fields(
-                &item.user_id,
-                None,
-                mutation.allowed_providers_present,
-                mutation.allowed_providers.clone(),
-                mutation.allowed_api_formats_present,
-                mutation.allowed_api_formats.clone(),
-                mutation.allowed_models_present,
-                mutation.allowed_models.clone(),
-                mutation.rate_limit_present,
-                mutation.rate_limit,
-                mutation.is_active,
-            )
-            .await?;
-        if updated.is_some() {
-            success += 1;
-        } else {
+        if state.find_user_auth_by_id(&item.user_id).await?.is_none() {
             failures.push(json!({
                 "user_id": item.user_id,
                 "reason": "用户不存在或已删除",
             }));
+            continue;
         }
+
+        if let Some(reason) = batch_role_demotion_failure_reason(
+            &mutation,
+            item,
+            active_admin_count,
+            active_admin_demotions,
+            current_admin_user_id,
+        ) {
+            failures.push(json!({
+                "user_id": item.user_id,
+                "reason": reason,
+            }));
+            continue;
+        }
+
+        if let Some(unlimited) = mutation.unlimited {
+            if !apply_batch_user_wallet_limit_mode(state, &item.user_id, unlimited).await? {
+                failures.push(json!({
+                    "user_id": item.user_id,
+                    "reason": "用户钱包不可用",
+                }));
+                continue;
+            }
+        }
+
+        if mutation.has_auth_user_fields()
+            && state
+                .update_local_auth_user_admin_fields(
+                    &item.user_id,
+                    mutation.role.clone(),
+                    mutation.allowed_providers_present,
+                    mutation.allowed_providers.clone(),
+                    mutation.allowed_api_formats_present,
+                    mutation.allowed_api_formats.clone(),
+                    mutation.allowed_models_present,
+                    mutation.allowed_models.clone(),
+                    mutation.rate_limit_present,
+                    mutation.rate_limit,
+                    mutation.is_active,
+                )
+                .await?
+                .is_none()
+        {
+            failures.push(json!({
+                "user_id": item.user_id,
+                "reason": "用户不存在或已删除",
+            }));
+            continue;
+        }
+
+        success += 1;
     }
 
     let failed = failures.len();
@@ -410,8 +472,30 @@ fn parse_batch_mutation(
             ..AdminUserBatchMutation::default()
         }),
         "update_access_control" => parse_access_control_mutation(payload),
+        "update_role" => parse_role_mutation(payload),
         _ => Err("不支持的批量操作".to_string()),
     }
+}
+
+fn parse_role_mutation(payload: Option<Value>) -> Result<AdminUserBatchMutation, String> {
+    let Some(Value::Object(payload)) = payload else {
+        return Err("payload 必须是对象".to_string());
+    };
+    let Some(value) = payload.get("role") else {
+        return Err("role 参数不能为空".to_string());
+    };
+    let Some(role) = value.as_str() else {
+        return Err("role 参数不合法".to_string());
+    };
+    let role = role.trim();
+    if role.is_empty() {
+        return Err("role 参数不能为空".to_string());
+    }
+    Ok(AdminUserBatchMutation {
+        role: Some(normalize_admin_user_role(Some(role))?),
+        modified_fields: vec!["role"],
+        ..AdminUserBatchMutation::default()
+    })
 }
 
 fn parse_access_control_mutation(payload: Option<Value>) -> Result<AdminUserBatchMutation, String> {
@@ -439,6 +523,10 @@ fn parse_access_control_mutation(payload: Option<Value>) -> Result<AdminUserBatc
         mutation.rate_limit_present = true;
         mutation.rate_limit = parse_optional_rate_limit(value)?;
         mutation.modified_fields.push("rate_limit");
+    }
+    if let Some(value) = payload.get("unlimited") {
+        mutation.unlimited = Some(parse_unlimited(value)?);
+        mutation.modified_fields.push("unlimited");
     }
 
     if mutation.modified_fields.is_empty() {
@@ -479,6 +567,73 @@ fn parse_optional_rate_limit(value: &Value) -> Result<Option<i32>, String> {
         return Err("rate_limit 必须大于等于 0".to_string());
     }
     Ok(Some(rate_limit))
+}
+
+fn parse_unlimited(value: &Value) -> Result<bool, String> {
+    serde_json::from_value::<bool>(value.clone()).map_err(|_| "unlimited 必须是布尔值".to_string())
+}
+
+fn count_active_admin_demotions(
+    mutation: &AdminUserBatchMutation,
+    items: &[AdminUserSelectionItem],
+) -> usize {
+    if mutation.role.as_deref() != Some("user") {
+        return 0;
+    }
+    items
+        .iter()
+        .filter(|item| item.is_active && item.role.eq_ignore_ascii_case("admin"))
+        .count()
+}
+
+fn batch_role_demotion_failure_reason(
+    mutation: &AdminUserBatchMutation,
+    item: &AdminUserSelectionItem,
+    active_admin_count: u64,
+    active_admin_demotions: usize,
+    current_admin_user_id: Option<&str>,
+) -> Option<&'static str> {
+    if mutation.role.as_deref() != Some("user")
+        || !item.is_active
+        || !item.role.eq_ignore_ascii_case("admin")
+    {
+        return None;
+    }
+    if current_admin_user_id.is_some_and(|user_id| user_id == item.user_id) {
+        return Some("不能降级当前管理员账户");
+    }
+    if active_admin_count <= active_admin_demotions as u64 {
+        return Some("不能降级最后一个管理员账户");
+    }
+    None
+}
+
+async fn apply_batch_user_wallet_limit_mode(
+    state: &AdminAppState<'_>,
+    user_id: &str,
+    unlimited: bool,
+) -> Result<bool, GatewayError> {
+    let desired_limit_mode = if unlimited { "unlimited" } else { "finite" };
+    match state
+        .find_wallet(aether_data::repository::wallet::WalletLookupKey::UserId(
+            user_id,
+        ))
+        .await?
+    {
+        Some(wallet) => {
+            if wallet.limit_mode.eq_ignore_ascii_case(desired_limit_mode) {
+                return Ok(true);
+            }
+            Ok(state
+                .update_auth_user_wallet_limit_mode(user_id, desired_limit_mode)
+                .await?
+                .is_some())
+        }
+        None => Ok(state
+            .initialize_auth_user_wallet(user_id, 0.0, unlimited)
+            .await?
+            .is_some()),
+    }
 }
 
 fn build_admin_user_batch_bad_request_response(detail: String) -> Response<Body> {
