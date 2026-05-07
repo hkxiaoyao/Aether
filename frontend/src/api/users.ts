@@ -2,11 +2,13 @@ import apiClient from './client'
 import { cachedRequest } from '@/utils/cache'
 import type { UserSession as SessionRecord } from '@/types/session'
 
+export type UserRole = 'admin' | 'user'
+
 export interface User {
   id: string // UUID
   username: string
   email: string
-  role: 'admin' | 'user'
+  role: UserRole
   is_active: boolean
   unlimited: boolean
   allowed_providers: string[] | null  // 允许使用的提供商 ID 列表
@@ -24,7 +26,7 @@ export interface CreateUserRequest {
   username: string
   password: string
   email: string
-  role?: 'admin' | 'user'
+  role?: UserRole
   initial_gift_usd?: number | null
   unlimited?: boolean
   allowed_providers?: string[] | null
@@ -36,7 +38,7 @@ export interface CreateUserRequest {
 export interface UpdateUserRequest {
   email?: string
   is_active?: boolean
-  role?: 'admin' | 'user'
+  role?: UserRole
   unlimited?: boolean
   password?: string
   allowed_providers?: string[] | null
@@ -47,7 +49,7 @@ export interface UpdateUserRequest {
 
 export interface UserBatchSelectionFilters {
   search?: string
-  role?: 'admin' | 'user'
+  role?: UserRole
   is_active?: boolean
 }
 
@@ -60,7 +62,7 @@ export interface UserBatchSelectionItem {
   user_id: string
   username: string
   email?: string | null
-  role: 'admin' | 'user'
+  role: UserRole
   is_active: boolean
 }
 
@@ -74,15 +76,39 @@ export interface UserBatchAccessControlPayload {
   allowed_api_formats?: string[] | null
   allowed_models?: string[] | null
   rate_limit?: number | null
+  unlimited?: boolean
 }
 
-export type UserBatchAction = 'enable' | 'disable' | 'update_access_control'
+export interface UserBatchRolePayload {
+  role: UserRole
+}
 
-export interface UserBatchActionRequest {
+export type UserBatchAction = 'enable' | 'disable' | 'update_access_control' | 'update_role'
+
+export type UserBatchActionPayload = UserBatchAccessControlPayload | UserBatchRolePayload
+
+export interface UserBatchToggleActionRequest {
   selection: UserBatchSelection
-  action: UserBatchAction
-  payload?: UserBatchAccessControlPayload | null
+  action: 'enable' | 'disable'
+  payload?: null
 }
+
+export interface UserBatchAccessControlActionRequest {
+  selection: UserBatchSelection
+  action: 'update_access_control'
+  payload: UserBatchAccessControlPayload
+}
+
+export interface UserBatchRoleActionRequest {
+  selection: UserBatchSelection
+  action: 'update_role'
+  payload: UserBatchRolePayload
+}
+
+export type UserBatchActionRequest =
+  | UserBatchToggleActionRequest
+  | UserBatchAccessControlActionRequest
+  | UserBatchRoleActionRequest
 
 export interface UserBatchActionFailure {
   user_id: string
