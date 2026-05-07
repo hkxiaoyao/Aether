@@ -4,8 +4,9 @@ use super::{
     build_admin_delete_user_session_response, build_admin_delete_user_sessions_response,
     build_admin_get_user_response, build_admin_list_user_api_keys_response,
     build_admin_list_user_sessions_response, build_admin_list_users_response,
-    build_admin_reveal_user_api_key_response, build_admin_toggle_user_api_key_lock_response,
-    build_admin_update_user_api_key_response, build_admin_update_user_response,
+    build_admin_resolve_user_selection_response, build_admin_reveal_user_api_key_response,
+    build_admin_toggle_user_api_key_lock_response, build_admin_update_user_api_key_response,
+    build_admin_update_user_response, build_admin_user_batch_action_response,
     build_admin_users_data_unavailable_response,
 };
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
@@ -18,6 +19,14 @@ fn is_admin_users_route(request_context: &AdminRequestContext<'_>) -> bool {
         && matches!(path, "/api/admin/users" | "/api/admin/users/"))
         || (request_context.method() == http::Method::POST
             && matches!(path, "/api/admin/users" | "/api/admin/users/"))
+        || (request_context.method() == http::Method::POST
+            && matches!(
+                path,
+                "/api/admin/users/resolve-selection"
+                    | "/api/admin/users/resolve-selection/"
+                    | "/api/admin/users/batch-action"
+                    | "/api/admin/users/batch-action/"
+            ))
         || ((request_context.method() == http::Method::GET
             || request_context.method() == http::Method::PUT
             || request_context.method() == http::Method::DELETE)
@@ -80,6 +89,13 @@ pub(super) async fn maybe_build_local_admin_users_routes_response(
         )),
         Some("list_users") => Ok(Some(
             build_admin_list_users_response(state, request_context).await?,
+        )),
+        Some("resolve_user_selection") => Ok(Some(
+            build_admin_resolve_user_selection_response(state, request_context, request_body)
+                .await?,
+        )),
+        Some("batch_action_users") => Ok(Some(
+            build_admin_user_batch_action_response(state, request_context, request_body).await?,
         )),
         Some("get_user") => Ok(Some(
             build_admin_get_user_response(state, request_context).await?,
