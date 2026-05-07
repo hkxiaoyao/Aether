@@ -8,6 +8,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: build-proxy-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   preflight:
     runs-on: ubuntu-latest
@@ -142,6 +146,27 @@ jobs:
       - name: Generate checksums
         working-directory: artifacts
         run: sha256sum aether-proxy-* > SHA256SUMS.txt
+
+      - name: Delete stale draft releases for tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          REPOSITORY: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          draft_ids="$(gh api "repos/${REPOSITORY}/releases" --paginate --jq '.[] | select(.tag_name == env.RELEASE_TAG and .draft == true) | .id')"
+
+          if [[ -z "${draft_ids}" ]]; then
+            echo "No stale draft releases for ${RELEASE_TAG}"
+            exit 0
+          fi
+
+          while IFS= read -r release_id; do
+            [[ -z "${release_id}" ]] && continue
+            echo "Deleting stale draft release ${release_id} for ${RELEASE_TAG}"
+            gh api -X DELETE "repos/${REPOSITORY}/releases/${release_id}"
+          done <<< "${draft_ids}"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
