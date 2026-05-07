@@ -362,6 +362,230 @@ async fn gateway_handles_admin_users_root_locally_with_trusted_admin_principal()
 }
 
 #[tokio::test]
+async fn gateway_resolves_admin_user_batch_selection_locally() {
+    let upstream_hits = Arc::new(Mutex::new(0usize));
+    let upstream_hits_clone = Arc::clone(&upstream_hits);
+    let upstream = Router::new().fallback(any(move |_request: Request| {
+        let upstream_hits_inner = Arc::clone(&upstream_hits_clone);
+        async move {
+            *upstream_hits_inner.lock().expect("mutex should lock") += 1;
+            (StatusCode::OK, Body::from("unexpected upstream hit"))
+        }
+    }));
+
+    let user_repository = Arc::new(
+        InMemoryUserReadRepository::seed_auth_users(vec![
+            sample_admin_user("user-1"),
+            sample_admin_user_with_role("user-2", "admin", "root@example.com", "root"),
+            sample_admin_user_with_role("user-3", "user", "carol@example.com", "carol"),
+        ])
+        .with_export_users(vec![
+            sample_admin_export_user("user-1"),
+            sample_admin_export_user_with("admin", true, "user-2", "root@example.com", "root"),
+            sample_admin_export_user_with("user", false, "user-3", "carol@example.com", "carol"),
+        ]),
+    );
+
+    let (upstream_url, upstream_handle) = start_server(upstream).await;
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(GatewayDataState::with_user_reader_for_tests(
+                user_repository,
+            )),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{gateway_url}/api/admin/users/resolve-selection"))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "filters": {
+                "search": "ali",
+                "role": "user",
+                "is_active": true
+            }
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["total"], 1);
+    let items = payload["items"].as_array().expect("items should be array");
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["user_id"], "user-1");
+    assert_eq!(items[0]["username"], "alice");
+    assert_eq!(items[0]["email"], "alice@example.com");
+    assert_eq!(items[0]["role"], "user");
+    assert_eq!(items[0]["is_active"], true);
+    assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
+
+    let all_filtered_response = reqwest::Client::new()
+        .post(format!("{gateway_url}/api/admin/users/resolve-selection"))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({ "filters": {} }))
+        .send()
+        .await
+        .expect("request should succeed");
+    assert_eq!(all_filtered_response.status(), StatusCode::OK);
+    let all_filtered_payload: serde_json::Value = all_filtered_response
+        .json()
+        .await
+        .expect("json body should parse");
+    assert_eq!(all_filtered_payload["total"], 3);
+
+    let empty_selection_response = reqwest::Client::new()
+        .post(format!("{gateway_url}/api/admin/users/resolve-selection"))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({}))
+        .send()
+        .await
+        .expect("request should succeed");
+    assert_eq!(empty_selection_response.status(), StatusCode::BAD_REQUEST);
+
+    gateway_handle.abort();
+    upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_handles_admin_user_batch_actions_locally() {
+    let upstream_hits = Arc::new(Mutex::new(0usize));
+    let upstream_hits_clone = Arc::clone(&upstream_hits);
+    let upstream = Router::new().fallback(any(move |_request: Request| {
+        let upstream_hits_inner = Arc::clone(&upstream_hits_clone);
+        async move {
+            *upstream_hits_inner.lock().expect("mutex should lock") += 1;
+            (StatusCode::OK, Body::from("unexpected upstream hit"))
+        }
+    }));
+
+    let (upstream_url, upstream_handle) = start_server(upstream).await;
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_auth_users_for_tests([sample_admin_user("user-1")]),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+    let client = reqwest::Client::new();
+
+    let disable_response = client
+        .post(format!("{gateway_url}/api/admin/users/batch-action"))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "selection": {
+                "user_ids": ["user-1", "user-1", "missing-user"]
+            },
+            "action": "disable"
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+    assert_eq!(disable_response.status(), StatusCode::OK);
+    let disable_payload: serde_json::Value = disable_response
+        .json()
+        .await
+        .expect("json body should parse");
+    assert_eq!(disable_payload["total"], 2);
+    assert_eq!(disable_payload["success"], 1);
+    assert_eq!(disable_payload["failed"], 1);
+    assert_eq!(disable_payload["failures"][0]["user_id"], "missing-user");
+
+    let empty_selection_response = client
+        .post(format!("{gateway_url}/api/admin/users/batch-action"))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "selection": {},
+            "action": "disable"
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+    assert_eq!(empty_selection_response.status(), StatusCode::BAD_REQUEST);
+
+    let access_response = client
+        .post(format!("{gateway_url}/api/admin/users/batch-action"))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "selection": {
+                "user_ids": ["user-1"]
+            },
+            "action": "update_access_control",
+            "payload": {
+                "allowed_providers": null,
+                "allowed_api_formats": ["OPENAI:RESPONSES"],
+                "allowed_models": [],
+                "rate_limit": 0
+            }
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+    assert_eq!(access_response.status(), StatusCode::OK);
+    let access_payload: serde_json::Value = access_response
+        .json()
+        .await
+        .expect("json body should parse");
+    assert_eq!(access_payload["total"], 1);
+    assert_eq!(access_payload["success"], 1);
+    assert_eq!(access_payload["failed"], 0);
+    assert_eq!(
+        access_payload["modified_fields"],
+        json!([
+            "allowed_providers",
+            "allowed_api_formats",
+            "allowed_models",
+            "rate_limit"
+        ])
+    );
+
+    let detail_response = client
+        .get(format!("{gateway_url}/api/admin/users/user-1"))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .send()
+        .await
+        .expect("request should succeed");
+    assert_eq!(detail_response.status(), StatusCode::OK);
+    let detail_payload: serde_json::Value = detail_response
+        .json()
+        .await
+        .expect("json body should parse");
+    assert_eq!(detail_payload["is_active"], false);
+    assert_eq!(detail_payload["allowed_providers"], serde_json::Value::Null);
+    assert_eq!(
+        detail_payload["allowed_api_formats"],
+        json!(["openai:responses"])
+    );
+    assert_eq!(detail_payload["allowed_models"], json!([]));
+    assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
+
+    gateway_handle.abort();
+    upstream_handle.abort();
+}
+
+#[tokio::test]
 async fn gateway_handles_admin_users_root_locally_with_bearer_admin_session() {
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);
