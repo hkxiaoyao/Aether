@@ -301,6 +301,7 @@ import {
   getOAuthStatusTitle,
 } from '@/utils/providerKeyStatus'
 import { getQuotaDisplayText } from '@/utils/providerKeyQuota'
+import { runChunkedBatchAction } from '@/utils/batchAction'
 
 type QuickSelectorValue =
   | 'banned'
@@ -839,24 +840,20 @@ async function executeAction(actionOverride?: BatchActionValue): Promise<void> {
     if (selectedAction.value === 'refresh_quota') {
       const targetIds = selectedKeys.map((key) => key.key_id)
       const BATCH_SIZE = 20
-      const totalBatches = Math.ceil(targetIds.length / BATCH_SIZE)
-
-      for (let i = 0; i < targetIds.length; i += BATCH_SIZE) {
-        const batchIndex = Math.floor(i / BATCH_SIZE) + 1
-        const batch = targetIds.slice(i, i + BATCH_SIZE)
-        progressLabel.value = `正在${actionLabel}...（第 ${batchIndex}/${totalBatches} 批）`
-
-        try {
-          const result = await refreshProviderQuota(props.providerId, batch)
-          successCount += Number(result.success || 0)
-          failedCount += Number(result.failed || 0)
-          skippedCount += Math.max(0, batch.length - Number(result.total || 0))
-        } catch {
-          failedCount += batch.length
-        }
-
-        progressDone.value = Math.min(i + BATCH_SIZE, targetIds.length)
-      }
+      const counts = await runChunkedBatchAction({
+        items: targetIds,
+        chunkSize: BATCH_SIZE,
+        runChunk: (batch) => refreshProviderQuota(props.providerId, batch),
+        onChunkStart: ({ batchIndex, totalBatches }) => {
+          progressLabel.value = `正在${actionLabel}...（第 ${batchIndex}/${totalBatches} 批）`
+        },
+        onChunkDone: ({ processed }) => {
+          progressDone.value = processed
+        },
+      })
+      successCount += counts.success
+      failedCount += counts.failed
+      skippedCount += counts.skipped
     } else if (selectedAction.value === 'export') {
       const exportableKeys = selectedKeys.filter((key) => canExportOAuthCredential(key))
       const exportedEntries: Array<Record<string, unknown> | null> = Array.from({ length: exportableKeys.length }, () => null)

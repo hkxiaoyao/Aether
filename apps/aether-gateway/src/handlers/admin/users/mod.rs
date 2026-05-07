@@ -3,6 +3,7 @@ use crate::handlers::admin::request::{AdminRouteRequest, AdminRouteResult};
 const ADMIN_USERS_DATA_UNAVAILABLE_DETAIL: &str = "Admin user management data unavailable";
 
 mod api_keys;
+mod batch;
 mod lifecycle;
 mod route_seam;
 mod routes;
@@ -18,6 +19,9 @@ pub(crate) use self::api_keys::{
     default_admin_user_api_key_name, format_optional_unix_secs_iso8601,
     generate_admin_user_api_key_plaintext, hash_admin_user_api_key, masked_user_api_key_display,
     normalize_admin_optional_api_key_name,
+};
+use self::batch::{
+    build_admin_resolve_user_selection_response, build_admin_user_batch_action_response,
 };
 use self::lifecycle::{
     build_admin_create_user_response, build_admin_delete_user_response,
