@@ -2,7 +2,9 @@ use std::sync::{Arc, Mutex};
 
 use aether_crypto::{encrypt_python_fernet_plaintext, DEVELOPMENT_ENCRYPTION_KEY};
 use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
+use aether_data::repository::usage::InMemoryUsageReadRepository;
 use aether_data_contracts::repository::provider_catalog::ProviderCatalogReadRepository;
+use aether_data_contracts::repository::usage::StoredRequestUsageAudit;
 use axum::body::{to_bytes, Body, Bytes};
 use axum::routing::{any, get, post};
 use axum::{extract::Request, Router};
@@ -68,6 +70,56 @@ async fn local_admin_pool_response(
     .await
     .expect("local pool response should build")
     .expect("pool route should resolve locally")
+}
+
+fn sample_provider_key_usage_row(
+    id: &str,
+    request_id: &str,
+    provider_id: &str,
+    provider_api_key_id: &str,
+    created_at_unix_secs: i64,
+    total_tokens: i32,
+    total_cost_usd: f64,
+) -> StoredRequestUsageAudit {
+    StoredRequestUsageAudit::new(
+        id.to_string(),
+        request_id.to_string(),
+        Some("user-1".to_string()),
+        Some("api-key-1".to_string()),
+        Some("alice".to_string()),
+        Some("user key".to_string()),
+        "codex".to_string(),
+        "gpt-5".to_string(),
+        None,
+        Some(provider_id.to_string()),
+        Some("endpoint-1".to_string()),
+        Some(provider_api_key_id.to_string()),
+        Some("responses".to_string()),
+        Some("openai:responses".to_string()),
+        Some("openai".to_string()),
+        Some("responses".to_string()),
+        Some("openai:responses".to_string()),
+        Some("openai".to_string()),
+        Some("responses".to_string()),
+        false,
+        false,
+        total_tokens,
+        0,
+        total_tokens,
+        total_cost_usd,
+        total_cost_usd,
+        Some(200),
+        None,
+        None,
+        Some(120),
+        Some(40),
+        "completed".to_string(),
+        "settled".to_string(),
+        created_at_unix_secs,
+        created_at_unix_secs + 1,
+        Some(created_at_unix_secs + 2),
+    )
+    .expect("usage row should build")
 }
 
 #[tokio::test]
@@ -1047,6 +1099,157 @@ async fn gateway_pool_list_reads_materialized_codex_cycle_usage_from_quota_windo
     assert!(window_by_code(invalid_key_payload, "weekly")
         .get("usage")
         .is_none());
+}
+
+#[tokio::test]
+async fn gateway_pool_list_overrides_stale_codex_cycle_usage_from_usage_facts() {
+    let now_unix_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system time should be after unix epoch")
+        .as_secs();
+    let reset_at = now_unix_secs + 3_600;
+
+    let mut provider = sample_provider("provider-codex", "codex", 10).with_transport_fields(
+        true,
+        false,
+        true,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(json!({
+            "pool_advanced": {
+                "enabled": true
+            }
+        })),
+    );
+    provider.provider_type = "codex".to_string();
+
+    let mut key = sample_key(
+        "key-codex-stale-cycle",
+        "provider-codex",
+        "openai:responses",
+        "oauth-placeholder",
+    );
+    key.name = "codex stale cycle".to_string();
+    key.auth_type = "oauth".to_string();
+    key.status_snapshot = Some(json!({
+        "quota": {
+            "version": 2,
+            "provider_type": "codex",
+            "code": "ok",
+            "updated_at": reset_at,
+            "exhausted": false,
+            "windows": [
+                {
+                    "code": "weekly",
+                    "label": "周",
+                    "reset_at": reset_at,
+                    "window_minutes": 10_080,
+                    "usage": {
+                        "request_count": 1,
+                        "total_tokens": 50,
+                        "total_cost_usd": "0.05000000"
+                    }
+                },
+                {
+                    "code": "5h",
+                    "label": "5H",
+                    "reset_at": reset_at,
+                    "window_minutes": 300,
+                    "usage_reset_at": now_unix_secs.saturating_sub(500),
+                    "usage": {
+                        "request_count": 9,
+                        "total_tokens": 700,
+                        "total_cost_usd": "0.70000000"
+                    }
+                }
+            ]
+        }
+    }));
+
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        Vec::new(),
+        vec![key],
+    ));
+    let usage_repository = Arc::new(InMemoryUsageReadRepository::seed(vec![
+        sample_provider_key_usage_row(
+            "usage-weekly-only",
+            "req-weekly-only",
+            "provider-codex",
+            "key-codex-stale-cycle",
+            now_unix_secs.saturating_sub(400_000) as i64,
+            1_000,
+            1.25,
+        ),
+        sample_provider_key_usage_row(
+            "usage-five-hour-before-manual-reset",
+            "req-five-hour-before-manual-reset",
+            "provider-codex",
+            "key-codex-stale-cycle",
+            now_unix_secs.saturating_sub(1_000) as i64,
+            999,
+            9.99,
+        ),
+        sample_provider_key_usage_row(
+            "usage-five-hour",
+            "req-five-hour",
+            "provider-codex",
+            "key-codex-stale-cycle",
+            now_unix_secs.saturating_sub(100) as i64,
+            200,
+            0.75,
+        ),
+    ]));
+    let state = AppState::new()
+        .expect("gateway should build")
+        .with_data_state_for_tests(
+            GatewayDataState::with_provider_catalog_and_usage_reader_for_tests(
+                provider_catalog_repository,
+                usage_repository,
+            ),
+        );
+
+    let response = local_admin_pool_response(
+        &state,
+        http::Method::GET,
+        "/api/admin/pool/provider-codex/keys?page=1&page_size=50&status=all",
+        None,
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = serde_json::from_slice(
+        &to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should read"),
+    )
+    .expect("json body should parse");
+    let key_payload = payload["keys"]
+        .as_array()
+        .expect("keys should be array")
+        .first()
+        .expect("key should exist");
+    let windows = key_payload["status_snapshot"]["quota"]["windows"]
+        .as_array()
+        .expect("quota windows should exist");
+    let weekly = windows
+        .iter()
+        .find(|window| window["code"] == json!("weekly"))
+        .expect("weekly window should exist");
+    let five_hour = windows
+        .iter()
+        .find(|window| window["code"] == json!("5h"))
+        .expect("5h window should exist");
+
+    assert_eq!(weekly["usage"]["request_count"], json!(3));
+    assert_eq!(weekly["usage"]["total_tokens"], json!(2_199));
+    assert_eq!(weekly["usage"]["total_cost_usd"], json!("11.99000000"));
+    assert_eq!(five_hour["usage"]["request_count"], json!(1));
+    assert_eq!(five_hour["usage"]["total_tokens"], json!(200));
+    assert_eq!(five_hour["usage"]["total_cost_usd"], json!("0.75000000"));
 }
 
 #[tokio::test]
