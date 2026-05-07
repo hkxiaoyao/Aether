@@ -172,7 +172,7 @@
         </div>
       </div>
 
-      <div class="flex flex-col gap-2 border-b border-border/60 bg-muted/20 px-4 py-2.5 text-xs sm:flex-row sm:items-center sm:justify-between sm:px-6">
+      <div class="flex flex-col gap-2 border-b border-border/60 bg-muted/20 px-4 py-2.5 text-xs sm:flex-row sm:items-center sm:justify-between sm:px-6 xl:px-4">
         <div class="flex flex-wrap items-center gap-2 text-muted-foreground">
           <label class="flex items-center gap-2">
             <Checkbox
@@ -220,7 +220,7 @@
         <Table>
           <TableHeader>
             <TableRow class="border-b border-border/60 hover:bg-transparent">
-              <TableHead class="w-[44px] h-12">
+              <TableHead class="w-[44px] h-12 px-4">
                 <Checkbox
                   :checked="isCurrentPageFullySelected || isAllFilteredSelected"
                   :indeterminate="isPartiallyFilteredSelected && !isCurrentPageFullySelected"
@@ -282,7 +282,7 @@
               :key="user.id"
               class="border-b border-border/40 hover:bg-muted/30 transition-colors"
             >
-              <TableCell class="py-4">
+              <TableCell class="w-[44px] px-4 py-4">
                 <Checkbox
                   :checked="selectAllFiltered || selectedIdSet.has(user.id)"
                   :disabled="selectAllFiltered || usersStore.loading"
