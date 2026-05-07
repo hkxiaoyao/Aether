@@ -609,6 +609,19 @@ fn preserve_quota_window_usage_state(current_status_snapshot: Option<&Value>, qu
             continue;
         }
 
+        if next_window
+            .get("window_minutes")
+            .and_then(admin_provider_quota_pure::coerce_json_u64)
+            .is_none()
+        {
+            if let Some(window_minutes) = current_window
+                .get("window_minutes")
+                .and_then(admin_provider_quota_pure::coerce_json_u64)
+                .or_else(|| codex_default_window_minutes(code))
+            {
+                next_window.insert("window_minutes".to_string(), json!(window_minutes));
+            }
+        }
         if let Some(usage_reset_at) = current_window
             .get("usage_reset_at")
             .and_then(admin_provider_quota_pure::coerce_json_u64)
@@ -618,6 +631,16 @@ fn preserve_quota_window_usage_state(current_status_snapshot: Option<&Value>, qu
         if let Some(usage) = current_window.get("usage") {
             next_window.insert("usage".to_string(), usage.clone());
         }
+    }
+}
+
+fn codex_default_window_minutes(code: &str) -> Option<u64> {
+    if code.eq_ignore_ascii_case("5h") {
+        Some(300)
+    } else if code.eq_ignore_ascii_case("weekly") {
+        Some(10_080)
+    } else {
+        None
     }
 }
 
@@ -658,18 +681,19 @@ fn codex_quota_window_snapshot(
             .zip(reset_seconds)
             .map(|(observed_at, reset_seconds)| observed_at.saturating_add(reset_seconds))
     });
-    let window_minutes = metadata
+    let explicit_window_minutes = metadata
         .get(&window_minutes_key)
         .and_then(admin_provider_quota_pure::coerce_json_u64);
 
     if used_percent.is_none()
         && reset_at.is_none()
         && reset_seconds.is_none()
-        && window_minutes.is_none()
+        && explicit_window_minutes.is_none()
     {
         return None;
     }
 
+    let window_minutes = explicit_window_minutes.or_else(|| codex_default_window_minutes(code));
     let used_ratio = used_percent.map(|value| (value / 100.0).clamp(0.0, 1.0));
     let remaining_ratio = used_ratio.map(|value| (1.0 - value).max(0.0));
 
@@ -2238,6 +2262,44 @@ mod tests {
         assert_eq!(weekly.get("reset_at"), Some(&json!(1_960_480_100u64)));
         assert!(weekly.get("usage_reset_at").is_none());
         assert!(weekly.get("usage").is_none());
+    }
+
+    #[test]
+    fn sync_provider_key_quota_status_snapshot_defaults_codex_window_minutes() {
+        let upstream_metadata = json!({
+            "codex": {
+                "updated_at": 1_775_800_000u64,
+                "plan_type": "plus",
+                "primary_used_percent": 5.0,
+                "primary_reset_at": 1_900_000_000u64,
+                "secondary_used_percent": 1.0,
+                "secondary_reset_at": 1_900_500_000u64
+            }
+        });
+
+        let payload = sync_provider_key_quota_status_snapshot(
+            None,
+            "codex",
+            Some(&upstream_metadata),
+            "response_headers",
+        )
+        .expect("quota snapshot should sync");
+        let windows = payload["quota"]["windows"]
+            .as_array()
+            .expect("quota windows should exist");
+        let weekly = windows
+            .iter()
+            .filter_map(Value::as_object)
+            .find(|window| window.get("code") == Some(&json!("weekly")))
+            .expect("weekly window should exist");
+        let five_h = windows
+            .iter()
+            .filter_map(Value::as_object)
+            .find(|window| window.get("code") == Some(&json!("5h")))
+            .expect("5h window should exist");
+
+        assert_eq!(weekly.get("window_minutes"), Some(&json!(10_080u64)));
+        assert_eq!(five_h.get("window_minutes"), Some(&json!(300u64)));
     }
 
     #[test]

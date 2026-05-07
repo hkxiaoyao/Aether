@@ -43,7 +43,11 @@ parsed_windows AS (
              )
            )
       THEN text_values.window_minutes_text::BIGINT
-      ELSE NULL
+      ELSE CASE lower(BTRIM(COALESCE(window_items.window_item ->> 'code', '')))
+        WHEN '5h' THEN 300
+        WHEN 'weekly' THEN 10080
+        ELSE NULL
+      END
     END AS window_minutes,
     CASE
       WHEN text_values.usage_reset_at_text ~ '^[0-9]+$'

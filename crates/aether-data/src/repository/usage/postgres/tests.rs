@@ -244,6 +244,11 @@ fn usage_sql_materializes_provider_key_window_usage_in_status_snapshot() {
     );
     assert!(super::APPLY_PROVIDER_API_KEY_CODEX_WINDOW_USAGE_DELTA_SQL.contains("'usage'"));
     assert!(
+        super::APPLY_PROVIDER_API_KEY_CODEX_WINDOW_USAGE_DELTA_SQL.contains("WHEN '5h' THEN 300")
+    );
+    assert!(super::APPLY_PROVIDER_API_KEY_CODEX_WINDOW_USAGE_DELTA_SQL
+        .contains("WHEN 'weekly' THEN 10080"));
+    assert!(
         !super::APPLY_PROVIDER_API_KEY_CODEX_WINDOW_USAGE_DELTA_SQL.contains("usage_billing_facts")
     );
 }
@@ -260,6 +265,11 @@ fn usage_sql_rebuilds_provider_key_window_usage_into_status_snapshot() {
         super::REBUILD_PROVIDER_API_KEY_CODEX_WINDOW_USAGE_STATS_SQL.contains("'{quota,windows}'")
     );
     assert!(super::REBUILD_PROVIDER_API_KEY_CODEX_WINDOW_USAGE_STATS_SQL.contains("'{usage}'"));
+    assert!(
+        super::REBUILD_PROVIDER_API_KEY_CODEX_WINDOW_USAGE_STATS_SQL.contains("WHEN '5h' THEN 300")
+    );
+    assert!(super::REBUILD_PROVIDER_API_KEY_CODEX_WINDOW_USAGE_STATS_SQL
+        .contains("WHEN 'weekly' THEN 10080"));
 }
 
 #[test]

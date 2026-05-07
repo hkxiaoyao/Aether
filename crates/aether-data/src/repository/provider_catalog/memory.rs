@@ -159,6 +159,16 @@ fn apply_f64_delta(current: f64, delta: f64) -> f64 {
     }
 }
 
+fn default_codex_window_minutes(code: &str) -> Option<u64> {
+    if code.eq_ignore_ascii_case("5h") {
+        Some(300)
+    } else if code.eq_ignore_ascii_case("weekly") {
+        Some(10_080)
+    } else {
+        None
+    }
+}
+
 fn json_u64(value: Option<&Value>) -> Option<u64> {
     value.and_then(|value| {
         value.as_u64().or_else(|| {
@@ -216,7 +226,9 @@ fn codex_window_matches_usage_time(window: &Map<String, Value>, usage_created_at
     let Some(reset_at) = json_u64(window.get("reset_at")) else {
         return false;
     };
-    let Some(window_minutes) = json_u64(window.get("window_minutes")) else {
+    let Some(window_minutes) =
+        json_u64(window.get("window_minutes")).or_else(|| default_codex_window_minutes(code))
+    else {
         return false;
     };
     let Some(window_seconds) = window_minutes.checked_mul(60) else {
@@ -890,8 +902,7 @@ mod tests {
                     },
                     {
                         "code": "weekly",
-                        "reset_at": 700_000u64,
-                        "window_minutes": 10_080u64
+                        "reset_at": 700_000u64
                     }
                 ]
             }
