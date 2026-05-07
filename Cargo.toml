@@ -16,6 +16,7 @@ members = [
     "crates/aether-oauth",
     "crates/aether-provider-transport",
     "crates/aether-scheduler-core",
+    "crates/aether-runtime-state",
     "crates/aether-usage-runtime",
     "crates/aether-video-tasks-core",
     "apps/aether-gateway",
@@ -46,6 +47,7 @@ aether-model-fetch = { path = "crates/aether-model-fetch" }
 aether-oauth = { path = "crates/aether-oauth" }
 aether-provider-transport = { path = "crates/aether-provider-transport" }
 aether-scheduler-core = { path = "crates/aether-scheduler-core" }
+aether-runtime-state = { path = "crates/aether-runtime-state" }
 aether-usage-runtime = { path = "crates/aether-usage-runtime" }
 aether-video-tasks-core = { path = "crates/aether-video-tasks-core" }
 aether-gateway = { path = "apps/aether-gateway" }

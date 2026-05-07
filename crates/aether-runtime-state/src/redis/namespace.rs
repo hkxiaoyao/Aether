@@ -1,6 +1,6 @@
 use aether_cache::CacheKeyNamespace;
 
-use crate::driver::redis::{RedisLockKey, RedisStreamName};
+use crate::redis::{RedisLockKey, RedisStreamName};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RedisKeyspace {

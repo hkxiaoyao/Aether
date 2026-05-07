@@ -75,19 +75,9 @@ pub(crate) async fn save_identity_oauth_state(
     let key = identity_oauth_state_storage_key(&record.nonce);
     let value =
         serde_json::to_string(record).map_err(|err| GatewayError::Internal(err.to_string()))?;
-    if let Some(runner) = state.redis_kv_runner() {
-        runner
-            .setex(&key, &value, Some(IDENTITY_OAUTH_STATE_TTL_SECS))
-            .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))?;
-        return Ok(());
-    }
-    if state.save_provider_oauth_state_for_tests(&key, &value) {
-        return Ok(());
-    }
-    Err(GatewayError::Internal(
-        "identity oauth state store unavailable".to_string(),
-    ))
+    state
+        .runtime_kv_setex(&key, &value, IDENTITY_OAUTH_STATE_TTL_SECS)
+        .await
 }
 
 pub(crate) async fn consume_identity_oauth_state(
@@ -95,21 +85,7 @@ pub(crate) async fn consume_identity_oauth_state(
     nonce: &str,
 ) -> Result<Option<StoredIdentityOAuthState>, GatewayError> {
     let key = identity_oauth_state_storage_key(nonce);
-    let raw = if let Some(runner) = state.redis_kv_runner() {
-        let mut connection = runner
-            .client()
-            .get_multiplexed_async_connection()
-            .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))?;
-        let namespaced_key = runner.keyspace().key(&key);
-        redis::cmd("GETDEL")
-            .arg(&namespaced_key)
-            .query_async::<Option<String>>(&mut connection)
-            .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))?
-    } else {
-        state.take_provider_oauth_state_for_tests(&key)
-    };
+    let raw = state.runtime_kv_getdel(&key).await?;
     raw.map(|value| {
         serde_json::from_str::<StoredIdentityOAuthState>(&value)
             .map_err(|err| GatewayError::Internal(err.to_string()))

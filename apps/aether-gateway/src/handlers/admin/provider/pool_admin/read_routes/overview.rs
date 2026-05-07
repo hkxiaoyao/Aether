@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use super::{
     admin_provider_pool_config, build_admin_pool_error_response,
     read_admin_provider_pool_cooldown_counts,
@@ -12,7 +14,6 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use std::collections::BTreeMap;
 
 pub(super) async fn build_admin_pool_overview_response(
     state: &AdminAppState<'_>,
@@ -35,7 +36,6 @@ pub(super) async fn build_admin_pool_overview_response(
         .iter()
         .map(|(provider, _)| provider.id.clone())
         .collect::<Vec<_>>();
-    let redis_runner = state.redis_kv_runner();
     let (key_stats_result, cooldown_counts_by_provider) = tokio::join!(
         async {
             if provider_ids.is_empty() {
@@ -47,11 +47,10 @@ pub(super) async fn build_admin_pool_overview_response(
             }
         },
         async {
-            match redis_runner.as_ref() {
-                Some(runner) if !provider_ids.is_empty() => {
-                    read_admin_provider_pool_cooldown_counts(runner, &provider_ids).await
-                }
-                _ => BTreeMap::new(),
+            if provider_ids.is_empty() {
+                std::collections::BTreeMap::new()
+            } else {
+                read_admin_provider_pool_cooldown_counts(state.runtime_state(), &provider_ids).await
             }
         },
     );

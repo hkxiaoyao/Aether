@@ -1,5 +1,4 @@
 use aether_data::driver::postgres::PostgresPoolConfig;
-use aether_data::driver::redis::RedisClientConfig;
 use aether_data::{DataLayerConfig, SqlDatabaseConfig};
 use std::fmt;
 
@@ -7,7 +6,6 @@ use std::fmt;
 pub struct GatewayDataConfig {
     database: Option<SqlDatabaseConfig>,
     postgres: Option<PostgresPoolConfig>,
-    redis: Option<RedisClientConfig>,
     encryption_key: Option<String>,
 }
 
@@ -16,7 +14,6 @@ impl fmt::Debug for GatewayDataConfig {
         f.debug_struct("GatewayDataConfig")
             .field("database", &self.database)
             .field("postgres", &self.postgres)
-            .field("redis", &self.redis)
             .field("has_encryption_key", &self.encryption_key.is_some())
             .finish()
     }
@@ -31,7 +28,6 @@ impl GatewayDataConfig {
         Self {
             database: Some(SqlDatabaseConfig::from_postgres_config(postgres.clone())),
             postgres: Some(postgres),
-            redis: None,
             encryption_key: None,
         }
     }
@@ -41,7 +37,6 @@ impl GatewayDataConfig {
         Self {
             database: Some(database),
             postgres,
-            redis: None,
             encryption_key: None,
         }
     }
@@ -61,26 +56,6 @@ impl GatewayDataConfig {
         self.database.as_ref()
     }
 
-    pub fn redis(&self) -> Option<&RedisClientConfig> {
-        self.redis.as_ref()
-    }
-
-    pub fn with_redis_config(mut self, redis: RedisClientConfig) -> Self {
-        self.redis = Some(redis);
-        self
-    }
-
-    pub fn with_redis_url(
-        self,
-        url: impl Into<String>,
-        key_prefix: Option<impl Into<String>>,
-    ) -> Self {
-        self.with_redis_config(RedisClientConfig {
-            url: url.into(),
-            key_prefix: key_prefix.map(Into::into),
-        })
-    }
-
     pub fn with_encryption_key(mut self, encryption_key: impl Into<String>) -> Self {
         let encryption_key = encryption_key.into();
         let encryption_key = encryption_key.trim();
@@ -96,15 +71,22 @@ impl GatewayDataConfig {
         self.encryption_key.as_deref()
     }
 
+    pub fn with_redis_url(
+        self,
+        _url: impl Into<String>,
+        _key_prefix: Option<impl Into<String>>,
+    ) -> Self {
+        self
+    }
+
     pub fn is_enabled(&self) -> bool {
-        self.database.is_some() || self.postgres.is_some() || self.redis.is_some()
+        self.database.is_some() || self.postgres.is_some()
     }
 
     pub fn to_data_layer_config(&self) -> DataLayerConfig {
         DataLayerConfig {
             database: self.database.clone(),
             postgres: self.postgres.clone(),
-            redis: self.redis.clone(),
         }
     }
 }

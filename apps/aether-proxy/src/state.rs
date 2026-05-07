@@ -4,10 +4,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
-use aether_runtime::{
-    AdmissionPermit, ConcurrencyError, ConcurrencyGate, ConcurrencySnapshot,
-    DistributedConcurrencyError, DistributedConcurrencyGate, DistributedConcurrencySnapshot,
-};
+use aether_runtime::{AdmissionPermit, ConcurrencyError, ConcurrencyGate, ConcurrencySnapshot};
+use aether_runtime_state::{RuntimeSemaphore, RuntimeSemaphoreError, RuntimeSemaphoreSnapshot};
 
 use crate::config::Config;
 use crate::registration::client::AetherClient;
@@ -27,7 +25,7 @@ pub struct AppState {
     /// Optional per-process stream admission gate.
     pub stream_gate: Option<Arc<ConcurrencyGate>>,
     /// Optional cross-instance stream admission gate.
-    pub distributed_stream_gate: Option<Arc<DistributedConcurrencyGate>>,
+    pub distributed_stream_gate: Option<Arc<RuntimeSemaphore>>,
 }
 
 /// Per-server state: one instance per Aether server connection.
@@ -103,10 +101,7 @@ impl AppState {
         self
     }
 
-    pub fn with_distributed_stream_concurrency_gate(
-        mut self,
-        gate: Arc<DistributedConcurrencyGate>,
-    ) -> Self {
+    pub fn with_distributed_stream_concurrency_gate(mut self, gate: Arc<RuntimeSemaphore>) -> Self {
         self.distributed_stream_gate = Some(gate);
         self
     }
@@ -117,7 +112,7 @@ impl AppState {
 
     pub async fn distributed_stream_concurrency_snapshot(
         &self,
-    ) -> Result<Option<DistributedConcurrencySnapshot>, DistributedConcurrencyError> {
+    ) -> Result<Option<RuntimeSemaphoreSnapshot>, RuntimeSemaphoreError> {
         match &self.distributed_stream_gate {
             Some(gate) => gate.snapshot().await.map(Some),
             None => Ok(None),
@@ -150,10 +145,10 @@ impl AppState {
         let distributed = match &self.distributed_stream_gate {
             Some(gate) => Some(gate.try_acquire().await.map_err(|err| {
                 match err {
-                    DistributedConcurrencyError::Saturated { gate, limit } => {
+                    RuntimeSemaphoreError::Saturated { gate, limit } => {
                         ProxyAdmissionError::Saturated { gate, limit }
                     }
-                    DistributedConcurrencyError::Unavailable {
+                    RuntimeSemaphoreError::Unavailable {
                         gate,
                         limit,
                         message,
@@ -162,7 +157,7 @@ impl AppState {
                         limit,
                         message,
                     },
-                    DistributedConcurrencyError::InvalidConfiguration(message) => {
+                    RuntimeSemaphoreError::InvalidConfiguration(message) => {
                         ProxyAdmissionError::Unavailable {
                             gate: "proxy_streams_distributed",
                             limit: self

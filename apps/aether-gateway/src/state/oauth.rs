@@ -833,7 +833,7 @@ impl AppState {
         &self,
         transport: &provider_transport::GatewayProviderTransportSnapshot,
     ) -> Result<Option<provider_transport::LocalResolvedOAuthRequestAuth>, GatewayError> {
-        let distributed_lock = self.data.oauth_refresh_lock_runner();
+        let distributed_lock = self.runtime_state.as_ref();
         let lock_owner = format!("aether-gateway-{}", std::process::id());
         let mut current_transport = transport.clone();
         let executor = GatewayLocalOAuthHttpExecutor { state: self };
@@ -844,7 +844,7 @@ impl AppState {
                 .resolve_with_result(
                     &executor,
                     &current_transport,
-                    distributed_lock.as_ref(),
+                    Some(distributed_lock),
                     Some(lock_owner.as_str()),
                 )
                 .await
@@ -929,7 +929,7 @@ impl AppState {
         Option<provider_transport::CachedOAuthEntry>,
         provider_transport::LocalOAuthRefreshError,
     > {
-        let distributed_lock = self.data.oauth_refresh_lock_runner();
+        let distributed_lock = self.runtime_state.as_ref();
         let lock_owner = format!("aether-gateway-admin-{}", std::process::id());
         let mut current_transport = transport.clone();
         current_transport.key.decrypted_api_key = "__placeholder__".to_string();
@@ -958,7 +958,7 @@ impl AppState {
                 .force_refresh_with_result(
                     &executor,
                     &current_transport,
-                    distributed_lock.as_ref(),
+                    Some(distributed_lock),
                     Some(lock_owner.as_str()),
                 )
                 .await?;

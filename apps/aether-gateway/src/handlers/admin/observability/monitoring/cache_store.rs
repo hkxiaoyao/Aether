@@ -22,41 +22,6 @@ async fn count_admin_monitoring_cache_affinity_entries(state: &AdminAppState<'_>
         })
 }
 
-async fn scan_admin_monitoring_namespaced_keys(
-    runner: &aether_data::driver::redis::RedisKvRunner,
-    pattern: &str,
-) -> Result<Vec<String>, GatewayError> {
-    let mut connection = runner
-        .client()
-        .get_multiplexed_async_connection()
-        .await
-        .map_err(|err| {
-            GatewayError::Internal(format!("admin monitoring redis connect failed: {err}"))
-        })?;
-    let namespaced_pattern = runner.keyspace().key(pattern);
-    let mut cursor = 0u64;
-    let mut keys = Vec::new();
-    loop {
-        let (next_cursor, batch) = redis::cmd("SCAN")
-            .arg(cursor)
-            .arg("MATCH")
-            .arg(&namespaced_pattern)
-            .arg("COUNT")
-            .arg(200)
-            .query_async::<(u64, Vec<String>)>(&mut connection)
-            .await
-            .map_err(|err| {
-                GatewayError::Internal(format!("admin monitoring redis scan failed: {err}"))
-            })?;
-        keys.extend(batch);
-        if next_cursor == 0 {
-            break;
-        }
-        cursor = next_cursor;
-    }
-    Ok(keys)
-}
-
 #[cfg(test)]
 pub(super) fn load_admin_monitoring_cache_affinity_entries_for_tests(
     state: &AdminAppState<'_>,
@@ -116,8 +81,13 @@ pub(super) async fn list_admin_monitoring_namespaced_keys(
     state: &AdminAppState<'_>,
     pattern: &str,
 ) -> Result<Vec<String>, GatewayError> {
-    if let Some(runner) = state.redis_kv_runner() {
-        return scan_admin_monitoring_namespaced_keys(&runner, pattern).await;
+    let keys = state
+        .runtime_state()
+        .scan_keys(pattern, 200)
+        .await
+        .map_err(|err| GatewayError::Internal(format!("runtime cache scan failed: {err}")))?;
+    if !keys.is_empty() {
+        return Ok(keys);
     }
 
     let mut keys = load_admin_monitoring_redis_keys_for_tests(state)
@@ -136,22 +106,13 @@ pub(super) async fn delete_admin_monitoring_namespaced_keys(
         return Ok(0);
     }
 
-    if let Some(runner) = state.redis_kv_runner() {
-        let mut connection = runner
-            .client()
-            .get_multiplexed_async_connection()
-            .await
-            .map_err(|err| {
-                GatewayError::Internal(format!("admin monitoring redis connect failed: {err}"))
-            })?;
-        let deleted = redis::cmd("DEL")
-            .arg(raw_keys)
-            .query_async::<i64>(&mut connection)
-            .await
-            .map_err(|err| {
-                GatewayError::Internal(format!("admin monitoring redis delete failed: {err}"))
-            })?;
-        return Ok(usize::try_from(deleted).unwrap_or(0));
+    let deleted = state
+        .runtime_state()
+        .kv_delete_many(raw_keys)
+        .await
+        .map_err(|err| GatewayError::Internal(format!("runtime cache delete failed: {err}")))?;
+    if deleted > 0 {
+        return Ok(deleted);
     }
 
     Ok(delete_admin_monitoring_redis_keys_for_tests(
@@ -197,85 +158,63 @@ async fn list_admin_monitoring_cache_affinity_records_matching(
         }
     };
 
-    if let Some(runner) = state.redis_kv_runner() {
-        let mut connection = runner
-            .client()
-            .get_multiplexed_async_connection()
-            .await
-            .map_err(|err| {
-                GatewayError::Internal(format!("admin monitoring redis connect failed: {err}"))
-            })?;
+    {
         let patterns = affinity_keys
             .map(|keys| {
                 keys.iter()
                     .flat_map(|affinity_key| {
                         [
-                            runner
-                                .keyspace()
-                                .key(&format!("cache_affinity:{affinity_key}:*")),
-                            runner
-                                .keyspace()
-                                .key(&format!("scheduler_affinity:{affinity_key}:*")),
-                            runner
-                                .keyspace()
-                                .key(&format!("scheduler_affinity:v2:{affinity_key}:*")),
+                            format!("cache_affinity:{affinity_key}:*"),
+                            format!("scheduler_affinity:{affinity_key}:*"),
+                            format!("scheduler_affinity:v2:{affinity_key}:*"),
                         ]
                     })
                     .collect::<Vec<_>>()
             })
             .unwrap_or_else(|| {
                 vec![
-                    runner.keyspace().key("cache_affinity:*"),
-                    runner.keyspace().key("scheduler_affinity:*"),
+                    "cache_affinity:*".to_string(),
+                    "scheduler_affinity:*".to_string(),
                 ]
             });
 
         for pattern in patterns {
-            let mut cursor = 0u64;
-            loop {
-                let (next_cursor, keys) = redis::cmd("SCAN")
-                    .arg(cursor)
-                    .arg("MATCH")
-                    .arg(&pattern)
-                    .arg("COUNT")
-                    .arg(200)
-                    .query_async::<(u64, Vec<String>)>(&mut connection)
+            let keys = state
+                .runtime_state()
+                .scan_keys(&pattern, 200)
+                .await
+                .map_err(|err| {
+                    GatewayError::Internal(format!("runtime cache scan failed: {err}"))
+                })?;
+            if !keys.is_empty() {
+                let raw_keys = keys
+                    .iter()
+                    .map(|key| state.runtime_state().strip_namespace(key).to_string())
+                    .collect::<Vec<_>>();
+                let values = state
+                    .runtime_state()
+                    .kv_get_many(&raw_keys)
                     .await
                     .map_err(|err| {
-                        GatewayError::Internal(format!("admin monitoring redis scan failed: {err}"))
+                        GatewayError::Internal(format!("runtime cache mget failed: {err}"))
                     })?;
-                if !keys.is_empty() {
-                    let values = redis::cmd("MGET")
-                        .arg(&keys)
-                        .query_async::<Vec<Option<String>>>(&mut connection)
-                        .await
-                        .map_err(|err| {
-                            GatewayError::Internal(format!(
-                                "admin monitoring redis mget failed: {err}"
-                            ))
-                        })?;
-                    for (key, raw_value) in keys.into_iter().zip(values) {
-                        let Some(raw_value) = raw_value else {
-                            continue;
-                        };
-                        let record = if key.contains("scheduler_affinity:") {
-                            admin_monitoring_scheduler_affinity_record_from_raw(&key, &raw_value)
-                        } else {
-                            admin_monitoring_cache_affinity_record(&key, &raw_value)
-                        };
-                        let Some(record) = record else {
-                            continue;
-                        };
-                        if affinity_keys.is_some_and(|keys| !keys.contains(&record.affinity_key)) {
-                            continue;
-                        }
-                        push_record(record);
+                for (key, raw_value) in keys.into_iter().zip(values) {
+                    let Some(raw_value) = raw_value else {
+                        continue;
+                    };
+                    let record = if key.contains("scheduler_affinity:") {
+                        admin_monitoring_scheduler_affinity_record_from_raw(&key, &raw_value)
+                    } else {
+                        admin_monitoring_cache_affinity_record(&key, &raw_value)
+                    };
+                    let Some(record) = record else {
+                        continue;
+                    };
+                    if affinity_keys.is_some_and(|keys| !keys.contains(&record.affinity_key)) {
+                        continue;
                     }
+                    push_record(record);
                 }
-                if next_cursor == 0 {
-                    break;
-                }
-                cursor = next_cursor;
             }
         }
     }
@@ -350,11 +289,7 @@ pub(super) async fn build_admin_monitoring_cache_snapshot(
         round_to(cache_hits as f64 / usage_summary.total_requests as f64, 4)
     };
     let total_affinities = count_admin_monitoring_cache_affinity_entries(state).await;
-    let storage_type = if state.redis_kv_runner().is_some() {
-        "redis"
-    } else {
-        "memory"
-    };
+    let storage_type = state.runtime_state().backend_kind().as_str();
     let scheduler_name = if scheduling_mode == "cache_affinity" {
         "cache_aware".to_string()
     } else {

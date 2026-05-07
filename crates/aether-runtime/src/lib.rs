@@ -20,7 +20,7 @@ pub use concurrency::{ConcurrencyError, ConcurrencyGate, ConcurrencyPermit, Conc
 pub use config::ServiceRuntimeConfig;
 pub use distributed::{
     DistributedConcurrencyError, DistributedConcurrencyGate, DistributedConcurrencyPermit,
-    DistributedConcurrencySnapshot, RedisDistributedConcurrencyConfig,
+    DistributedConcurrencySnapshot,
 };
 pub use error::RuntimeBootstrapError;
 pub use metrics::{prometheus_response, service_up_sample, MetricKind, MetricLabel, MetricSample};

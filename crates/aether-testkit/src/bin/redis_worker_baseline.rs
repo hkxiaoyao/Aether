@@ -1,11 +1,10 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use aether_data::driver::redis::{
-    RedisClientConfig, RedisConsumerGroup, RedisConsumerName, RedisStreamReclaimConfig,
-    RedisStreamRunnerConfig,
+use aether_runtime_state::{
+    RedisClientConfig, RedisClientFactory, RedisConsumerGroup, RedisConsumerName, RedisStreamName,
+    RedisStreamReclaimConfig, RedisStreamRunner, RedisStreamRunnerConfig,
 };
-use aether_data::RedisBackend;
 use aether_testkit::{init_test_runtime_for, ManagedRedisServer};
 use serde::Serialize;
 
@@ -87,19 +86,25 @@ async fn run_suite(
         })
         .expect("redis url should be resolved");
 
-    let backend = RedisBackend::from_config(RedisClientConfig {
+    let factory = RedisClientFactory::new(RedisClientConfig {
         url: redis_url.clone(),
         key_prefix: Some(format!("aether-baseline-{}", std::process::id())),
     })?;
-    let stream = backend.keyspace().stream_name("worker-baseline");
+    let client = factory.connect_lazy()?;
+    let keyspace = factory.config().keyspace();
+    let stream = keyspace.stream_name("worker-baseline");
     let group = RedisConsumerGroup("worker-group".to_string());
     let consumer_a = RedisConsumerName("consumer-a".to_string());
     let consumer_b = RedisConsumerName("consumer-b".to_string());
-    let runner = backend.stream_runner(RedisStreamRunnerConfig {
-        command_timeout_ms: Some(2_000),
-        read_block_ms: Some(10),
-        read_count: 64,
-    })?;
+    let runner = RedisStreamRunner::new(
+        client,
+        keyspace,
+        RedisStreamRunnerConfig {
+            command_timeout_ms: Some(2_000),
+            read_block_ms: Some(10),
+            read_count: 64,
+        },
+    )?;
     runner
         .ensure_consumer_group(&stream, &group, "0-0")
         .await
@@ -124,8 +129,8 @@ async fn run_suite(
 }
 
 async fn benchmark_append(
-    runner: &aether_data::driver::redis::RedisStreamRunner,
-    stream: &aether_data::driver::redis::RedisStreamName,
+    runner: &RedisStreamRunner,
+    stream: &RedisStreamName,
     config: &RedisWorkerBaselineConfig,
 ) -> Result<OperationSummary, Box<dyn std::error::Error>> {
     let next = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -182,8 +187,8 @@ async fn benchmark_append(
 }
 
 async fn benchmark_read_group(
-    runner: &aether_data::driver::redis::RedisStreamRunner,
-    stream: &aether_data::driver::redis::RedisStreamName,
+    runner: &RedisStreamRunner,
+    stream: &RedisStreamName,
     group: &RedisConsumerGroup,
     consumer: &RedisConsumerName,
     config: &RedisWorkerBaselineConfig,
@@ -211,8 +216,8 @@ async fn benchmark_read_group(
 }
 
 async fn benchmark_reclaim(
-    runner: &aether_data::driver::redis::RedisStreamRunner,
-    stream: &aether_data::driver::redis::RedisStreamName,
+    runner: &RedisStreamRunner,
+    stream: &RedisStreamName,
     group: &RedisConsumerGroup,
     consumer_a: &RedisConsumerName,
     consumer_b: &RedisConsumerName,
@@ -283,8 +288,8 @@ async fn benchmark_reclaim(
 }
 
 async fn benchmark_ack(
-    runner: &aether_data::driver::redis::RedisStreamRunner,
-    stream: &aether_data::driver::redis::RedisStreamName,
+    runner: &RedisStreamRunner,
+    stream: &RedisStreamName,
     group: &RedisConsumerGroup,
     ids: &[String],
 ) -> Result<OperationSummary, Box<dyn std::error::Error>> {

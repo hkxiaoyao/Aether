@@ -8,6 +8,7 @@ description = "Tunnel proxy for Aether"
 aether-contracts.workspace = true
 aether-http.workspace = true
 aether-runtime.workspace = true
+aether-runtime-state.workspace = true
 tokio = { version = "1", features = ["full"] }
 reqwest.workspace = true
 hyper = { version = "1", features = ["client", "http1", "http2"] }

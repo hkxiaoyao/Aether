@@ -96,7 +96,6 @@ pub(crate) enum LocalExecutionEffect<'a> {
 }
 
 struct PoolFeedbackContext {
-    runner: aether_data::driver::redis::RedisKvRunner,
     pool_config: AdminProviderPoolConfig,
     sticky_session_token: Option<String>,
 }
@@ -251,10 +250,6 @@ async fn resolve_pool_feedback_context(
     state: &AppState,
     context: LocalExecutionEffectContext<'_>,
 ) -> Option<PoolFeedbackContext> {
-    let Some(runner) = state.redis_kv_runner() else {
-        return None;
-    };
-
     let plan = context.plan;
     let transport = match state
         .read_provider_transport_snapshot(&plan.provider_id, &plan.endpoint_id, &plan.key_id)
@@ -281,7 +276,6 @@ async fn resolve_pool_feedback_context(
         .and_then(extract_pool_sticky_session_token);
 
     Some(PoolFeedbackContext {
-        runner,
         pool_config,
         sticky_session_token,
     })
@@ -333,7 +327,7 @@ async fn record_sync_pool_success_effect(
     let usage_outcome =
         build_sync_terminal_usage_outcome(context.plan, context.report_context, payload);
     record_admin_provider_pool_success(
-        &pool_context.runner,
+        state.runtime_state.as_ref(),
         &context.plan.provider_id,
         &context.plan.key_id,
         &pool_context.pool_config,
@@ -552,7 +546,7 @@ async fn record_stream_pool_success_effect(
     let usage_outcome =
         build_stream_terminal_usage_outcome(context.plan, context.report_context, payload);
     record_admin_provider_pool_success(
-        &pool_context.runner,
+        state.runtime_state.as_ref(),
         &context.plan.provider_id,
         &context.plan.key_id,
         &pool_context.pool_config,
@@ -588,7 +582,7 @@ async fn record_pool_error_effect(
     }
 
     record_admin_provider_pool_error(
-        &pool_context.runner,
+        state.runtime_state.as_ref(),
         &context.plan.provider_id,
         &context.plan.key_id,
         &pool_context.pool_config,
@@ -747,7 +741,7 @@ async fn record_pool_stream_timeout_effect(
     };
 
     record_admin_provider_pool_stream_timeout(
-        &pool_context.runner,
+        state.runtime_state.as_ref(),
         &context.plan.provider_id,
         &context.plan.key_id,
         &pool_context.pool_config,

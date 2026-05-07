@@ -1,5 +1,5 @@
-use crate::driver::redis::RedisKeyspace;
 use crate::error::RedisResultExt;
+use crate::redis::RedisKeyspace;
 use crate::DataLayerError;
 
 pub type RedisClient = redis::Client;

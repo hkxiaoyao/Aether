@@ -17,8 +17,17 @@ use aether_data::repository::candidate_selection::InMemoryMinimalCandidateSelect
 use aether_data::repository::candidates::InMemoryRequestCandidateRepository;
 use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
 use aether_data::repository::usage::InMemoryUsageReadRepository;
+use aether_runtime_state::{
+    MemoryRuntimeStateConfig, RuntimeSemaphore, RuntimeSemaphoreConfig, RuntimeState,
+};
 
 use crate::data::GatewayDataState;
+
+fn memory_runtime_semaphore(gate: &'static str, limit: usize) -> RuntimeSemaphore {
+    RuntimeState::memory(MemoryRuntimeStateConfig::default())
+        .semaphore(gate, limit, RuntimeSemaphoreConfig::default())
+        .expect("memory runtime semaphore should build")
+}
 
 fn sample_decision() -> crate::control::GatewayControlDecision {
     crate::control::GatewayControlDecision {
@@ -104,10 +113,7 @@ async fn gateway_rejects_second_in_flight_stream_request_with_distributed_overlo
     );
 
     let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
-    let distributed_gate = aether_runtime::DistributedConcurrencyGate::new_in_memory(
-        "gateway_requests_distributed",
-        1,
-    );
+    let distributed_gate = memory_runtime_semaphore("gateway_requests_distributed", 1);
     let gateway_a = build_router_with_state(
         build_local_openai_gateway_state(execution_runtime_url.clone())
             .with_distributed_request_concurrency_gate(distributed_gate.clone()),
@@ -262,12 +268,10 @@ async fn gateway_exposes_request_concurrency_metrics() {
         AppState::new()
             .expect("gateway state should build")
             .with_request_concurrency_limit(3)
-            .with_distributed_request_concurrency_gate(
-                aether_runtime::DistributedConcurrencyGate::new_in_memory(
-                    "gateway_requests_distributed",
-                    5,
-                ),
-            ),
+            .with_distributed_request_concurrency_gate(memory_runtime_semaphore(
+                "gateway_requests_distributed",
+                5,
+            )),
     );
     let (gateway_url, gateway_handle) = start_server(gateway).await;
 

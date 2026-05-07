@@ -4,7 +4,7 @@ use aether_gateway::{
     build_tunnel_runtime_router_with_state, TunnelConnConfig, TunnelControlPlaneClient,
     TunnelRuntimeState,
 };
-use aether_runtime::DistributedConcurrencyGate;
+use aether_runtime_state::RuntimeSemaphore;
 
 use crate::server::SpawnedServer;
 
@@ -14,7 +14,7 @@ pub struct TunnelHarnessConfig {
     pub ping_interval: Duration,
     pub outbound_queue_capacity: usize,
     pub max_in_flight_requests: Option<usize>,
-    pub distributed_request_gate: Option<DistributedConcurrencyGate>,
+    pub distributed_request_gate: Option<RuntimeSemaphore>,
 }
 
 impl Default for TunnelHarnessConfig {

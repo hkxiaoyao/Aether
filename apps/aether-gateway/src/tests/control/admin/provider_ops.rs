@@ -9,6 +9,7 @@ use aether_crypto::{
 use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
 use aether_data::repository::proxy_nodes::InMemoryProxyNodeRepository;
 use aether_data_contracts::repository::provider_catalog::ProviderCatalogReadRepository;
+use aether_runtime_state::{RedisClientConfig, RuntimeState};
 use aether_testkit::ManagedRedisServer;
 use axum::body::to_bytes;
 use axum::body::Body;
@@ -40,6 +41,23 @@ async fn start_managed_redis_or_skip() -> Option<ManagedRedisServer> {
         }
         Err(err) => panic!("redis server should start: {err}"),
     }
+}
+
+async fn redis_runtime_state_for_test(
+    redis: &ManagedRedisServer,
+    key_prefix: &str,
+) -> Arc<RuntimeState> {
+    Arc::new(
+        RuntimeState::redis(
+            RedisClientConfig {
+                url: redis.redis_url().to_string(),
+                key_prefix: Some(key_prefix.to_string()),
+            },
+            None,
+        )
+        .await
+        .expect("redis runtime state should build"),
+    )
 }
 
 #[tokio::test]
@@ -3529,16 +3547,16 @@ async fn gateway_handles_admin_provider_ops_balance_cache_refresh_modes_with_red
         vec![],
     ));
     let data_state = GatewayDataState::from_config(
-        GatewayDataConfig::disabled()
-            .with_redis_url(redis.redis_url(), Some("provider_ops_balance_cache"))
-            .with_encryption_key(DEVELOPMENT_ENCRYPTION_KEY),
+        GatewayDataConfig::disabled().with_encryption_key(DEVELOPMENT_ENCRYPTION_KEY),
     )
     .expect("data state should build")
     .attach_provider_catalog_repository_for_tests(Arc::clone(&provider_catalog_repository));
+    let runtime_state = redis_runtime_state_for_test(&redis, "provider_ops_balance_cache").await;
     let gateway = build_router_with_state(
         AppState::new()
             .expect("gateway should build")
-            .with_data_state_for_tests(data_state),
+            .with_data_state_for_tests(data_state)
+            .with_runtime_state(runtime_state),
     );
     let (gateway_url, gateway_handle) = start_server(gateway).await;
     let client = reqwest::Client::new();
@@ -3683,19 +3701,17 @@ async fn gateway_handles_admin_provider_ops_balance_cache_miss_without_refresh_r
         vec![],
     ));
     let data_state = GatewayDataState::from_config(
-        GatewayDataConfig::disabled()
-            .with_redis_url(
-                redis.redis_url(),
-                Some("provider_ops_balance_cache_sync_miss"),
-            )
-            .with_encryption_key(DEVELOPMENT_ENCRYPTION_KEY),
+        GatewayDataConfig::disabled().with_encryption_key(DEVELOPMENT_ENCRYPTION_KEY),
     )
     .expect("data state should build")
     .attach_provider_catalog_repository_for_tests(Arc::clone(&provider_catalog_repository));
+    let runtime_state =
+        redis_runtime_state_for_test(&redis, "provider_ops_balance_cache_sync_miss").await;
     let gateway = build_router_with_state(
         AppState::new()
             .expect("gateway should build")
-            .with_data_state_for_tests(data_state),
+            .with_data_state_for_tests(data_state)
+            .with_runtime_state(runtime_state),
     );
     let (gateway_url, gateway_handle) = start_server(gateway).await;
     let client = reqwest::Client::new();
@@ -3841,19 +3857,17 @@ async fn gateway_clears_admin_provider_ops_balance_cache_after_config_save_with_
         vec![],
     ));
     let data_state = GatewayDataState::from_config(
-        GatewayDataConfig::disabled()
-            .with_redis_url(
-                redis.redis_url(),
-                Some("provider_ops_balance_cache_config_save"),
-            )
-            .with_encryption_key(DEVELOPMENT_ENCRYPTION_KEY),
+        GatewayDataConfig::disabled().with_encryption_key(DEVELOPMENT_ENCRYPTION_KEY),
     )
     .expect("data state should build")
     .attach_provider_catalog_repository_for_tests(Arc::clone(&provider_catalog_repository));
+    let runtime_state =
+        redis_runtime_state_for_test(&redis, "provider_ops_balance_cache_config_save").await;
     let gateway = build_router_with_state(
         AppState::new()
             .expect("gateway should build")
-            .with_data_state_for_tests(data_state),
+            .with_data_state_for_tests(data_state)
+            .with_runtime_state(runtime_state),
     );
     let (gateway_url, gateway_handle) = start_server(gateway).await;
     let client = reqwest::Client::new();
@@ -4058,19 +4072,17 @@ async fn gateway_verify_does_not_pollute_balance_cache_and_balance_uses_saved_ac
         vec![],
     ));
     let data_state = GatewayDataState::from_config(
-        GatewayDataConfig::disabled()
-            .with_redis_url(
-                redis.redis_url(),
-                Some("provider_ops_verify_cache_isolation"),
-            )
-            .with_encryption_key(DEVELOPMENT_ENCRYPTION_KEY),
+        GatewayDataConfig::disabled().with_encryption_key(DEVELOPMENT_ENCRYPTION_KEY),
     )
     .expect("data state should build")
     .attach_provider_catalog_repository_for_tests(Arc::clone(&provider_catalog_repository));
+    let runtime_state =
+        redis_runtime_state_for_test(&redis, "provider_ops_verify_cache_isolation").await;
     let gateway = build_router_with_state(
         AppState::new()
             .expect("gateway should build")
-            .with_data_state_for_tests(data_state),
+            .with_data_state_for_tests(data_state)
+            .with_runtime_state(runtime_state),
     );
     let (gateway_url, gateway_handle) = start_server(gateway).await;
     let client = reqwest::Client::new();
@@ -4232,16 +4244,16 @@ async fn gateway_handles_admin_provider_ops_batch_balance_with_pending_cache_hit
         vec![],
     ));
     let data_state = GatewayDataState::from_config(
-        GatewayDataConfig::disabled()
-            .with_redis_url(redis.redis_url(), Some("provider_ops_batch_balance"))
-            .with_encryption_key(DEVELOPMENT_ENCRYPTION_KEY),
+        GatewayDataConfig::disabled().with_encryption_key(DEVELOPMENT_ENCRYPTION_KEY),
     )
     .expect("data state should build")
     .attach_provider_catalog_repository_for_tests(Arc::clone(&provider_catalog_repository));
+    let runtime_state = redis_runtime_state_for_test(&redis, "provider_ops_batch_balance").await;
     let gateway = build_router_with_state(
         AppState::new()
             .expect("gateway should build")
-            .with_data_state_for_tests(data_state),
+            .with_data_state_for_tests(data_state)
+            .with_runtime_state(runtime_state),
     );
     let (gateway_url, gateway_handle) = start_server(gateway).await;
     let client = reqwest::Client::new();

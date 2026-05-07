@@ -1,9 +1,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use aether_data::driver::redis::{RedisConsumerName, RedisStreamEntry, RedisStreamRunner};
 use aether_data_contracts::repository::usage::{StoredRequestUsageAudit, UpsertUsageRecord};
 use aether_data_contracts::DataLayerError;
+use aether_runtime_state::{RuntimeQueueEntry, RuntimeQueueStore};
 use async_trait::async_trait;
 use tracing::warn;
 
@@ -60,18 +60,18 @@ where
 pub struct UsageQueueWorker {
     queue: UsageQueue,
     recorder: Arc<dyn UsageEventRecorder>,
-    consumer: RedisConsumerName,
+    consumer: String,
     config: UsageRuntimeConfig,
 }
 
 impl UsageQueueWorker {
     pub fn new(
-        runner: RedisStreamRunner,
+        runner: Arc<dyn RuntimeQueueStore>,
         recorder: Arc<dyn UsageEventRecorder>,
         config: UsageRuntimeConfig,
     ) -> Result<Self, DataLayerError> {
         let queue = UsageQueue::new(runner, config.clone())?;
-        let consumer = RedisConsumerName(consumer_name());
+        let consumer = consumer_name();
         Ok(Self {
             queue,
             recorder,
@@ -89,7 +89,7 @@ impl UsageQueueWorker {
             warn!(
                 event_name = "usage_worker_consumer_group_failed",
                 log_type = "ops",
-                worker_consumer = %self.consumer.0,
+                worker_consumer = %self.consumer,
                 worker_group = %self.config.consumer_group,
                 error = %err,
                 "usage worker failed to ensure consumer group"
@@ -111,7 +111,7 @@ impl UsageQueueWorker {
                                 warn!(
                                     event_name = "usage_worker_reclaim_process_failed",
                                     log_type = "ops",
-                                    worker_consumer = %self.consumer.0,
+                                    worker_consumer = %self.consumer,
                                     worker_group = %self.config.consumer_group,
                                     error = %err,
                                     "usage worker failed while reclaiming stale entries"
@@ -121,7 +121,7 @@ impl UsageQueueWorker {
                         Err(err) => warn!(
                             event_name = "usage_worker_reclaim_failed",
                             log_type = "ops",
-                            worker_consumer = %self.consumer.0,
+                            worker_consumer = %self.consumer,
                             worker_group = %self.config.consumer_group,
                             error = %err,
                             "usage worker failed to reclaim stale entries"
@@ -135,7 +135,7 @@ impl UsageQueueWorker {
                                 warn!(
                                     event_name = "usage_worker_process_failed",
                                     log_type = "ops",
-                                    worker_consumer = %self.consumer.0,
+                                    worker_consumer = %self.consumer,
                                     worker_group = %self.config.consumer_group,
                                     error = %err,
                                     "usage worker failed to process queue entries"
@@ -147,7 +147,7 @@ impl UsageQueueWorker {
                             warn!(
                                 event_name = "usage_worker_read_failed",
                                 log_type = "ops",
-                                worker_consumer = %self.consumer.0,
+                                worker_consumer = %self.consumer,
                                 worker_group = %self.config.consumer_group,
                                 error = %err,
                                 "usage worker failed to read queue"
@@ -160,7 +160,7 @@ impl UsageQueueWorker {
         }
     }
 
-    async fn process_entries(&self, entries: Vec<RedisStreamEntry>) -> Result<(), DataLayerError> {
+    async fn process_entries(&self, entries: Vec<RuntimeQueueEntry>) -> Result<(), DataLayerError> {
         if entries.is_empty() {
             return Ok(());
         }
@@ -189,7 +189,7 @@ impl UsageQueueWorker {
         Ok(())
     }
 
-    async fn process_entry(&self, entry: &RedisStreamEntry) -> Result<bool, DataLayerError> {
+    async fn process_entry(&self, entry: &RuntimeQueueEntry) -> Result<bool, DataLayerError> {
         let event = match UsageEvent::from_stream_fields(&entry.fields) {
             Ok(event) => event,
             Err(err) => {
@@ -204,7 +204,7 @@ impl UsageQueueWorker {
 }
 
 pub fn build_usage_queue_worker<T>(
-    runner: RedisStreamRunner,
+    runner: Arc<dyn RuntimeQueueStore>,
     data: Arc<T>,
     config: UsageRuntimeConfig,
 ) -> Result<UsageQueueWorker, DataLayerError>

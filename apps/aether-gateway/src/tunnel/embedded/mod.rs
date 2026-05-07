@@ -8,10 +8,9 @@ use std::sync::Arc;
 
 use aether_runtime::{
     hold_admission_permit_until, prometheus_response, service_up_sample, AdmissionPermit,
-    ConcurrencyError, ConcurrencyGate, ConcurrencySnapshot, DistributedConcurrencyError,
-    DistributedConcurrencyGate, DistributedConcurrencySnapshot, MetricKind, MetricLabel,
-    MetricSample,
+    ConcurrencyError, ConcurrencyGate, ConcurrencySnapshot, MetricKind, MetricLabel, MetricSample,
 };
+use aether_runtime_state::{RuntimeSemaphore, RuntimeSemaphoreError, RuntimeSemaphoreSnapshot};
 use axum::extract::ws::WebSocketUpgrade;
 use axum::extract::State;
 use axum::response::{IntoResponse, Json};
@@ -33,13 +32,13 @@ pub struct AppState {
     pub max_streams: usize,
     data: Arc<GatewayDataState>,
     request_gate: Option<Arc<ConcurrencyGate>>,
-    distributed_request_gate: Option<Arc<DistributedConcurrencyGate>>,
+    distributed_request_gate: Option<Arc<RuntimeSemaphore>>,
 }
 
 #[derive(Debug)]
 enum RequestAdmissionError {
     Local(ConcurrencyError),
-    Distributed(DistributedConcurrencyError),
+    Distributed(RuntimeSemaphoreError),
 }
 
 impl AppState {
@@ -70,7 +69,7 @@ impl AppState {
         self
     }
 
-    pub fn with_distributed_request_gate(mut self, gate: DistributedConcurrencyGate) -> Self {
+    pub fn with_distributed_request_gate(mut self, gate: RuntimeSemaphore) -> Self {
         self.distributed_request_gate = Some(Arc::new(gate));
         self
     }
@@ -81,7 +80,7 @@ impl AppState {
 
     async fn distributed_request_concurrency_snapshot(
         &self,
-    ) -> Result<Option<DistributedConcurrencySnapshot>, DistributedConcurrencyError> {
+    ) -> Result<Option<RuntimeSemaphoreSnapshot>, RuntimeSemaphoreError> {
         match self.distributed_request_gate.as_ref() {
             Some(gate) => gate.snapshot().await.map(Some),
             None => Ok(None),
@@ -225,12 +224,10 @@ pub async fn ws_proxy(
     let request_permit = match state.try_acquire_request_permit().await {
         Ok(permit) => permit,
         Err(RequestAdmissionError::Local(ConcurrencyError::Saturated { .. }))
-        | Err(RequestAdmissionError::Distributed(DistributedConcurrencyError::Saturated {
-            ..
-        }))
-        | Err(RequestAdmissionError::Distributed(DistributedConcurrencyError::Unavailable {
-            ..
-        })) => return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        | Err(RequestAdmissionError::Distributed(RuntimeSemaphoreError::Saturated { .. }))
+        | Err(RequestAdmissionError::Distributed(RuntimeSemaphoreError::Unavailable { .. })) => {
+            return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response()
+        }
         Err(RequestAdmissionError::Local(ConcurrencyError::Closed { gate })) => {
             warn!(
                 gate = gate,
@@ -238,9 +235,9 @@ pub async fn ws_proxy(
             );
             return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
         }
-        Err(RequestAdmissionError::Distributed(
-            DistributedConcurrencyError::InvalidConfiguration(message),
-        )) => {
+        Err(RequestAdmissionError::Distributed(RuntimeSemaphoreError::InvalidConfiguration(
+            message,
+        ))) => {
             warn!(
                 error = %message,
                 "standalone tunnel relay distributed request gate is invalid"

@@ -1,10 +1,9 @@
 use super::super::cache_route_helpers::{
     admin_monitoring_cache_model_mapping_provider_params_from_path,
-    admin_monitoring_cache_model_name_from_path, admin_monitoring_redis_unavailable_response,
+    admin_monitoring_cache_model_name_from_path,
 };
 use super::super::cache_store::{
-    admin_monitoring_has_test_redis_keys, delete_admin_monitoring_namespaced_keys,
-    list_admin_monitoring_namespaced_keys,
+    delete_admin_monitoring_namespaced_keys, list_admin_monitoring_namespaced_keys,
 };
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::GatewayError;
@@ -19,10 +18,6 @@ use axum::{body::Body, response::Response};
 pub(in super::super) async fn build_admin_monitoring_model_mapping_delete_response(
     state: &AdminAppState<'_>,
 ) -> Result<Response<Body>, GatewayError> {
-    if state.redis_kv_runner().is_none() && !admin_monitoring_has_test_redis_keys(state) {
-        return Ok(admin_monitoring_redis_unavailable_response());
-    }
-
     let mut raw_keys = list_admin_monitoring_namespaced_keys(state, "model:*").await?;
     raw_keys.extend(list_admin_monitoring_namespaced_keys(state, "global_model:*").await?);
     raw_keys.sort();
@@ -41,10 +36,6 @@ pub(in super::super) async fn build_admin_monitoring_model_mapping_delete_model_
     else {
         return Ok(admin_monitoring_bad_request_response("缺少 model_name"));
     };
-    if state.redis_kv_runner().is_none() && !admin_monitoring_has_test_redis_keys(state) {
-        return Ok(admin_monitoring_redis_unavailable_response());
-    }
-
     let candidate_keys = [
         format!("global_model:resolve:{model_name}"),
         format!("global_model:name:{model_name}"),
@@ -85,10 +76,6 @@ pub(in super::super) async fn build_admin_monitoring_model_mapping_delete_provid
             "缺少 provider_id 或 global_model_id",
         ));
     };
-    if state.redis_kv_runner().is_none() && !admin_monitoring_has_test_redis_keys(state) {
-        return Ok(admin_monitoring_redis_unavailable_response());
-    }
-
     let candidate_keys = [
         format!("model:provider_global:{provider_id}:{global_model_id}"),
         format!("model:provider_global:hits:{provider_id}:{global_model_id}"),

@@ -13,6 +13,7 @@ aether-contracts.workspace = true
 aether-gateway.workspace = true
 aether-http.workspace = true
 aether-runtime.workspace = true
+aether-runtime-state.workspace = true
 axum.workspace = true
 bytes.workspace = true
 http.workspace = true

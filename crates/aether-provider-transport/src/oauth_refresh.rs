@@ -2,12 +2,12 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 
-use aether_data::driver::redis::{RedisLockKey, RedisLockRunner};
 use aether_oauth::core::OAuthError;
 use aether_oauth::network::{
     OAuthHttpExecutor, OAuthHttpRequest, OAuthHttpResponse, OAuthNetworkContext,
 };
 use aether_oauth::provider::ProviderOAuthTransportContext;
+use aether_runtime_state::RuntimeState;
 use async_trait::async_trait;
 use serde_json::Value;
 use thiserror::Error;
@@ -374,7 +374,7 @@ impl LocalOAuthRefreshCoordinator {
         &self,
         executor: &dyn LocalOAuthHttpExecutor,
         transport: &GatewayProviderTransportSnapshot,
-        distributed_lock: Option<&RedisLockRunner>,
+        distributed_lock: Option<&RuntimeState>,
         distributed_owner: Option<&str>,
     ) -> Result<Option<LocalOAuthResolution>, LocalOAuthRefreshError> {
         self.resolve_with_result_mode(
@@ -391,7 +391,7 @@ impl LocalOAuthRefreshCoordinator {
         &self,
         executor: &dyn LocalOAuthHttpExecutor,
         transport: &GatewayProviderTransportSnapshot,
-        distributed_lock: Option<&RedisLockRunner>,
+        distributed_lock: Option<&RuntimeState>,
         distributed_owner: Option<&str>,
     ) -> Result<Option<LocalOAuthResolution>, LocalOAuthRefreshError> {
         self.resolve_with_result_mode(
@@ -408,7 +408,7 @@ impl LocalOAuthRefreshCoordinator {
         &self,
         executor: &dyn LocalOAuthHttpExecutor,
         transport: &GatewayProviderTransportSnapshot,
-        distributed_lock: Option<&RedisLockRunner>,
+        distributed_lock: Option<&RuntimeState>,
         distributed_owner: Option<&str>,
         force_refresh: bool,
     ) -> Result<Option<LocalOAuthResolution>, LocalOAuthRefreshError> {
@@ -465,12 +465,11 @@ impl LocalOAuthRefreshCoordinator {
 
         let distributed_lease = match (distributed_lock, distributed_owner) {
             (Some(lock), Some(owner)) if !owner.trim().is_empty() => {
-                let lock_key = RedisLockKey(format!("provider_oauth_refresh_lock:{key_id}"));
                 match lock
-                    .try_acquire(
-                        &lock_key,
+                    .lock_try_acquire(
+                        &format!("provider_oauth_refresh_lock:{key_id}"),
                         owner,
-                        Some(Self::DISTRIBUTED_REFRESH_LOCK_TTL_MS),
+                        std::time::Duration::from_millis(Self::DISTRIBUTED_REFRESH_LOCK_TTL_MS),
                     )
                     .await
                 {
@@ -497,7 +496,7 @@ impl LocalOAuthRefreshCoordinator {
         let refresh_entry = cached_entry.as_ref();
         let refresh_result = adapter.refresh(executor, transport, refresh_entry).await;
         if let (Some(lock), Some(lease)) = (distributed_lock, distributed_lease.as_ref()) {
-            if let Err(err) = lock.release(lease).await {
+            if let Err(err) = lock.lock_release(lease).await {
                 tracing::warn!(
                     key_id = %key_id,
                     provider_type = adapter.provider_type(),

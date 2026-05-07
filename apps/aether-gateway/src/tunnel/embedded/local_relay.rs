@@ -134,16 +134,16 @@ fn map_request_admission_error(error: super::RequestAdmissionError) -> String {
             ..
         })
         | super::RequestAdmissionError::Distributed(
-            aether_runtime::DistributedConcurrencyError::Saturated { .. },
+            aether_runtime_state::RuntimeSemaphoreError::Saturated { .. },
         )
         | super::RequestAdmissionError::Distributed(
-            aether_runtime::DistributedConcurrencyError::Unavailable { .. },
+            aether_runtime_state::RuntimeSemaphoreError::Unavailable { .. },
         ) => "overloaded: hub relay overloaded".to_string(),
         super::RequestAdmissionError::Local(aether_runtime::ConcurrencyError::Closed {
             ..
         }) => "overloaded: hub relay gate closed".to_string(),
         super::RequestAdmissionError::Distributed(
-            aether_runtime::DistributedConcurrencyError::InvalidConfiguration(_),
+            aether_runtime_state::RuntimeSemaphoreError::InvalidConfiguration(_),
         ) => "overloaded: hub relay distributed gate invalid".to_string(),
     }
 }
@@ -174,10 +174,10 @@ pub async fn relay_request(
             ..
         }))
         | Err(super::RequestAdmissionError::Distributed(
-            aether_runtime::DistributedConcurrencyError::Saturated { .. },
+            aether_runtime_state::RuntimeSemaphoreError::Saturated { .. },
         ))
         | Err(super::RequestAdmissionError::Distributed(
-            aether_runtime::DistributedConcurrencyError::Unavailable { .. },
+            aether_runtime_state::RuntimeSemaphoreError::Unavailable { .. },
         )) => {
             return tunnel_error_response(
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -195,7 +195,7 @@ pub async fn relay_request(
             );
         }
         Err(super::RequestAdmissionError::Distributed(
-            aether_runtime::DistributedConcurrencyError::InvalidConfiguration(_),
+            aether_runtime_state::RuntimeSemaphoreError::InvalidConfiguration(_),
         )) => {
             return tunnel_error_response(
                 StatusCode::SERVICE_UNAVAILABLE,

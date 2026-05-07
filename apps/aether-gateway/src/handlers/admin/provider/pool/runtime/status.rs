@@ -1,6 +1,5 @@
 use super::reads::read_admin_provider_pool_runtime_state;
 use crate::handlers::admin::provider::pool::config::admin_provider_pool_config;
-use crate::handlers::admin::provider::shared::support::AdminProviderPoolRuntimeState;
 use crate::handlers::admin::request::AdminAppState;
 use serde_json::json;
 
@@ -34,19 +33,14 @@ pub(crate) async fn build_admin_provider_pool_status_payload(
         .ok()
         .unwrap_or_default();
     let key_ids = keys.iter().map(|key| key.id.clone()).collect::<Vec<_>>();
-    let runtime = match state.redis_kv_runner() {
-        Some(runner) => {
-            read_admin_provider_pool_runtime_state(
-                &runner,
-                &provider.id,
-                &key_ids,
-                &pool_config,
-                None,
-            )
-            .await
-        }
-        None => AdminProviderPoolRuntimeState::default(),
-    };
+    let runtime = read_admin_provider_pool_runtime_state(
+        state.runtime_state(),
+        &provider.id,
+        &key_ids,
+        &pool_config,
+        None,
+    )
+    .await;
     let key_payloads = keys
         .into_iter()
         .map(|key| {

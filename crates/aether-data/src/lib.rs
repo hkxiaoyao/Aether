@@ -1,6 +1,6 @@
 //! Runtime data access for Aether.
 //!
-//! This crate contains concrete database/Redis clients, repository
+//! This crate contains concrete database clients, repository
 //! implementations, migration/backfill/export workflows, and the backend
 //! composition layer. Shared repository contracts that other crates compile
 //! against live in `aether-data-contracts`.
@@ -17,9 +17,8 @@ pub mod maintenance;
 pub mod repository;
 
 pub use backend::{
-    DataBackends, DataLeaseBackends, DataLockBackends, DataReadRepositories,
-    DataTransactionBackends, DataWorkerBackends, DataWriteRepositories, PostgresBackend,
-    RedisBackend,
+    DataBackends, DataLeaseBackends, DataReadRepositories, DataTransactionBackends,
+    DataWriteRepositories, PostgresBackend,
 };
 pub use config::DataLayerConfig;
 pub use database::{DatabaseDriver, SqlDatabaseConfig, SqlPoolConfig, DEFAULT_SQLITE_DATABASE_URL};

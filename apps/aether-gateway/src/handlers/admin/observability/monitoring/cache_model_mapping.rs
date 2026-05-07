@@ -1,7 +1,5 @@
 use super::cache_config::ADMIN_MONITORING_REDIS_CACHE_CATEGORIES;
-use super::cache_store::{
-    admin_monitoring_has_test_redis_keys, list_admin_monitoring_namespaced_keys,
-};
+use super::cache_store::list_admin_monitoring_namespaced_keys;
 use crate::handlers::admin::request::AdminAppState;
 use crate::GatewayError;
 use axum::{
@@ -14,17 +12,6 @@ use serde_json::json;
 pub(super) async fn build_admin_monitoring_model_mapping_stats_response(
     state: &AdminAppState<'_>,
 ) -> Result<Response<Body>, GatewayError> {
-    if state.redis_kv_runner().is_none() && !admin_monitoring_has_test_redis_keys(state) {
-        return Ok(Json(json!({
-            "status": "ok",
-            "data": {
-                "available": false,
-                "message": "Redis 未启用，模型映射缓存不可用",
-            }
-        }))
-        .into_response());
-    };
-
     let model_id_keys = list_admin_monitoring_namespaced_keys(state, "model:id:*").await?;
     let global_model_id_keys =
         list_admin_monitoring_namespaced_keys(state, "global_model:id:*").await?;
@@ -49,6 +36,7 @@ pub(super) async fn build_admin_monitoring_model_mapping_stats_response(
         "status": "ok",
         "data": {
             "available": true,
+            "backend": state.runtime_state().backend_kind().as_str(),
             "ttl_seconds": 300,
             "total_keys": total_keys,
             "breakdown": {
@@ -69,17 +57,6 @@ pub(super) async fn build_admin_monitoring_model_mapping_stats_response(
 pub(super) async fn build_admin_monitoring_redis_cache_categories_response(
     state: &AdminAppState<'_>,
 ) -> Result<Response<Body>, GatewayError> {
-    if state.redis_kv_runner().is_none() && !admin_monitoring_has_test_redis_keys(state) {
-        return Ok(Json(json!({
-            "status": "ok",
-            "data": {
-                "available": false,
-                "message": "Redis 未启用",
-            }
-        }))
-        .into_response());
-    };
-
     let mut categories = Vec::with_capacity(ADMIN_MONITORING_REDIS_CACHE_CATEGORIES.len());
     let mut total_keys = 0usize;
 
@@ -101,6 +78,7 @@ pub(super) async fn build_admin_monitoring_redis_cache_categories_response(
         "status": "ok",
         "data": {
             "available": true,
+            "backend": state.runtime_state().backend_kind().as_str(),
             "categories": categories,
             "total_keys": total_keys,
         }

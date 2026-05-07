@@ -3,12 +3,12 @@
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use clap::{Args as ClapArgs, Parser, Subcommand, ValueEnum};
 use tracing::{debug, info, warn};
 
 use aether_crypto::warm_python_fernet_secret;
-use aether_data::driver::redis::RedisClientConfig;
 use aether_data::lifecycle::export::{export_database_jsonl, import_database_jsonl, ExportDomain};
 use aether_data::{DatabaseDriver, SqlDatabaseConfig, SqlPoolConfig, DEFAULT_SQLITE_DATABASE_URL};
 use aether_gateway::{
@@ -17,8 +17,12 @@ use aether_gateway::{
     VideoTaskTruthSourceMode,
 };
 use aether_runtime::{
-    init_service_runtime, DistributedConcurrencyGate, FileLoggingConfig, LogDestination, LogFormat,
-    LogRotation, RedisDistributedConcurrencyConfig, ServiceRuntimeConfig,
+    init_service_runtime, FileLoggingConfig, LogDestination, LogFormat, LogRotation,
+    ServiceRuntimeConfig,
+};
+use aether_runtime_state::{
+    RedisClientConfig, RuntimeSemaphoreConfig, RuntimeState, RuntimeStateBackendMode,
+    RuntimeStateConfig,
 };
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
@@ -126,6 +130,7 @@ impl NodeRoleArg {
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
 enum RuntimeBackendArg {
+    Auto,
     Redis,
     Memory,
 }
@@ -133,8 +138,17 @@ enum RuntimeBackendArg {
 impl RuntimeBackendArg {
     const fn as_str(self) -> &'static str {
         match self {
+            Self::Auto => "auto",
             Self::Redis => "redis",
             Self::Memory => "memory",
+        }
+    }
+
+    const fn to_runtime_state_backend(self) -> RuntimeStateBackendMode {
+        match self {
+            Self::Auto => RuntimeStateBackendMode::Auto,
+            Self::Redis => RuntimeStateBackendMode::Redis,
+            Self::Memory => RuntimeStateBackendMode::Memory,
         }
     }
 }
@@ -394,24 +408,11 @@ impl GatewayDataArgs {
 
     fn to_config(&self) -> GatewayDataConfig {
         let database = self.effective_sql_database_config();
-        let redis_url = self.effective_redis_url();
 
-        let mut config = match database {
+        let config = match database {
             Some(database) => GatewayDataConfig::from_database_config(database),
             None => GatewayDataConfig::disabled(),
         };
-
-        if let Some(redis_url) = redis_url.as_deref() {
-            config = config.with_redis_config(RedisClientConfig {
-                url: redis_url.to_string(),
-                key_prefix: self
-                    .redis_key_prefix
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .map(ToOwned::to_owned),
-            });
-        }
 
         match self.effective_encryption_key() {
             Some(value) => {
@@ -754,6 +755,12 @@ struct Args {
     #[arg(long, env = "AETHER_RUNTIME_BACKEND", value_enum)]
     runtime_backend: Option<RuntimeBackendArg>,
 
+    #[arg(long, env = "AETHER_RUNTIME_REDIS_URL")]
+    runtime_redis_url: Option<String>,
+
+    #[arg(long, env = "AETHER_RUNTIME_REDIS_KEY_PREFIX")]
+    runtime_redis_key_prefix: Option<String>,
+
     #[command(flatten)]
     data: GatewayDataArgs,
 
@@ -777,7 +784,9 @@ impl Args {
         data_redis_url: Option<&str>,
     ) -> RuntimeBackendArg {
         if let Some(runtime_backend) = self.runtime_backend {
-            return runtime_backend;
+            if !matches!(runtime_backend, RuntimeBackendArg::Auto) {
+                return runtime_backend;
+            }
         }
         if matches!(self.deployment_topology, DeploymentTopologyArg::MultiNode) {
             return RuntimeBackendArg::Redis;
@@ -789,6 +798,49 @@ impl Args {
             RuntimeBackendArg::Redis
         } else {
             RuntimeBackendArg::Memory
+        }
+    }
+
+    fn effective_runtime_redis_url(&self, data_redis_url: Option<&str>) -> Option<String> {
+        self.runtime_redis_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+            .or_else(|| data_redis_url.map(ToOwned::to_owned))
+    }
+
+    fn effective_runtime_redis_key_prefix(&self) -> Option<String> {
+        self.runtime_redis_key_prefix
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+            .or_else(|| {
+                self.data
+                    .redis_key_prefix
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(ToOwned::to_owned)
+            })
+    }
+
+    fn runtime_state_config(
+        &self,
+        runtime_backend: RuntimeBackendArg,
+        data_redis_url: Option<&str>,
+    ) -> RuntimeStateConfig {
+        let redis = self
+            .effective_runtime_redis_url(data_redis_url)
+            .map(|url| RedisClientConfig {
+                url,
+                key_prefix: self.effective_runtime_redis_key_prefix(),
+            });
+        RuntimeStateConfig {
+            backend: runtime_backend.to_runtime_state_backend(),
+            redis,
+            ..RuntimeStateConfig::default()
         }
     }
 
@@ -990,12 +1042,20 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let data_redis_url = args.data.effective_redis_url();
     let runtime_backend =
         args.effective_runtime_backend(sql_database_config.as_ref(), data_redis_url.as_deref());
+    let runtime_redis_url = args.effective_runtime_redis_url(data_redis_url.as_deref());
     validate_deployment_topology(
         &args,
         sql_database_config.as_ref(),
-        data_redis_url.as_deref(),
+        runtime_redis_url.as_deref(),
         runtime_backend,
     )?;
+    let runtime_state = Arc::new(
+        RuntimeState::from_config(
+            args.runtime_state_config(runtime_backend, data_redis_url.as_deref()),
+        )
+        .await
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err.to_string()))?,
+    );
     let data_config = args.data.to_config();
     let rate_limit_config = if matches!(args.deployment_topology, DeploymentTopologyArg::MultiNode)
     {
@@ -1045,7 +1105,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         distributed_request_redis_configured = args
             .distributed_request_redis_url
             .as_deref()
-            .or(data_redis_url.as_deref())
+            .or(runtime_redis_url.as_deref())
             .is_some(),
         data_database_configured = sql_database_config.is_some(),
         data_database_driver = sql_database_config
@@ -1053,13 +1113,15 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             .map(|database| database.driver.as_str())
             .unwrap_or("-"),
         data_postgres_configured = data_postgres_url.is_some(),
-        data_redis_configured = data_redis_url.is_some(),
+        runtime_redis_configured = matches!(runtime_backend, RuntimeBackendArg::Redis),
+        data_redis_url_supplied = data_redis_url.is_some(),
         data_has_encryption_key = data_config.encryption_key().is_some(),
         data_postgres_require_ssl = args.data.postgres_require_ssl,
         "aether-gateway startup configuration"
     );
 
     let mut state = AppState::new()?
+        .with_runtime_state(runtime_state)
         .with_data_config(data_config)?
         .with_usage_runtime_config(args.usage.to_config())?
         .with_video_task_truth_source_mode(args.video_task_truth_source_mode.into());
@@ -1088,35 +1150,21 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         state = state.with_request_concurrency_limit(limit);
     }
     if let Some(limit) = args.distributed_request_limit.filter(|limit| *limit > 0) {
-        let redis_url = args
-            .distributed_request_redis_url
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .or(data_redis_url.as_deref())
-            .ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "AETHER_GATEWAY_DISTRIBUTED_REQUEST_REDIS_URL or REDIS_URL/AETHER_GATEWAY_DATA_REDIS_URL is required when distributed request limit is enabled",
-                )
-            })?;
-        state =
-            state.with_distributed_request_concurrency_gate(DistributedConcurrencyGate::new_redis(
+        let distributed_gate = state
+            .runtime_state()
+            .semaphore(
                 "gateway_requests_distributed",
                 limit,
-                RedisDistributedConcurrencyConfig {
-                    url: redis_url.to_string(),
-                    key_prefix: args
-                        .distributed_request_redis_key_prefix
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|value| !value.is_empty())
-                        .map(ToOwned::to_owned),
+                RuntimeSemaphoreConfig {
                     lease_ttl_ms: args.distributed_request_lease_ttl_ms.max(1),
                     renew_interval_ms: args.distributed_request_renew_interval_ms.max(1),
                     command_timeout_ms: Some(args.distributed_request_command_timeout_ms.max(1)),
                 },
-            )?);
+            )
+            .map_err(|err| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, err.to_string())
+            })?;
+        state = state.with_distributed_request_concurrency_gate(distributed_gate);
     }
     if matches!(args.deployment_topology, DeploymentTopologyArg::MultiNode)
         && !state.has_usage_data_writer()
@@ -1531,6 +1579,8 @@ mod tests {
             distributed_request_renew_interval_ms: 10_000,
             distributed_request_command_timeout_ms: 1_000,
             runtime_backend: None,
+            runtime_redis_url: None,
+            runtime_redis_key_prefix: None,
             data: GatewayDataArgs {
                 database_driver: None,
                 database_url: None,
@@ -1646,6 +1696,46 @@ mod tests {
         assert_eq!(
             args.effective_runtime_backend(Some(&database), Some("redis://127.0.0.1/0")),
             RuntimeBackendArg::Memory
+        );
+    }
+
+    #[test]
+    fn memory_runtime_data_config_keeps_redis_out_of_data_layer() {
+        let mut args = test_args();
+        args.data.database_driver = Some(DatabaseDriverArg::Sqlite);
+        args.data.database_url = Some("sqlite://./data/aether.db".to_string());
+        args.data.redis_url = Some("redis://127.0.0.1/0".to_string());
+
+        let config = args.data.to_config();
+
+        assert_eq!(
+            config
+                .database()
+                .expect("database should be configured")
+                .driver,
+            DatabaseDriver::Sqlite
+        );
+    }
+
+    #[test]
+    fn redis_runtime_config_owns_redis_connection() {
+        let mut args = test_args();
+        args.data.database_driver = Some(DatabaseDriverArg::Postgres);
+        args.data.database_url = Some("postgres://postgres:postgres@localhost/aether".to_string());
+        args.data.redis_url = Some("redis://127.0.0.1/0".to_string());
+
+        let config = args.runtime_state_config(
+            RuntimeBackendArg::Redis,
+            args.data.effective_redis_url().as_deref(),
+        );
+
+        assert_eq!(
+            config
+                .redis
+                .as_ref()
+                .expect("redis should be configured for runtime state")
+                .url,
+            "redis://127.0.0.1/0"
         );
     }
 

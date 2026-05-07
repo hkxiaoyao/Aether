@@ -211,7 +211,7 @@ fn relative_path(path: &Path, workspace_root: &Path) -> PathBuf {
 fn grouped_import_scanner_allows_nested_new_paths() {
     let source = r#"
 use aether_data::{
-    driver::{postgres::PostgresPool, redis::RedisKvRunner},
+    driver::{postgres::PostgresPool, mysql::MySqlPool},
     lifecycle::{backfill::PendingBackfillInfo, migrate::PendingMigrationInfo},
 };
 "#;

@@ -9,9 +9,12 @@ use aether_data::repository::proxy_nodes::{
 };
 use aether_http::{build_http_client, HttpClientConfig};
 use aether_runtime::{
-    service_up_sample, AdmissionPermit, ConcurrencyGate, ConcurrencySnapshot,
-    DistributedConcurrencyError, DistributedConcurrencyGate, DistributedConcurrencySnapshot,
-    MetricKind, MetricLabel, MetricSample,
+    service_up_sample, AdmissionPermit, ConcurrencyGate, ConcurrencySnapshot, MetricKind,
+    MetricLabel, MetricSample,
+};
+use aether_runtime_state::{
+    MemoryRuntimeStateConfig, RuntimeQueueStore, RuntimeSemaphore, RuntimeSemaphoreError,
+    RuntimeSemaphoreSnapshot, RuntimeState,
 };
 use aether_scheduler_core::PROVIDER_KEY_RPM_WINDOW_SECS;
 use tokio::task::JoinHandle;
@@ -53,21 +56,32 @@ use crate::maintenance::spawn_wallet_daily_usage_aggregation_worker;
 const SYSTEM_CONFIG_CACHE_TTL: Duration = Duration::from_secs(3);
 
 impl AppState {
+    fn usage_worker_queue_for(
+        runtime_state: &Arc<RuntimeState>,
+    ) -> Option<Arc<dyn RuntimeQueueStore>> {
+        if runtime_state.is_redis() {
+            let queue: Arc<dyn RuntimeQueueStore> = runtime_state.clone();
+            Some(queue)
+        } else {
+            None
+        }
+    }
+
     fn spawn_scheduler_affinity_redis_write(
         &self,
         cache_key: &str,
         target: &SchedulerAffinityTarget,
         ttl: Duration,
     ) {
-        let Some(runner) = self.redis_kv_runner() else {
+        if self.runtime_state.is_memory() {
             return;
-        };
+        }
         let Ok(handle) = tokio::runtime::Handle::try_current() else {
             return;
         };
 
         let cache_key = cache_key.to_string();
-        let namespaced_cache_key = runner.keyspace().key(&cache_key);
+        let runtime_state = self.runtime_state.clone();
         let provider_id = target.provider_id.clone();
         let endpoint_id = target.endpoint_id.clone();
         let key_id = target.key_id.clone();
@@ -76,56 +90,55 @@ impl AppState {
         let expire_at = now_unix_secs.saturating_add(ttl_seconds);
 
         handle.spawn(async move {
-            let Ok(mut connection) = runner.client().get_multiplexed_async_connection().await
-            else {
-                return;
-            };
-            let script = r#"
-local existing = redis.call('GET', KEYS[1])
-local request_count = 0
-local created_at = tonumber(ARGV[4])
-if existing then
-  local ok, payload = pcall(cjson.decode, existing)
-  if ok and type(payload) == 'table' then
-    if type(payload['request_count']) == 'number' then
-      request_count = payload['request_count']
-    end
-    if type(payload['created_at']) == 'number' then
-      created_at = payload['created_at']
-    end
-  end
-end
-request_count = request_count + 1
-local payload = {
-  provider_id = ARGV[1],
-  endpoint_id = ARGV[2],
-  key_id = ARGV[3],
-  created_at = created_at,
-  expire_at = tonumber(ARGV[5]),
-  request_count = request_count
-}
-redis.call('SETEX', KEYS[1], tonumber(ARGV[6]), cjson.encode(payload))
-return request_count
-"#;
-            let _ = redis::cmd("EVAL")
-                .arg(script)
-                .arg(1)
-                .arg(&namespaced_cache_key)
-                .arg(&provider_id)
-                .arg(&endpoint_id)
-                .arg(&key_id)
-                .arg(now_unix_secs)
-                .arg(expire_at)
-                .arg(ttl_seconds)
-                .query_async::<i64>(&mut connection)
-                .await;
+            let existing = runtime_state
+                .kv_get(&cache_key)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
+            let request_count = existing
+                .as_ref()
+                .and_then(|value| value.get("request_count"))
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or_default()
+                .saturating_add(1);
+            let created_at = existing
+                .as_ref()
+                .and_then(|value| value.get("created_at"))
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(now_unix_secs);
+            let payload = serde_json::json!({
+                "provider_id": provider_id,
+                "endpoint_id": endpoint_id,
+                "key_id": key_id,
+                "created_at": created_at,
+                "expire_at": expire_at,
+                "request_count": request_count,
+            });
+            if let Ok(serialized) = serde_json::to_string(&payload) {
+                let _ = runtime_state
+                    .kv_set(
+                        &cache_key,
+                        serialized,
+                        Some(Duration::from_secs(ttl_seconds)),
+                    )
+                    .await;
+            }
         });
     }
 
     pub(crate) fn replace_data_state(&mut self, data: Arc<GatewayDataState>) {
         self.clear_provider_transport_snapshot_cache();
         self.system_config_cache.clear();
-        self.tunnel = crate::tunnel::EmbeddedTunnelState::with_data(Arc::clone(&data));
+        let data = Arc::new(
+            (*data)
+                .clone()
+                .with_usage_worker_queue(Self::usage_worker_queue_for(&self.runtime_state)),
+        );
+        self.tunnel = crate::tunnel::EmbeddedTunnelState::with_data_and_runtime_state(
+            Arc::clone(&data),
+            self.runtime_state.clone(),
+        );
         self.data = data;
     }
 
@@ -153,7 +166,11 @@ return request_count
     }
 
     fn build(execution_runtime_override_base_url: Option<String>) -> Result<Self, reqwest::Error> {
-        let data = Arc::new(GatewayDataState::disabled());
+        let runtime_state = Arc::new(RuntimeState::memory(MemoryRuntimeStateConfig::default()));
+        let data = Arc::new(
+            GatewayDataState::disabled()
+                .with_usage_worker_queue(Self::usage_worker_queue_for(&runtime_state)),
+        );
         let client = build_http_client(&HttpClientConfig {
             connect_timeout_ms: Some(10_000),
             request_timeout_ms: Some(300_000),
@@ -168,6 +185,7 @@ return request_count
             #[cfg(test)]
             execution_runtime_sync_override: None,
             data: Arc::clone(&data),
+            runtime_state: runtime_state.clone(),
             usage_runtime: Arc::new(usage::UsageRuntime::disabled()),
             video_tasks: Arc::new(VideoTaskService::new(
                 VideoTaskTruthSourceMode::PythonSyncReport,
@@ -188,7 +206,10 @@ return request_count
             frontdoor_user_rpm: Arc::new(FrontdoorUserRpmLimiter::new(
                 FrontdoorUserRpmConfig::default(),
             )),
-            tunnel: crate::tunnel::EmbeddedTunnelState::with_data(data),
+            tunnel: crate::tunnel::EmbeddedTunnelState::with_data_and_runtime_state(
+                data,
+                runtime_state.clone(),
+            ),
             provider_transport_snapshot_cache: Arc::new(StdMutex::new(HashMap::new())),
             provider_key_rpm_resets: Arc::new(StdMutex::new(HashMap::new())),
             local_execution_runtime_miss_diagnostics: Arc::new(StdMutex::new(HashMap::new())),
@@ -261,11 +282,12 @@ return request_count
         instance_id: impl Into<String>,
         relay_base_url: Option<impl Into<String>>,
     ) -> Self {
-        self.tunnel = crate::tunnel::EmbeddedTunnelState::with_data_and_identity(
+        self.tunnel = crate::tunnel::EmbeddedTunnelState::with_data_identity_and_runtime_state(
             Arc::clone(&self.data),
             instance_id,
             relay_base_url,
             90,
+            self.runtime_state.clone(),
         );
         self
     }
@@ -334,10 +356,21 @@ return request_count
         self
     }
 
-    pub fn with_distributed_request_concurrency_gate(
-        mut self,
-        gate: DistributedConcurrencyGate,
-    ) -> Self {
+    pub fn with_runtime_state(mut self, runtime_state: Arc<RuntimeState>) -> Self {
+        self.runtime_state = runtime_state;
+        self.data = Arc::new(
+            (*self.data)
+                .clone()
+                .with_usage_worker_queue(Self::usage_worker_queue_for(&self.runtime_state)),
+        );
+        self.tunnel = crate::tunnel::EmbeddedTunnelState::with_data_and_runtime_state(
+            Arc::clone(&self.data),
+            self.runtime_state.clone(),
+        );
+        self
+    }
+
+    pub fn with_distributed_request_concurrency_gate(mut self, gate: RuntimeSemaphore) -> Self {
         self.distributed_request_gate = Some(Arc::new(gate));
         self
     }
@@ -624,7 +657,7 @@ return request_count
 
     pub(crate) async fn distributed_request_concurrency_snapshot(
         &self,
-    ) -> Result<Option<DistributedConcurrencySnapshot>, DistributedConcurrencyError> {
+    ) -> Result<Option<RuntimeSemaphoreSnapshot>, RuntimeSemaphoreError> {
         match self.distributed_request_gate.as_ref() {
             Some(gate) => gate.snapshot().await.map(Some),
             None => Ok(None),
@@ -767,11 +800,62 @@ return request_count
     }
 
     pub fn has_redis_data_backend(&self) -> bool {
-        self.data.has_redis_backend()
+        self.runtime_state.is_redis()
     }
 
-    pub(crate) fn redis_kv_runner(&self) -> Option<aether_data::driver::redis::RedisKvRunner> {
-        self.data.kv_runner()
+    pub(crate) fn runtime_state_backend(&self) -> &'static str {
+        self.runtime_state.backend_kind().as_str()
+    }
+
+    pub fn runtime_state(&self) -> &RuntimeState {
+        self.runtime_state.as_ref()
+    }
+
+    pub(crate) async fn runtime_kv_setex(
+        &self,
+        key: &str,
+        value: &str,
+        ttl_seconds: u64,
+    ) -> Result<(), GatewayError> {
+        self.runtime_state
+            .kv_set(
+                key,
+                value.to_string(),
+                Some(Duration::from_secs(ttl_seconds)),
+            )
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
+    pub(crate) async fn runtime_kv_get(&self, key: &str) -> Result<Option<String>, GatewayError> {
+        self.runtime_state
+            .kv_get(key)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
+    pub(crate) async fn runtime_kv_getdel(
+        &self,
+        key: &str,
+    ) -> Result<Option<String>, GatewayError> {
+        self.runtime_state
+            .kv_take(key)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
+    pub(crate) async fn runtime_kv_del(&self, key: &str) -> Result<bool, GatewayError> {
+        self.runtime_state
+            .kv_delete(key)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
+    pub(crate) async fn runtime_kv_exists(&self, key: &str) -> Result<bool, GatewayError> {
+        self.runtime_state
+            .kv_exists(key)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
     }
 
     pub(crate) fn remove_scheduler_affinity_cache_entry(&self, cache_key: &str) -> bool {

@@ -106,21 +106,19 @@ async fn schedule_pool_page_candidates(
     let key_context_by_id = read_pool_catalog_key_contexts_by_id(state, &candidates).await;
 
     let mut runtime_by_provider = BTreeMap::new();
-    let redis_runner = state.app().redis_kv_runner();
     for (provider_id, (pool_config, key_ids)) in provider_runtime_requirements {
         let key_ids = key_ids.into_iter().collect::<Vec<_>>();
-        let runtime = match redis_runner.as_ref() {
-            Some(runner) if !key_ids.is_empty() => {
-                read_admin_provider_pool_runtime_state(
-                    runner,
-                    provider_id.as_str(),
-                    &key_ids,
-                    &pool_config,
-                    sticky_session_token,
-                )
-                .await
-            }
-            _ => AdminProviderPoolRuntimeState::default(),
+        let runtime = if key_ids.is_empty() {
+            AdminProviderPoolRuntimeState::default()
+        } else {
+            read_admin_provider_pool_runtime_state(
+                state.app().runtime_state.as_ref(),
+                provider_id.as_str(),
+                &key_ids,
+                &pool_config,
+                sticky_session_token,
+            )
+            .await
         };
         runtime_by_provider.insert(provider_id, runtime);
     }

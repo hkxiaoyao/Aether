@@ -6,12 +6,12 @@ use aether_data::driver::postgres::{
     DatabaseRecordId, PostgresLeaseClaimOptions, PostgresLeaseClaimSpec, PostgresLeaseRunnerConfig,
     PostgresPoolConfig,
 };
-use aether_data::driver::redis::{
-    RedisClientConfig, RedisConsumerGroup, RedisConsumerName, RedisLockLease, RedisLockRunner,
-    RedisLockRunnerConfig, RedisStreamName, RedisStreamReclaimConfig, RedisStreamRunner,
-    RedisStreamRunnerConfig,
+use aether_data::PostgresBackend;
+use aether_runtime_state::{
+    RedisClientConfig, RedisClientFactory, RedisConsumerGroup, RedisConsumerName, RedisKeyspace,
+    RedisLockLease, RedisLockRunner, RedisLockRunnerConfig, RedisStreamName,
+    RedisStreamReclaimConfig, RedisStreamRunner, RedisStreamRunnerConfig,
 };
-use aether_data::{PostgresBackend, RedisBackend};
 use aether_testkit::{init_test_runtime_for, ManagedPostgresServer, ManagedRedisServer};
 use futures_util::stream::{self, StreamExt};
 use serde::Serialize;
@@ -189,10 +189,12 @@ async fn run_suite(
         })
         .expect("postgres url should resolve");
 
-    let redis_backend = RedisBackend::from_config(RedisClientConfig {
+    let redis_factory = RedisClientFactory::new(RedisClientConfig {
         url: redis_url.clone(),
         key_prefix: Some(format!("aether-dependency-pressure-{}", std::process::id())),
     })?;
+    let redis_client = redis_factory.connect_lazy()?;
+    let redis_keyspace = redis_factory.config().keyspace();
     let postgres_backend = PostgresBackend::from_config(PostgresPoolConfig {
         database_url: postgres_url.clone(),
         min_connections: 1,
@@ -206,22 +208,30 @@ async fn run_suite(
 
     bootstrap_postgres_lease_table(postgres_backend.pool_clone(), config).await?;
 
-    let lock_runner = redis_backend.lock_runner(RedisLockRunnerConfig {
-        command_timeout_ms: Some(config.timeout.as_millis() as u64),
-        default_ttl_ms: 5_000,
-    })?;
-    let stream_runner = redis_backend.stream_runner(RedisStreamRunnerConfig {
-        command_timeout_ms: Some(config.timeout.as_millis() as u64),
-        read_block_ms: Some(10),
-        read_count: 64,
-    })?;
+    let lock_runner = RedisLockRunner::new(
+        redis_client.clone(),
+        redis_keyspace.clone(),
+        RedisLockRunnerConfig {
+            command_timeout_ms: Some(config.timeout.as_millis() as u64),
+            default_ttl_ms: 5_000,
+        },
+    )?;
+    let stream_runner = RedisStreamRunner::new(
+        redis_client.clone(),
+        redis_keyspace.clone(),
+        RedisStreamRunnerConfig {
+            command_timeout_ms: Some(config.timeout.as_millis() as u64),
+            read_block_ms: Some(10),
+            read_count: 64,
+        },
+    )?;
     let lease_runner = postgres_backend.lease_runner(PostgresLeaseRunnerConfig {
         statement_timeout_ms: Some(config.timeout.as_millis() as u64),
         lock_timeout_ms: Some(1_000),
     })?;
 
-    let redis_lock = benchmark_redis_lock(&redis_backend, &lock_runner, config).await?;
-    let redis_stream = benchmark_redis_stream(&redis_backend, &stream_runner, config).await?;
+    let redis_lock = benchmark_redis_lock(&redis_keyspace, &lock_runner, config).await?;
+    let redis_stream = benchmark_redis_stream(&redis_keyspace, &stream_runner, config).await?;
     let postgres_lease = benchmark_postgres_lease(&lease_runner, config).await?;
 
     Ok(DependencyPressureBaselineReport {
@@ -263,7 +273,7 @@ async fn bootstrap_postgres_lease_table(
 }
 
 async fn benchmark_redis_lock(
-    backend: &RedisBackend,
+    keyspace: &RedisKeyspace,
     runner: &RedisLockRunner,
     config: &DependencyPressureBaselineConfig,
 ) -> Result<RedisLockPressureReport, Box<dyn std::error::Error>> {
@@ -271,7 +281,6 @@ async fn benchmark_redis_lock(
     let renew = Arc::new(SummaryCollector::default());
     let release = Arc::new(SummaryCollector::default());
     let next = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let keyspace = backend.keyspace();
 
     stream::iter(0..config.redis_lock_concurrency)
         .for_each_concurrent(config.redis_lock_concurrency, |_| {
@@ -338,11 +347,11 @@ async fn record_redis_lock_follow_up(
 }
 
 async fn benchmark_redis_stream(
-    backend: &RedisBackend,
+    keyspace: &RedisKeyspace,
     runner: &RedisStreamRunner,
     config: &DependencyPressureBaselineConfig,
 ) -> Result<RedisStreamPressureReport, Box<dyn std::error::Error>> {
-    let stream = backend.keyspace().stream_name("dependency-pressure");
+    let stream = keyspace.stream_name("dependency-pressure");
     let group = RedisConsumerGroup("dependency-group".to_string());
     let consumer_a = RedisConsumerName("consumer-a".to_string());
     let consumer_b = RedisConsumerName("consumer-b".to_string());

@@ -11,9 +11,6 @@ use crate::provider_transport::{
     read_provider_transport_snapshot, GatewayProviderTransportSnapshot,
 };
 use crate::video_tasks::LocalVideoTaskReadResponse;
-use aether_data::driver::redis::{
-    RedisKvRunner, RedisKvRunnerConfig, RedisLockRunner, RedisStreamRunner,
-};
 use aether_data::repository::announcements::{
     AnnouncementListQuery, AnnouncementReadRepository, AnnouncementWriteRepository,
     CreateAnnouncementRecord, StoredAnnouncement, StoredAnnouncementPage, UpdateAnnouncementRecord,
@@ -122,6 +119,7 @@ use aether_data_contracts::repository::video_tasks::{
     StoredVideoTask, UpsertVideoTask, VideoTaskLookupKey, VideoTaskModelCount,
     VideoTaskQueryFilter, VideoTaskReadRepository, VideoTaskStatusCount, VideoTaskWriteRepository,
 };
+use aether_runtime_state::RuntimeQueueStore;
 
 #[derive(Clone, Default)]
 pub(crate) struct GatewayDataState {
@@ -155,7 +153,7 @@ pub(crate) struct GatewayDataState {
     usage_writer: Option<Arc<dyn UsageWriteRepository>>,
     user_reader: Option<Arc<dyn UserReadRepository>>,
     user_preferences: Option<Arc<RwLock<BTreeMap<String, StoredUserPreferenceRecord>>>>,
-    usage_worker_runner: Option<RedisStreamRunner>,
+    usage_worker_queue: Option<Arc<dyn RuntimeQueueStore>>,
     video_task_reader: Option<Arc<dyn VideoTaskReadRepository>>,
     video_task_writer: Option<Arc<dyn VideoTaskWriteRepository>>,
     wallet_reader: Option<Arc<dyn WalletReadRepository>>,
@@ -253,10 +251,7 @@ impl fmt::Debug for GatewayDataState {
             .field("has_usage_reader", &self.usage_reader.is_some())
             .field("has_usage_writer", &self.usage_writer.is_some())
             .field("has_user_preferences", &self.user_preferences.is_some())
-            .field(
-                "has_usage_worker_runner",
-                &self.usage_worker_runner.is_some(),
-            )
+            .field("has_usage_worker_queue", &self.usage_worker_queue.is_some())
             .field("has_video_task_reader", &self.video_task_reader.is_some())
             .field("has_video_task_writer", &self.video_task_writer.is_some())
             .field("has_wallet_reader", &self.wallet_reader.is_some())

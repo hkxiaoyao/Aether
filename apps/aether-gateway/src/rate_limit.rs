@@ -4,55 +4,12 @@ use std::sync::Mutex as StdMutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use aether_cache::ExpiringMap;
-use redis::Script;
+use aether_runtime_state::{RateLimitCheck, RateLimitInput, RateLimitScope};
 use tokio::sync::Mutex;
 use tracing::warn;
 
 use crate::control::GatewayControlDecision;
 use crate::{AppState, GatewayError};
-
-const RPM_CHECK_AND_CONSUME_SCRIPT: &str = r#"
-local user_key = KEYS[1]
-local key_key = KEYS[2]
-local user_limit = tonumber(ARGV[1])
-local key_limit = tonumber(ARGV[2])
-local ttl = tonumber(ARGV[3])
-local retry_after = tonumber(ARGV[4])
-
-local user_count = 0
-if user_limit > 0 then
-    user_count = tonumber(redis.call('GET', user_key) or '0')
-    if user_count >= user_limit then
-        return {0, 1, user_limit, 0, retry_after}
-    end
-end
-
-local key_count = 0
-if key_limit > 0 then
-    key_count = tonumber(redis.call('GET', key_key) or '0')
-    if key_count >= key_limit then
-        return {0, 2, key_limit, 0, retry_after}
-    end
-end
-
-local remaining = -1
-if user_limit > 0 then
-    user_count = redis.call('INCR', user_key)
-    redis.call('EXPIRE', user_key, ttl)
-    remaining = user_limit - user_count
-end
-
-if key_limit > 0 then
-    key_count = redis.call('INCR', key_key)
-    redis.call('EXPIRE', key_key, ttl)
-    local key_remaining = key_limit - key_count
-    if remaining == -1 or key_remaining < remaining then
-        remaining = key_remaining
-    end
-end
-
-return {1, 0, 0, remaining, 0}
-"#;
 
 const SYSTEM_RPM_CONFIG_KEY: &str = "rate_limit_per_minute";
 const SYSTEM_RPM_CONFIG_CACHE_TTL: Duration = Duration::from_secs(15);
@@ -189,19 +146,11 @@ impl FrontdoorUserRpmLimiter {
         scope_key: &str,
         bucket: u64,
     ) -> Result<u32, GatewayError> {
-        if let Some(runner) = state.redis_kv_runner() {
-            let mut connection = runner
-                .client()
-                .get_multiplexed_async_connection()
-                .await
-                .map_err(|err| GatewayError::Internal(err.to_string()))?;
-            let namespaced_key = runner.keyspace().key(scope_key);
-            let raw = redis::cmd("GET")
-                .arg(&namespaced_key)
-                .query_async::<Option<u32>>(&mut connection)
-                .await
-                .map_err(|err| GatewayError::Internal(err.to_string()))?;
-            return Ok(raw.unwrap_or(0));
+        if !state.runtime_state.is_memory() {
+            let raw = state.runtime_state.kv_get(scope_key).await.map_err(|err| {
+                GatewayError::Internal(format!("frontdoor user rpm runtime read failed: {err}"))
+            })?;
+            return Ok(raw.and_then(|value| value.parse::<u32>().ok()).unwrap_or(0));
         }
 
         let counts = self.memory_counts.lock().await;
@@ -234,8 +183,8 @@ impl FrontdoorUserRpmLimiter {
             return Ok(FrontdoorUserRpmOutcome::Allowed);
         }
 
-        if let Some(runner) = state.data.kv_runner() {
-            match self.check_and_consume_redis(&runner, &plan).await {
+        if !state.runtime_state.is_memory() {
+            match self.check_and_consume_runtime(state, &plan).await {
                 Ok(outcome) => return Ok(outcome),
                 Err(err) => {
                     warn!(
@@ -249,7 +198,7 @@ impl FrontdoorUserRpmLimiter {
                     }
                     if !self.config.allow_local_fallback() {
                         return Err(GatewayError::Internal(
-                            "frontdoor user rpm redis backend is unavailable and local fallback is disabled for the current deployment mode".to_string(),
+                            "frontdoor user rpm runtime backend is unavailable and local fallback is disabled for the current deployment mode".to_string(),
                         ));
                     }
                 }
@@ -261,7 +210,8 @@ impl FrontdoorUserRpmLimiter {
                 return Ok(FrontdoorUserRpmOutcome::NotApplicable);
             }
             return Err(GatewayError::Internal(
-                "frontdoor user rpm requires redis in the current deployment mode".to_string(),
+                "frontdoor user rpm requires shared runtime state in the current deployment mode"
+                    .to_string(),
             ));
         }
 
@@ -306,59 +256,39 @@ impl FrontdoorUserRpmLimiter {
         self
     }
 
-    async fn check_and_consume_redis(
+    async fn check_and_consume_runtime(
         &self,
-        runner: &aether_data::driver::redis::RedisKvRunner,
+        state: &AppState,
         plan: &RpmPlan,
     ) -> Result<FrontdoorUserRpmOutcome, GatewayError> {
-        let user_key = runner.keyspace().key(&plan.user_rpm_key);
-        let key_key = runner.keyspace().key(&plan.key_rpm_key);
-        let mut connection = runner
-            .client()
-            .get_multiplexed_async_connection()
-            .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))?;
-        let raw_result: Vec<i64> = Script::new(RPM_CHECK_AND_CONSUME_SCRIPT)
-            .key(user_key)
-            .key(key_key)
-            .arg(i64::from(plan.user_rpm_limit))
-            .arg(i64::from(plan.key_rpm_limit))
-            .arg(i64::try_from(self.config.key_ttl_seconds()).unwrap_or(i64::MAX))
-            .arg(i64::try_from(plan.retry_after).unwrap_or(i64::MAX))
-            .invoke_async::<Vec<i64>>(&mut connection)
+        let result = state
+            .runtime_state
+            .check_and_consume_rate_limit(RateLimitInput {
+                user_key: &plan.user_rpm_key,
+                key_key: &plan.key_rpm_key,
+                bucket: plan.bucket,
+                user_limit: plan.user_rpm_limit,
+                key_limit: plan.key_rpm_limit,
+                ttl_seconds: self.config.key_ttl_seconds(),
+            })
             .await
             .map_err(|err| GatewayError::Internal(err.to_string()))?;
 
-        let allowed = raw_result.first().copied().unwrap_or_default() == 1;
-        if allowed {
+        if matches!(result, RateLimitCheck::Allowed { .. }) {
             return Ok(FrontdoorUserRpmOutcome::Allowed);
         }
 
-        let scope = match raw_result.get(1).copied().unwrap_or_default() {
-            2 => "key",
-            _ => "user",
+        let RateLimitCheck::Rejected { scope, limit } = result else {
+            unreachable!("allowed returned above");
         };
-        let limit = raw_result
-            .get(2)
-            .copied()
-            .and_then(|value| u32::try_from(value).ok())
-            .unwrap_or_else(|| {
-                if scope == "key" {
-                    plan.key_rpm_limit
-                } else {
-                    plan.user_rpm_limit
-                }
-            });
-        let retry_after = raw_result
-            .get(4)
-            .copied()
-            .and_then(|value| u64::try_from(value).ok())
-            .unwrap_or(plan.retry_after);
         Ok(FrontdoorUserRpmOutcome::Rejected(
             FrontdoorUserRpmRejection {
-                scope,
+                scope: match scope {
+                    RateLimitScope::User => "user",
+                    RateLimitScope::Key => "key",
+                },
                 limit,
-                retry_after,
+                retry_after: plan.retry_after,
             },
         ))
     }
@@ -630,7 +560,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn limiter_rejects_missing_redis_when_local_fallback_disabled() {
+    async fn limiter_rejects_missing_shared_runtime_when_local_fallback_disabled() {
         let limiter = FrontdoorUserRpmLimiter::new(
             FrontdoorUserRpmConfig::new(60, 120, false).with_local_fallback(false),
         );
@@ -652,10 +582,10 @@ mod tests {
         let err = limiter
             .check_and_consume(&state, Some(&decision))
             .await
-            .expect_err("missing redis should fail in strict mode");
+            .expect_err("missing shared runtime should fail in strict mode");
         match err {
             crate::GatewayError::Internal(message) => {
-                assert!(message.contains("requires redis"));
+                assert!(message.contains("requires shared runtime state"));
             }
             other => panic!("expected internal error, got {other:?}"),
         }

@@ -1,7 +1,7 @@
 # aether-data
 
-`aether-data` is the runtime data-access crate. It owns concrete database and
-Redis clients, concrete repository implementations, migration/backfill/export
+`aether-data` is the runtime data-access crate. It owns concrete SQL/database
+drivers, concrete repository implementations, migration/backfill/export
 workflows, and the composition layer that wires those pieces into the rest of
 the application.
 
@@ -14,10 +14,9 @@ task crates live in `../aether-data-contracts`.
 | Path | Responsibility |
 |---|---|
 | `src/database.rs` | Logical SQL driver selection and shared pool configuration. |
-| `src/config.rs` | Data-layer config that combines SQL and Redis settings. |
+| `src/config.rs` | Data-layer config for SQL drivers and repository wiring. |
 | `src/maintenance.rs` | Maintenance DTOs and aggregation summaries used by backend dispatch and runtime maintenance entrypoints. |
 | `src/driver/{postgres,mysql,sqlite}` | Low-level SQL driver primitives such as pools, transactions, and leases. These modules should not contain domain repository logic. |
-| `src/driver/redis` | Low-level Redis clients, locks, streams, and namespaces. |
 | `src/repository` | Domain repository traits/types re-exported from contracts plus concrete in-memory/Postgres/MySQL/SQLite implementations. |
 | `src/backend` | Composition root. Builds concrete driver backends and exposes app-facing read/write/worker/lock/lease handles. |
 | `src/backend/{maintenance,stats,wallet,system}.rs` | Backend-owned maintenance, aggregation, wallet ledger, and system config workflows that are not normal request-path repositories. |
@@ -40,9 +39,8 @@ The crate is easiest to read as five layers:
 1. Contracts: DTOs, input structs, repository traits, and `DataLayerError`.
    Prefer `aether-data-contracts` for anything that another crate needs to
    compile against.
-2. Driver primitives: `driver/postgres`, `driver/mysql`, `driver/sqlite`, and
-   `driver/redis` connect to
-   infrastructure and expose pools/runners.
+2. Driver primitives: `driver/postgres`, `driver/mysql`, and `driver/sqlite`
+   connect to infrastructure and expose pools/runners.
 3. Repository implementations: `repository/<domain>/{sql,mysql,sqlite,memory}`
    translate contract types to driver-specific SQL.
 4. Backend composition: `backend` chooses one SQL driver from config and wires

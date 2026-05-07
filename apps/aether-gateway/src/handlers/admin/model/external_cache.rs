@@ -25,19 +25,16 @@ async fn store_admin_external_models_cache(
     state: &AdminAppState<'_>,
     payload: &serde_json::Value,
 ) -> Result<(), GatewayError> {
-    let Some(runner) = state.redis_kv_runner() else {
-        return Ok(());
-    };
     let serialized =
         serde_json::to_string(payload).map_err(|err| GatewayError::Internal(err.to_string()))?;
-    runner
-        .setex(
+    state
+        .as_ref()
+        .runtime_kv_setex(
             ADMIN_EXTERNAL_MODELS_CACHE_KEY,
             &serialized,
-            Some(ADMIN_EXTERNAL_MODELS_CACHE_TTL_SECS),
+            ADMIN_EXTERNAL_MODELS_CACHE_TTL_SECS,
         )
-        .await
-        .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        .await?;
     Ok(())
 }
 
@@ -64,37 +61,21 @@ async fn fetch_admin_external_models_from_source(
 pub(crate) async fn read_admin_external_models_cache(
     state: &AdminAppState<'_>,
 ) -> Result<Option<serde_json::Value>, GatewayError> {
-    if let Some(runner) = state.redis_kv_runner() {
-        match runner.client().get_multiplexed_async_connection().await {
-            Ok(mut connection) => {
-                let namespaced_key = runner.keyspace().key(ADMIN_EXTERNAL_MODELS_CACHE_KEY);
-                match redis::cmd("GET")
-                    .arg(&namespaced_key)
-                    .query_async::<Option<String>>(&mut connection)
-                    .await
-                {
-                    Ok(Some(raw)) => match serde_json::from_str::<serde_json::Value>(&raw) {
-                        Ok(payload) => {
-                            let payload = normalize_admin_external_models_payload(payload);
-                            if let Err(err) =
-                                store_admin_external_models_cache(state, &payload).await
-                            {
-                                warn!(error = ?err, "failed to refresh external models cache ttl");
-                            }
-                            return Ok(Some(payload));
-                        }
-                        Err(err) => {
-                            warn!(error = %err, "failed to parse cached external models payload");
-                        }
-                    },
-                    Ok(None) => {}
-                    Err(err) => {
-                        warn!(error = %err, "failed to read external models cache");
-                    }
+    if let Some(raw) = state
+        .as_ref()
+        .runtime_kv_get(ADMIN_EXTERNAL_MODELS_CACHE_KEY)
+        .await?
+    {
+        match serde_json::from_str::<serde_json::Value>(&raw) {
+            Ok(payload) => {
+                let payload = normalize_admin_external_models_payload(payload);
+                if let Err(err) = store_admin_external_models_cache(state, &payload).await {
+                    warn!(error = ?err, "failed to refresh external models cache ttl");
                 }
+                return Ok(Some(payload));
             }
             Err(err) => {
-                warn!(error = %err, "failed to connect to redis for external models cache");
+                warn!(error = %err, "failed to parse cached external models payload");
             }
         }
     }
@@ -116,19 +97,13 @@ pub(crate) async fn read_admin_external_models_cache(
 pub(crate) async fn clear_admin_external_models_cache(
     state: &AdminAppState<'_>,
 ) -> Result<serde_json::Value, GatewayError> {
-    let Some(runner) = state.redis_kv_runner() else {
-        return Ok(json!({
-            "cleared": false,
-            "message": "Redis 未启用",
-        }));
-    };
-    let deleted = runner
-        .del(ADMIN_EXTERNAL_MODELS_CACHE_KEY)
-        .await
-        .map_err(|err| GatewayError::Internal(err.to_string()))?;
+    let deleted = state
+        .as_ref()
+        .runtime_kv_del(ADMIN_EXTERNAL_MODELS_CACHE_KEY)
+        .await?;
     Ok(json!({
-        "cleared": deleted > 0,
-        "message": if deleted > 0 { "缓存已清除" } else { "缓存不存在" },
+        "cleared": deleted,
+        "message": if deleted { "缓存已清除" } else { "缓存不存在" },
     }))
 }
 

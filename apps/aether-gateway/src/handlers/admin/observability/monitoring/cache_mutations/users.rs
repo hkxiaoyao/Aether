@@ -6,15 +6,10 @@ use super::super::cache_identity::{
     admin_monitoring_find_user_summary_by_id, admin_monitoring_list_export_api_key_records_by_ids,
 };
 use super::super::cache_route_helpers::{
-    admin_monitoring_cache_affinity_unavailable_response,
     admin_monitoring_cache_users_not_found_response,
     admin_monitoring_cache_users_user_identifier_from_path,
 };
-use super::super::cache_store::{
-    admin_monitoring_has_runtime_scheduler_affinity_entries,
-    list_admin_monitoring_cache_affinity_records_by_affinity_keys,
-    load_admin_monitoring_cache_affinity_entries_for_tests,
-};
+use super::super::cache_store::list_admin_monitoring_cache_affinity_records_by_affinity_keys;
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::GatewayError;
 use aether_admin::observability::monitoring::{
@@ -35,13 +30,6 @@ pub(in super::super) async fn build_admin_monitoring_cache_users_delete_response
             "缺少 user_identifier",
         ));
     };
-
-    if state.redis_kv_runner().is_none()
-        && load_admin_monitoring_cache_affinity_entries_for_tests(state).is_empty()
-        && !admin_monitoring_has_runtime_scheduler_affinity_entries(state)
-    {
-        return Ok(admin_monitoring_cache_affinity_unavailable_response());
-    }
 
     let direct_api_key_by_id = admin_monitoring_list_export_api_key_records_by_ids(
         state,

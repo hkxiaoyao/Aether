@@ -1086,11 +1086,9 @@ async fn admin_monitoring_model_mapping_stats_returns_local_payload_without_redi
         .expect("body should read");
     let payload: serde_json::Value = serde_json::from_slice(&body).expect("json body should parse");
     assert_eq!(payload["status"], json!("ok"));
-    assert_eq!(payload["data"]["available"], json!(false));
-    assert_eq!(
-        payload["data"]["message"],
-        json!("Redis 未启用，模型映射缓存不可用")
-    );
+    assert_eq!(payload["data"]["available"], json!(true));
+    assert_eq!(payload["data"]["backend"], json!("memory"));
+    assert_eq!(payload["data"]["total_keys"], json!(0));
 }
 
 #[tokio::test]
@@ -1193,12 +1191,13 @@ async fn admin_monitoring_redis_keys_returns_local_payload_without_redis() {
         .expect("body should read");
     let payload: serde_json::Value = serde_json::from_slice(&body).expect("json body should parse");
     assert_eq!(payload["status"], json!("ok"));
-    assert_eq!(payload["data"]["available"], json!(false));
-    assert_eq!(payload["data"]["message"], json!("Redis 未启用"));
+    assert_eq!(payload["data"]["available"], json!(true));
+    assert_eq!(payload["data"]["backend"], json!("memory"));
+    assert_eq!(payload["data"]["total_keys"], json!(0));
 }
 
 #[tokio::test]
-async fn admin_monitoring_redis_keys_delete_returns_unavailable_without_redis() {
+async fn admin_monitoring_redis_keys_delete_returns_empty_runtime_payload_without_redis() {
     let state = AppState::new().expect("state should build");
     let context = request_context(
         http::Method::DELETE,
@@ -1210,12 +1209,14 @@ async fn admin_monitoring_redis_keys_delete_returns_unavailable_without_redis() 
         .expect("handler should not error")
         .expect("route should be handled locally");
 
-    assert_eq!(response.status(), http::StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.status(), http::StatusCode::OK);
     let body = to_bytes(response.into_body(), usize::MAX)
         .await
         .expect("body should read");
     let payload: serde_json::Value = serde_json::from_slice(&body).expect("json body should parse");
-    assert_eq!(payload["detail"], json!("Redis 未启用"));
+    assert_eq!(payload["status"], json!("ok"));
+    assert_eq!(payload["category"], json!("upstream_models"));
+    assert_eq!(payload["deleted_count"], json!(0));
 }
 
 #[tokio::test]

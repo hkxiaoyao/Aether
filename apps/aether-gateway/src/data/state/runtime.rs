@@ -13,27 +13,28 @@ use super::{
     DisableAdminRedeemCodeBatchInput, DisableAdminRedeemCodeInput, FailAdminWalletRefundInput,
     GatewayDataState, GatewayProviderTransportSnapshot, LocalVideoTaskReadResponse,
     ProcessAdminWalletRefundInput, ProcessPaymentCallbackInput, ProcessPaymentCallbackOutcome,
-    RedeemWalletCodeInput, RedeemWalletCodeOutcome, RedisStreamRunner, RequestAuditBundle,
-    RequestCandidateTrace, StoredAdminAuditLogPage, StoredAdminPaymentCallbackPage,
-    StoredAdminPaymentOrder, StoredAdminPaymentOrderPage, StoredAdminRedeemCodeBatch,
-    StoredAdminRedeemCodeBatchPage, StoredAdminRedeemCodePage, StoredAdminWalletLedgerPage,
-    StoredAdminWalletListPage, StoredAdminWalletRefund, StoredAdminWalletRefundPage,
-    StoredAdminWalletRefundRequestPage, StoredAdminWalletTransaction,
-    StoredAdminWalletTransactionPage, StoredAnnouncement, StoredAnnouncementPage,
-    StoredBillingModelContext, StoredProviderQuotaSnapshot, StoredProviderUsageSummary,
-    StoredRequestUsageAudit, StoredSuspiciousActivity, StoredUsageSettlement,
-    StoredUserAuditLogPage, StoredUserAuthRecord, StoredUserExportRow, StoredUserSummary,
-    StoredVideoTask, StoredWalletDailyUsageLedger, StoredWalletDailyUsageLedgerPage,
-    StoredWalletSnapshot, UpdateAnnouncementRecord, UpsertUsageRecord, UpsertVideoTask,
-    UsageSettlementInput, VideoTaskLookupKey, VideoTaskModelCount, VideoTaskQueryFilter,
-    VideoTaskStatusCount, WalletDailyUsageAggregationInput, WalletDailyUsageAggregationResult,
-    WalletLookupKey, WalletMutationOutcome,
+    RedeemWalletCodeInput, RedeemWalletCodeOutcome, RequestAuditBundle, RequestCandidateTrace,
+    StoredAdminAuditLogPage, StoredAdminPaymentCallbackPage, StoredAdminPaymentOrder,
+    StoredAdminPaymentOrderPage, StoredAdminRedeemCodeBatch, StoredAdminRedeemCodeBatchPage,
+    StoredAdminRedeemCodePage, StoredAdminWalletLedgerPage, StoredAdminWalletListPage,
+    StoredAdminWalletRefund, StoredAdminWalletRefundPage, StoredAdminWalletRefundRequestPage,
+    StoredAdminWalletTransaction, StoredAdminWalletTransactionPage, StoredAnnouncement,
+    StoredAnnouncementPage, StoredBillingModelContext, StoredProviderQuotaSnapshot,
+    StoredProviderUsageSummary, StoredRequestUsageAudit, StoredSuspiciousActivity,
+    StoredUsageSettlement, StoredUserAuditLogPage, StoredUserAuthRecord, StoredUserExportRow,
+    StoredUserSummary, StoredVideoTask, StoredWalletDailyUsageLedger,
+    StoredWalletDailyUsageLedgerPage, StoredWalletSnapshot, UpdateAnnouncementRecord,
+    UpsertUsageRecord, UpsertVideoTask, UsageSettlementInput, VideoTaskLookupKey,
+    VideoTaskModelCount, VideoTaskQueryFilter, VideoTaskStatusCount,
+    WalletDailyUsageAggregationInput, WalletDailyUsageAggregationResult, WalletLookupKey,
+    WalletMutationOutcome,
 };
 use aether_data_contracts::repository::usage::{
     PendingUsageCleanupSummary, ProviderApiKeyWindowUsageRequest,
     StoredProviderApiKeyWindowUsageSummary, StoredUsageDailySummary, UsageAuditListQuery,
     UsageCleanupSummary, UsageCleanupWindow, UsageDailyHeatmapQuery,
 };
+use aether_runtime_state::RuntimeQueueStore;
 use aether_video_tasks_core::read_data_backed_video_task_response;
 
 impl GatewayDataState {
@@ -1477,8 +1478,8 @@ impl GatewayDataState {
         }
     }
 
-    pub(crate) fn usage_worker_runner(&self) -> Option<RedisStreamRunner> {
-        self.usage_worker_runner.clone()
+    pub(crate) fn usage_worker_queue(&self) -> Option<std::sync::Arc<dyn RuntimeQueueStore>> {
+        self.usage_worker_queue.clone()
     }
 
     pub(crate) async fn find_billing_model_context(

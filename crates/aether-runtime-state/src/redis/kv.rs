@@ -1,8 +1,8 @@
 use std::future::Future;
 use std::time::Duration;
 
-use crate::driver::redis::{RedisClient, RedisKeyspace};
 use crate::error::RedisResultExt;
+use crate::redis::{RedisClient, RedisKeyspace};
 use crate::DataLayerError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,6 +96,59 @@ impl RedisKvRunner {
         .await
     }
 
+    pub async fn get(&self, key: &str) -> Result<Option<String>, DataLayerError> {
+        let namespaced_key = self.keyspace.key(key);
+        self.run_with_timeout("redis kv get", async {
+            let mut connection = self
+                .client
+                .get_multiplexed_async_connection()
+                .await
+                .map_redis_err()?;
+            redis::cmd("GET")
+                .arg(&namespaced_key)
+                .query_async(&mut connection)
+                .await
+                .map_redis_err()
+        })
+        .await
+    }
+
+    pub async fn getdel(&self, key: &str) -> Result<Option<String>, DataLayerError> {
+        let namespaced_key = self.keyspace.key(key);
+        self.run_with_timeout("redis kv getdel", async {
+            let mut connection = self
+                .client
+                .get_multiplexed_async_connection()
+                .await
+                .map_redis_err()?;
+            redis::cmd("GETDEL")
+                .arg(&namespaced_key)
+                .query_async(&mut connection)
+                .await
+                .map_redis_err()
+        })
+        .await
+    }
+
+    pub async fn exists(&self, key: &str) -> Result<bool, DataLayerError> {
+        let namespaced_key = self.keyspace.key(key);
+        let exists = self
+            .run_with_timeout("redis kv exists", async {
+                let mut connection = self
+                    .client
+                    .get_multiplexed_async_connection()
+                    .await
+                    .map_redis_err()?;
+                redis::cmd("EXISTS")
+                    .arg(&namespaced_key)
+                    .query_async::<i64>(&mut connection)
+                    .await
+                    .map_redis_err()
+            })
+            .await?;
+        Ok(exists > 0)
+    }
+
     pub async fn del(&self, key: &str) -> Result<i64, DataLayerError> {
         let namespaced_key = self.keyspace.key(key);
         self.run_with_timeout("redis kv del", async {
@@ -136,7 +189,7 @@ impl RedisKvRunner {
 #[cfg(test)]
 mod tests {
     use super::{RedisKvRunner, RedisKvRunnerConfig};
-    use crate::driver::redis::{RedisClientConfig, RedisClientFactory, RedisKeyspace};
+    use crate::redis::{RedisClientConfig, RedisClientFactory, RedisKeyspace};
 
     fn build_runner() -> RedisKvRunner {
         let config = RedisClientConfig {

@@ -2,7 +2,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 
-use aether_runtime::{ConcurrencyGate, DistributedConcurrencyGate};
+use aether_runtime::ConcurrencyGate;
+use aether_runtime_state::{RuntimeSemaphore, RuntimeState};
 
 use super::super::async_task::{VideoTaskPollerConfig, VideoTaskService};
 use super::super::cache::{
@@ -47,11 +48,12 @@ pub struct AppState {
     #[cfg(test)]
     pub(crate) execution_runtime_sync_override: Option<TestExecutionRuntimeSyncOverride>,
     pub(crate) data: Arc<GatewayDataState>,
+    pub(crate) runtime_state: Arc<RuntimeState>,
     pub(crate) usage_runtime: Arc<usage::UsageRuntime>,
     pub(crate) video_tasks: Arc<VideoTaskService>,
     pub(crate) video_task_poller: Option<VideoTaskPollerConfig>,
     pub(crate) request_gate: Option<Arc<ConcurrencyGate>>,
-    pub(crate) distributed_request_gate: Option<Arc<DistributedConcurrencyGate>>,
+    pub(crate) distributed_request_gate: Option<Arc<RuntimeSemaphore>>,
     pub(crate) client: reqwest::Client,
     pub(crate) auth_context_cache: Arc<AuthContextCache>,
     pub(crate) auth_api_key_last_used_cache: Arc<AuthApiKeyLastUsedCache>,

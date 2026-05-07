@@ -1,10 +1,10 @@
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use aether_data::driver::redis::{RedisKvRunner, RedisLockLease, RedisLockRunner};
 use aether_data_contracts::repository::provider_catalog::{
     StoredProviderCatalogEndpoint, StoredProviderCatalogKey, StoredProviderCatalogProvider,
 };
+use aether_runtime_state::{RuntimeLockLease, RuntimeState};
 use serde_json::Value;
 use tracing::{debug, info, warn};
 
@@ -177,31 +177,20 @@ fn probe_stamp_key(provider_id: &str, key_id: &str) -> String {
 }
 
 async fn load_probe_timestamps(
-    runner: Option<&RedisKvRunner>,
+    runtime: &RuntimeState,
     provider_id: &str,
     key_ids: &[String],
 ) -> BTreeMap<String, u64> {
-    let Some(runner) = runner else {
-        return BTreeMap::new();
-    };
     if key_ids.is_empty() {
         return BTreeMap::new();
     }
 
-    let Ok(mut connection) = runner.client().get_multiplexed_async_connection().await else {
-        debug!("gateway pool quota probe: failed to connect redis for stamp read");
-        return BTreeMap::new();
-    };
-    let redis_keys = key_ids
+    let runtime_keys = key_ids
         .iter()
-        .map(|key_id| runner.keyspace().key(&probe_stamp_key(provider_id, key_id)))
+        .map(|key_id| probe_stamp_key(provider_id, key_id))
         .collect::<Vec<_>>();
-    let Ok(values) = redis::cmd("MGET")
-        .arg(redis_keys)
-        .query_async::<Vec<Option<String>>>(&mut connection)
-        .await
-    else {
-        debug!("gateway pool quota probe: failed to read redis probe stamps");
+    let Ok(values) = runtime.kv_get_many(&runtime_keys).await else {
+        debug!("gateway pool quota probe: failed to read runtime probe stamps");
         return BTreeMap::new();
     };
 
@@ -215,55 +204,43 @@ async fn load_probe_timestamps(
 }
 
 async fn mark_probe_timestamps(
-    runner: Option<&RedisKvRunner>,
+    runtime: &RuntimeState,
     provider_id: &str,
     key_ids: &[String],
     now_ts: u64,
     interval_seconds: u64,
 ) {
-    let Some(runner) = runner else {
-        return;
-    };
     if key_ids.is_empty() {
         return;
     }
 
-    let Ok(mut connection) = runner.client().get_multiplexed_async_connection().await else {
-        debug!("gateway pool quota probe: failed to connect redis for stamp write");
-        return;
-    };
     let ttl_seconds = interval_seconds.saturating_mul(2).max(120);
     let value = now_ts.to_string();
-    let mut pipeline = redis::pipe();
     for key_id in key_ids {
-        pipeline
-            .cmd("SETEX")
-            .arg(runner.keyspace().key(&probe_stamp_key(provider_id, key_id)))
-            .arg(ttl_seconds)
-            .arg(&value)
-            .ignore();
-    }
-    if pipeline.query_async::<()>(&mut connection).await.is_err() {
-        debug!("gateway pool quota probe: failed to write redis probe stamps");
+        if runtime
+            .kv_set(
+                &probe_stamp_key(provider_id, key_id),
+                value.clone(),
+                Some(Duration::from_secs(ttl_seconds)),
+            )
+            .await
+            .is_err()
+        {
+            debug!("gateway pool quota probe: failed to write runtime probe stamp");
+        }
     }
 }
 
 async fn acquire_provider_probe_lock(
-    runner: Option<&RedisLockRunner>,
+    runtime: &RuntimeState,
     provider_id: &str,
-) -> Option<RedisLockLease> {
-    let Some(runner) = runner else {
-        return None;
-    };
-    let lock_key = runner
-        .keyspace()
-        .lock_key(&format!("pool_quota_probe:{provider_id}"));
+) -> Option<RuntimeLockLease> {
     let owner = format!("aether-gateway-pool-probe-{}", std::process::id());
-    match runner
-        .try_acquire(
-            &lock_key,
+    match runtime
+        .lock_try_acquire(
+            &format!("pool_quota_probe:{provider_id}"),
             &owner,
-            Some(POOL_QUOTA_PROBE_PROVIDER_LOCK_TTL_MS),
+            Duration::from_millis(POOL_QUOTA_PROBE_PROVIDER_LOCK_TTL_MS),
         )
         .await
     {
@@ -272,40 +249,36 @@ async fn acquire_provider_probe_lock(
             debug!(
                 provider_id,
                 error = %err,
-                "gateway pool quota probe: failed to acquire redis provider lock"
+                "gateway pool quota probe: failed to acquire runtime provider lock"
             );
             None
         }
     }
 }
 
-async fn release_provider_probe_lock(
-    runner: Option<&RedisLockRunner>,
-    lease: Option<RedisLockLease>,
-) {
-    let (Some(runner), Some(lease)) = (runner, lease) else {
+async fn release_provider_probe_lock(runtime: &RuntimeState, lease: Option<RuntimeLockLease>) {
+    let Some(lease) = lease else {
         return;
     };
-    if let Err(err) = runner.release(&lease).await {
+    if let Err(err) = runtime.lock_release(&lease).await {
         debug!(
             error = %err,
-            "gateway pool quota probe: failed to release redis provider lock"
+            "gateway pool quota probe: failed to release runtime provider lock"
         );
     }
 }
 
 async fn select_keys_for_provider(
     state: &AppState,
-    redis_kv: Option<&RedisKvRunner>,
-    redis_lock: Option<&RedisLockRunner>,
+    runtime: &RuntimeState,
     provider: &StoredProviderCatalogProvider,
     provider_type: &str,
     interval_seconds: u64,
     max_keys_per_provider: usize,
     now_ts: u64,
 ) -> Result<Vec<StoredProviderCatalogKey>, GatewayError> {
-    let lease = acquire_provider_probe_lock(redis_lock, &provider.id).await;
-    if redis_lock.is_some() && lease.is_none() {
+    let lease = acquire_provider_probe_lock(runtime, &provider.id).await;
+    if lease.is_none() {
         return Ok(Vec::new());
     }
 
@@ -321,7 +294,7 @@ async fn select_keys_for_provider(
         }
 
         let key_ids = keys.iter().map(|key| key.id.clone()).collect::<Vec<_>>();
-        let probe_stamps = load_probe_timestamps(redis_kv, &provider.id, &key_ids).await;
+        let probe_stamps = load_probe_timestamps(runtime, &provider.id, &key_ids).await;
         let selected_ids = select_pool_quota_probe_key_ids(
             &keys,
             provider_type,
@@ -335,7 +308,7 @@ async fn select_keys_for_provider(
         }
 
         mark_probe_timestamps(
-            redis_kv,
+            runtime,
             &provider.id,
             &selected_ids,
             now_ts,
@@ -354,7 +327,7 @@ async fn select_keys_for_provider(
     }
     .await;
 
-    release_provider_probe_lock(redis_lock, lease).await;
+    release_provider_probe_lock(runtime, lease).await;
     result
 }
 
@@ -461,8 +434,6 @@ pub(crate) async fn perform_pool_quota_probe_once_with_config(
             .push(endpoint);
     }
 
-    let redis_kv = state.redis_kv_runner();
-    let redis_lock = state.data.oauth_refresh_lock_runner();
     let admin_state = AdminAppState::new(state);
     let now_ts = now_unix_secs();
     let mut summary = PoolQuotaProbeRunSummary {
@@ -487,8 +458,7 @@ pub(crate) async fn perform_pool_quota_probe_once_with_config(
         let interval_seconds = interval_minutes.clamp(1, 1440).saturating_mul(60);
         let keys = select_keys_for_provider(
             state,
-            redis_kv.as_ref(),
-            redis_lock.as_ref(),
+            state.runtime_state.as_ref(),
             &provider,
             &provider_type,
             interval_seconds,

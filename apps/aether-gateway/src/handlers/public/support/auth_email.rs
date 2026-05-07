@@ -41,67 +41,6 @@ pub(super) fn auth_email_verified_key(email: &str) -> String {
     format!("{AUTH_EMAIL_VERIFIED_PREFIX}{email}")
 }
 
-pub(super) fn load_auth_email_verification_entry_for_tests(
-    _state: &AppState,
-    _key: &str,
-) -> Option<String> {
-    #[cfg(test)]
-    {
-        return _state
-            .auth_email_verification_store
-            .as_ref()
-            .and_then(|store| {
-                store
-                    .lock()
-                    .expect("auth email verification store should lock")
-                    .get(_key)
-                    .cloned()
-            });
-    }
-
-    #[allow(unreachable_code)]
-    None
-}
-
-pub(super) fn save_auth_email_verification_entry_for_tests(
-    _state: &AppState,
-    _key: &str,
-    _value: &str,
-) -> bool {
-    #[cfg(test)]
-    {
-        if let Some(store) = _state.auth_email_verification_store.as_ref() {
-            store
-                .lock()
-                .expect("auth email verification store should lock")
-                .insert(_key.to_string(), _value.to_string());
-            return true;
-        }
-    }
-
-    false
-}
-
-pub(super) fn delete_auth_email_verification_entries_for_tests(
-    _state: &AppState,
-    _keys: &[String],
-) -> bool {
-    #[cfg(test)]
-    {
-        if let Some(store) = _state.auth_email_verification_store.as_ref() {
-            let mut guard = store
-                .lock()
-                .expect("auth email verification store should lock");
-            for key in _keys {
-                guard.remove(key);
-            }
-            return true;
-        }
-    }
-
-    false
-}
-
 pub(super) fn record_auth_email_delivery_for_tests(
     _state: &AppState,
     _payload: serde_json::Value,
@@ -418,21 +357,7 @@ pub(super) async fn read_auth_email_verification_code(
     email: &str,
 ) -> Result<Option<StoredAuthEmailVerificationCode>, GatewayError> {
     let key = auth_email_verification_key(email);
-    let raw = if let Some(runner) = state.redis_kv_runner() {
-        let mut connection = runner
-            .client()
-            .get_multiplexed_async_connection()
-            .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))?;
-        let namespaced_key = runner.keyspace().key(&key);
-        redis::cmd("GET")
-            .arg(&namespaced_key)
-            .query_async::<Option<String>>(&mut connection)
-            .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))?
-    } else {
-        load_auth_email_verification_entry_for_tests(state, &key)
-    };
+    let raw = state.runtime_kv_get(&key).await?;
     raw.map(|value| {
         serde_json::from_str::<StoredAuthEmailVerificationCode>(&value)
             .map_err(|err| GatewayError::Internal(err.to_string()))
@@ -445,21 +370,7 @@ pub(super) async fn auth_email_is_verified(
     email: &str,
 ) -> Result<bool, GatewayError> {
     let key = auth_email_verified_key(email);
-    if let Some(runner) = state.redis_kv_runner() {
-        let mut connection = runner
-            .client()
-            .get_multiplexed_async_connection()
-            .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))?;
-        let namespaced_key = runner.keyspace().key(&key);
-        let exists = redis::cmd("EXISTS")
-            .arg(&namespaced_key)
-            .query_async::<i64>(&mut connection)
-            .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))?;
-        return Ok(exists > 0);
-    }
-    Ok(load_auth_email_verification_entry_for_tests(state, &key).is_some())
+    state.runtime_kv_exists(&key).await
 }
 
 pub(super) async fn mark_auth_email_verified(
@@ -467,16 +378,10 @@ pub(super) async fn mark_auth_email_verified(
     email: &str,
 ) -> Result<bool, GatewayError> {
     let key = auth_email_verified_key(email);
-    if let Some(runner) = state.redis_kv_runner() {
-        runner
-            .setex(&key, "verified", Some(AUTH_EMAIL_VERIFIED_TTL_SECS))
-            .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))?;
-        return Ok(true);
-    }
-    Ok(save_auth_email_verification_entry_for_tests(
-        state, &key, "verified",
-    ))
+    state
+        .runtime_kv_setex(&key, "verified", AUTH_EMAIL_VERIFIED_TTL_SECS)
+        .await?;
+    Ok(true)
 }
 
 pub(super) async fn clear_auth_email_pending_code(
@@ -484,17 +389,7 @@ pub(super) async fn clear_auth_email_pending_code(
     email: &str,
 ) -> Result<bool, GatewayError> {
     let verification_key = auth_email_verification_key(email);
-    if let Some(runner) = state.redis_kv_runner() {
-        let _ = runner
-            .del(&verification_key)
-            .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))?;
-        return Ok(true);
-    }
-    Ok(delete_auth_email_verification_entries_for_tests(
-        state,
-        &[verification_key],
-    ))
+    state.runtime_kv_del(&verification_key).await
 }
 
 pub(super) async fn clear_auth_email_verification(
@@ -503,21 +398,9 @@ pub(super) async fn clear_auth_email_verification(
 ) -> Result<bool, GatewayError> {
     let verification_key = auth_email_verification_key(email);
     let verified_key = auth_email_verified_key(email);
-    if let Some(runner) = state.redis_kv_runner() {
-        let _ = runner
-            .del(&verification_key)
-            .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))?;
-        let _ = runner
-            .del(&verified_key)
-            .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))?;
-        return Ok(true);
-    }
-    Ok(delete_auth_email_verification_entries_for_tests(
-        state,
-        &[verification_key, verified_key],
-    ))
+    let deleted_pending = state.runtime_kv_del(&verification_key).await?;
+    let deleted_verified = state.runtime_kv_del(&verified_key).await?;
+    Ok(deleted_pending || deleted_verified)
 }
 
 pub(super) async fn store_auth_email_verification_code(
@@ -533,16 +416,8 @@ pub(super) async fn store_auth_email_verification_code(
         "created_at": created_at.to_rfc3339(),
     })
     .to_string();
-    if let Some(runner) = state.redis_kv_runner() {
-        runner
-            .setex(&key, &value, Some(ttl_seconds))
-            .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))?;
-        return Ok(true);
-    }
-    Ok(save_auth_email_verification_entry_for_tests(
-        state, &key, &value,
-    ))
+    state.runtime_kv_setex(&key, &value, ttl_seconds).await?;
+    Ok(true)
 }
 
 pub(super) async fn read_auth_smtp_config(

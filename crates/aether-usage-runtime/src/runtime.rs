@@ -3,9 +3,9 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use aether_contracts::ExecutionTelemetry;
-use aether_data::driver::redis::RedisStreamRunner;
 use aether_data_contracts::repository::usage::UpsertUsageRecord;
 use aether_data_contracts::DataLayerError;
+use aether_runtime_state::RuntimeQueueStore;
 use async_trait::async_trait;
 use tracing::warn;
 
@@ -61,8 +61,8 @@ pub trait UsageRuntimeAccess:
     + Sync
 {
     fn has_usage_writer(&self) -> bool;
-    fn has_usage_worker_runner(&self) -> bool;
-    fn usage_worker_runner(&self) -> Option<RedisStreamRunner>;
+    fn has_usage_worker_queue(&self) -> bool;
+    fn usage_worker_queue(&self) -> Option<Arc<dyn RuntimeQueueStore>>;
 
     async fn body_capture_policy(&self) -> Result<UsageBodyCapturePolicy, DataLayerError> {
         Ok(UsageBodyCapturePolicy::default())
@@ -104,7 +104,7 @@ impl UsageRuntime {
     where
         T: UsageRuntimeAccess,
     {
-        self.is_enabled() && data.has_usage_writer() && data.has_usage_worker_runner()
+        self.is_enabled() && data.has_usage_writer() && data.has_usage_worker_queue()
     }
 
     pub fn spawn_worker<T>(&self, data: Arc<T>) -> Option<tokio::task::JoinHandle<()>>
@@ -114,7 +114,7 @@ impl UsageRuntime {
         if !self.can_spawn_worker(data.as_ref()) {
             return None;
         }
-        let runner = data.usage_worker_runner()?;
+        let runner = data.usage_worker_queue()?;
         let worker = build_usage_queue_worker(runner, data, self.config.clone()).ok()?;
         Some(worker.spawn())
     }
@@ -352,7 +352,7 @@ impl UsageRuntime {
     where
         T: UsageRuntimeAccess,
     {
-        if let Some(runner) = data.usage_worker_runner() {
+        if let Some(runner) = data.usage_worker_queue() {
             match UsageQueue::new(runner, self.config.clone()) {
                 Ok(queue) => match queue.enqueue(&event).await {
                     Ok(_) => return,
@@ -543,16 +543,14 @@ fn now_unix_secs() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
 
-    use aether_data::driver::redis::{
-        RedisClientConfig, RedisClientFactory, RedisStreamRunner, RedisStreamRunnerConfig,
-    };
     use aether_data_contracts::repository::settlement::{
         StoredUsageSettlement, UsageSettlementInput,
     };
     use aether_data_contracts::repository::usage::{StoredRequestUsageAudit, UpsertUsageRecord};
     use aether_data_contracts::DataLayerError;
+    use aether_runtime_state::{MemoryRuntimeStateConfig, RuntimeQueueStore, RuntimeState};
     use async_trait::async_trait;
     use serde_json::json;
 
@@ -571,27 +569,9 @@ mod tests {
         records: Mutex<Vec<UpsertUsageRecord>>,
     }
 
-    struct RedisConfiguredUsageStore {
+    struct QueueConfiguredUsageStore {
         inner: NoRedisUsageStore,
-        runner: RedisStreamRunner,
-    }
-
-    fn sample_runner() -> RedisStreamRunner {
-        let config = RedisClientConfig {
-            url: "redis://127.0.0.1/0".to_string(),
-            key_prefix: Some("aether".to_string()),
-        };
-        let client = RedisClientFactory::new(config.clone())
-            .expect("factory should build")
-            .connect_lazy()
-            .expect("client should build");
-
-        RedisStreamRunner::new(
-            client,
-            config.keyspace(),
-            RedisStreamRunnerConfig::default(),
-        )
-        .expect("runner should build")
+        queue: Arc<dyn RuntimeQueueStore>,
     }
 
     #[async_trait]
@@ -644,17 +624,17 @@ mod tests {
             true
         }
 
-        fn has_usage_worker_runner(&self) -> bool {
+        fn has_usage_worker_queue(&self) -> bool {
             false
         }
 
-        fn usage_worker_runner(&self) -> Option<RedisStreamRunner> {
+        fn usage_worker_queue(&self) -> Option<Arc<dyn RuntimeQueueStore>> {
             None
         }
     }
 
     #[async_trait]
-    impl UsageRecordWriter for RedisConfiguredUsageStore {
+    impl UsageRecordWriter for QueueConfiguredUsageStore {
         async fn upsert_usage_record(
             &self,
             record: UpsertUsageRecord,
@@ -664,7 +644,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl UsageSettlementWriter for RedisConfiguredUsageStore {
+    impl UsageSettlementWriter for QueueConfiguredUsageStore {
         fn has_usage_settlement_writer(&self) -> bool {
             false
         }
@@ -678,14 +658,14 @@ mod tests {
     }
 
     #[async_trait]
-    impl UsageBillingEventEnricher for RedisConfiguredUsageStore {
+    impl UsageBillingEventEnricher for QueueConfiguredUsageStore {
         async fn enrich_usage_event(&self, _event: &mut UsageEvent) -> Result<(), DataLayerError> {
             Ok(())
         }
     }
 
     #[async_trait]
-    impl ManualProxyNodeCounter for RedisConfiguredUsageStore {
+    impl ManualProxyNodeCounter for QueueConfiguredUsageStore {
         async fn increment_manual_proxy_node_requests(
             &self,
             _node_id: &str,
@@ -697,17 +677,17 @@ mod tests {
         }
     }
 
-    impl UsageRuntimeAccess for RedisConfiguredUsageStore {
+    impl UsageRuntimeAccess for QueueConfiguredUsageStore {
         fn has_usage_writer(&self) -> bool {
             true
         }
 
-        fn has_usage_worker_runner(&self) -> bool {
+        fn has_usage_worker_queue(&self) -> bool {
             true
         }
 
-        fn usage_worker_runner(&self) -> Option<RedisStreamRunner> {
-            Some(self.runner.clone())
+        fn usage_worker_queue(&self) -> Option<Arc<dyn RuntimeQueueStore>> {
+            Some(Arc::clone(&self.queue))
         }
     }
 
@@ -750,10 +730,9 @@ mod tests {
             ..UsageRuntimeConfig::default()
         })
         .expect("usage runtime should build");
-        let runner = sample_runner();
-        let store = RedisConfiguredUsageStore {
+        let store = QueueConfiguredUsageStore {
             inner: NoRedisUsageStore::default(),
-            runner,
+            queue: Arc::new(RuntimeState::memory(MemoryRuntimeStateConfig::default())),
         };
         let event = UsageEvent::new(
             UsageEventType::Failed,

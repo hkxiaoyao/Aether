@@ -49,27 +49,11 @@ pub(super) async fn read_admin_provider_ops_balance_cache(
     state: &AdminAppState<'_>,
     provider_id: &str,
 ) -> AdminProviderOpsBalanceCacheLookup {
-    let Some(runner) = state.redis_kv_runner() else {
-        return AdminProviderOpsBalanceCacheLookup::Unavailable;
-    };
-    let mut connection = match runner.client().get_multiplexed_async_connection().await {
-        Ok(connection) => connection,
-        Err(err) => {
-            warn!(error = %err, provider_id, "failed to connect to redis for provider ops balance cache");
-            return AdminProviderOpsBalanceCacheLookup::Unavailable;
-        }
-    };
-    let namespaced_key = runner.keyspace().key(&format!(
-        "{ADMIN_PROVIDER_OPS_BALANCE_CACHE_PREFIX}{provider_id}"
-    ));
-    let raw = match redis::cmd("GET")
-        .arg(&namespaced_key)
-        .query_async::<Option<String>>(&mut connection)
-        .await
-    {
+    let raw_key = format!("{ADMIN_PROVIDER_OPS_BALANCE_CACHE_PREFIX}{provider_id}");
+    let raw = match state.runtime_state().kv_get(&raw_key).await {
         Ok(raw) => raw,
         Err(err) => {
-            warn!(error = %err, provider_id, "failed to read provider ops balance cache");
+            warn!(error = %err, provider_id, "failed to read provider ops balance runtime cache");
             return AdminProviderOpsBalanceCacheLookup::Unavailable;
         }
     };
@@ -93,9 +77,6 @@ pub(super) async fn store_admin_provider_ops_balance_cache(
     let Some(ttl_seconds) = balance_cache_ttl_seconds(payload) else {
         return;
     };
-    let Some(runner) = state.redis_kv_runner() else {
-        return;
-    };
     let serialized = match serde_json::to_string(payload) {
         Ok(serialized) => serialized,
         Err(err) => {
@@ -107,11 +88,12 @@ pub(super) async fn store_admin_provider_ops_balance_cache(
             return;
         }
     };
-    if let Err(err) = runner
-        .setex(
+    if let Err(err) = state
+        .runtime_state()
+        .kv_set(
             &format!("{ADMIN_PROVIDER_OPS_BALANCE_CACHE_PREFIX}{provider_id}"),
-            &serialized,
-            Some(ttl_seconds),
+            serialized,
+            Some(Duration::from_secs(ttl_seconds)),
         )
         .await
     {
@@ -123,11 +105,9 @@ pub(super) async fn clear_admin_provider_ops_balance_cache(
     state: &AdminAppState<'_>,
     provider_id: &str,
 ) {
-    let Some(runner) = state.redis_kv_runner() else {
-        return;
-    };
-    if let Err(err) = runner
-        .del(&format!(
+    if let Err(err) = state
+        .runtime_state()
+        .kv_delete(&format!(
             "{ADMIN_PROVIDER_OPS_BALANCE_CACHE_PREFIX}{provider_id}"
         ))
         .await
@@ -243,15 +223,11 @@ fn balance_cache_ttl_seconds(payload: &Value) -> Option<u64> {
 
 fn admin_provider_ops_balance_refresh_key(state: &AdminAppState<'_>, provider_id: &str) -> String {
     let raw_key = format!("{ADMIN_PROVIDER_OPS_BALANCE_REFRESH_PREFIX}{provider_id}");
-    if let Some(runner) = state.redis_kv_runner() {
-        format!(
-            "{:p}:{}",
-            state.app(),
-            runner.keyspace().key(raw_key.as_str())
-        )
-    } else {
-        format!("{:p}:{raw_key}", state.app())
-    }
+    format!(
+        "{:p}:{}",
+        state.app(),
+        state.runtime_state().namespace_key(raw_key.as_str())
+    )
 }
 
 async fn finish_refresh_provider(refresh_key: &str) {

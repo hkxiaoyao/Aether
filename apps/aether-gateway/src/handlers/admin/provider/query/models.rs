@@ -1553,20 +1553,8 @@ async fn provider_query_read_cached_models(
     provider_id: &str,
     key_id: &str,
 ) -> Option<Vec<Value>> {
-    let runner = state.app().redis_kv_runner()?;
-    let cache_key = runner
-        .keyspace()
-        .key(&format!("upstream_models:{provider_id}:{key_id}"));
-    let mut connection = runner
-        .client()
-        .get_multiplexed_async_connection()
-        .await
-        .ok()?;
-    let raw = redis::cmd("GET")
-        .arg(&cache_key)
-        .query_async::<Option<String>>(&mut connection)
-        .await
-        .ok()??;
+    let cache_key = format!("upstream_models:{provider_id}:{key_id}");
+    let raw = state.runtime_state().kv_get(&cache_key).await.ok()??;
     let parsed = serde_json::from_str::<Vec<Value>>(&raw).ok()?;
     Some(aggregate_models_for_cache(&parsed))
 }
@@ -1575,20 +1563,8 @@ async fn provider_query_read_provider_cached_models(
     state: &AdminAppState<'_>,
     provider_id: &str,
 ) -> Option<Vec<Value>> {
-    let runner = state.app().redis_kv_runner()?;
-    let cache_key = runner.keyspace().key(&format!(
-        "{ANTIGRAVITY_PROVIDER_CACHE_KEY_PREFIX}{provider_id}"
-    ));
-    let mut connection = runner
-        .client()
-        .get_multiplexed_async_connection()
-        .await
-        .ok()?;
-    let raw = redis::cmd("GET")
-        .arg(&cache_key)
-        .query_async::<Option<String>>(&mut connection)
-        .await
-        .ok()??;
+    let cache_key = format!("{ANTIGRAVITY_PROVIDER_CACHE_KEY_PREFIX}{provider_id}");
+    let raw = state.runtime_state().kv_get(&cache_key).await.ok()??;
     let parsed = serde_json::from_str::<Vec<Value>>(&raw).ok()?;
     Some(aggregate_models_for_cache(&parsed))
 }
@@ -1598,18 +1574,18 @@ async fn provider_query_write_provider_cached_models(
     provider_id: &str,
     models: &[Value],
 ) {
-    let Some(runner) = state.app().redis_kv_runner() else {
-        return;
-    };
     let Ok(serialized) = serde_json::to_string(&aggregate_models_for_cache(models)) else {
         return;
     };
     let cache_key = format!("{ANTIGRAVITY_PROVIDER_CACHE_KEY_PREFIX}{provider_id}");
-    let _ = runner
-        .setex(
+    let _ = state
+        .runtime_state()
+        .kv_set(
             &cache_key,
-            &serialized,
-            Some(aether_model_fetch::model_fetch_interval_minutes().saturating_mul(60)),
+            serialized,
+            Some(std::time::Duration::from_secs(
+                aether_model_fetch::model_fetch_interval_minutes().saturating_mul(60),
+            )),
         )
         .await;
 }

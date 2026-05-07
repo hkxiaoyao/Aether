@@ -1,10 +1,7 @@
 use super::super::cache_config::ADMIN_MONITORING_REDIS_CACHE_CATEGORIES;
-use super::super::cache_route_helpers::{
-    admin_monitoring_cache_redis_category_from_path, admin_monitoring_redis_unavailable_response,
-};
+use super::super::cache_route_helpers::admin_monitoring_cache_redis_category_from_path;
 use super::super::cache_store::{
-    admin_monitoring_has_test_redis_keys, delete_admin_monitoring_namespaced_keys,
-    list_admin_monitoring_namespaced_keys,
+    delete_admin_monitoring_namespaced_keys, list_admin_monitoring_namespaced_keys,
 };
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::GatewayError;
@@ -30,10 +27,6 @@ pub(in super::super) async fn build_admin_monitoring_redis_keys_delete_response(
     else {
         return Ok(admin_monitoring_unknown_cache_category_response(&category));
     };
-
-    if state.redis_kv_runner().is_none() && !admin_monitoring_has_test_redis_keys(state) {
-        return Ok(admin_monitoring_redis_unavailable_response());
-    }
 
     let raw_keys = list_admin_monitoring_namespaced_keys(state, pattern).await?;
     let deleted_count = delete_admin_monitoring_namespaced_keys(state, &raw_keys).await?;

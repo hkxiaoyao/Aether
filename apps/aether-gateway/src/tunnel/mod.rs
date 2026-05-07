@@ -14,6 +14,7 @@ use aether_data::repository::proxy_nodes::{
     ProxyNodeHeartbeatMutation, ProxyNodeTunnelStatusMutation, StoredProxyNode,
 };
 use aether_runtime::MetricSample;
+use aether_runtime_state::{MemoryRuntimeStateConfig, RuntimeState};
 use async_stream::stream;
 use axum::body::{Body, Bytes};
 use axum::extract::ws::WebSocketUpgrade;
@@ -102,6 +103,7 @@ pub(crate) struct TunnelAttachmentRecord {
 #[derive(Debug, Clone)]
 pub(crate) struct TunnelAttachmentDirectory {
     identity: Arc<TunnelInstanceIdentity>,
+    runtime_state: Arc<RuntimeState>,
 }
 
 impl TunnelAttachmentDirectory {
@@ -118,6 +120,7 @@ impl TunnelAttachmentDirectory {
                     .map(|value| value.clamp(15, 3600))
                     .unwrap_or(DEFAULT_ATTACHMENT_TTL_SECS),
             }),
+            runtime_state: Arc::new(RuntimeState::memory(MemoryRuntimeStateConfig::default())),
         }
     }
 
@@ -132,7 +135,13 @@ impl TunnelAttachmentDirectory {
                 relay_base_url: relay_base_url.map(Into::into),
                 attachment_ttl_secs,
             }),
+            runtime_state: Arc::new(RuntimeState::memory(MemoryRuntimeStateConfig::default())),
         }
+    }
+
+    fn with_runtime_state(mut self, runtime_state: Arc<RuntimeState>) -> Self {
+        self.runtime_state = runtime_state;
+        self
     }
 
     #[cfg(test)]
@@ -257,7 +266,7 @@ impl TunnelAttachmentDirectory {
         data: &GatewayDataState,
         node_id: &str,
     ) -> Result<Option<TunnelAttachmentRecord>, String> {
-        match self.read_attachment_record_from_redis(data, node_id).await {
+        match self.read_attachment_record_from_runtime(node_id).await {
             Ok(Some(record)) => return Ok(Some(record)),
             Ok(None) => {}
             Err(error) => {
@@ -272,28 +281,18 @@ impl TunnelAttachmentDirectory {
             .await
     }
 
-    async fn read_attachment_record_from_redis(
+    async fn read_attachment_record_from_runtime(
         &self,
-        data: &GatewayDataState,
         node_id: &str,
     ) -> Result<Option<TunnelAttachmentRecord>, String> {
-        let Some(runner) = data.kv_runner() else {
-            return Ok(None);
-        };
-        let mut connection = runner
-            .client()
-            .get_multiplexed_async_connection()
+        let raw = self
+            .runtime_state
+            .kv_get(&tunnel_attachment_redis_key(node_id))
             .await
-            .map_err(|err| format!("attachment redis connect failed: {err}"))?;
-        let namespaced_key = runner.keyspace().key(&tunnel_attachment_redis_key(node_id));
-        let raw = redis::cmd("GET")
-            .arg(&namespaced_key)
-            .query_async::<Option<String>>(&mut connection)
-            .await
-            .map_err(|err| format!("attachment redis read failed: {err}"))?;
+            .map_err(|err| format!("attachment runtime read failed: {err}"))?;
         raw.map(|value| {
             serde_json::from_str::<TunnelAttachmentRecord>(&value)
-                .map_err(|err| format!("invalid redis tunnel attachment record: {err}"))
+                .map_err(|err| format!("invalid runtime tunnel attachment record: {err}"))
         })
         .transpose()
     }
@@ -323,21 +322,20 @@ impl TunnelAttachmentDirectory {
     ) -> Result<(), String> {
         let serialized = serde_json::to_string(record)
             .map_err(|err| format!("attachment serialization failed: {err}"))?;
-        if let Some(runner) = data.kv_runner() {
-            if let Err(error) = runner
-                .setex(
-                    &tunnel_attachment_redis_key(node_id),
-                    &serialized,
-                    Some(self.identity.attachment_ttl_secs),
-                )
-                .await
-            {
-                warn!(
-                    error = %error,
-                    node_id = %node_id,
-                    "failed to write tunnel attachment to redis; keeping system_config shadow only"
-                );
-            }
+        if let Err(error) = self
+            .runtime_state
+            .kv_set(
+                &tunnel_attachment_redis_key(node_id),
+                serialized.clone(),
+                Some(Duration::from_secs(self.identity.attachment_ttl_secs)),
+            )
+            .await
+        {
+            warn!(
+                error = %error,
+                node_id = %node_id,
+                "failed to write tunnel attachment to runtime state; keeping system_config shadow only"
+            );
         }
         let value = serde_json::to_value(record)
             .map_err(|err| format!("attachment serialization failed: {err}"))?;
@@ -352,14 +350,16 @@ impl TunnelAttachmentDirectory {
         data: &GatewayDataState,
         node_id: &str,
     ) -> Result<(), String> {
-        if let Some(runner) = data.kv_runner() {
-            if let Err(error) = runner.del(&tunnel_attachment_redis_key(node_id)).await {
-                warn!(
-                    error = %error,
-                    node_id = %node_id,
-                    "failed to delete tunnel attachment from redis; clearing system_config shadow anyway"
-                );
-            }
+        if let Err(error) = self
+            .runtime_state
+            .kv_delete(&tunnel_attachment_redis_key(node_id))
+            .await
+        {
+            warn!(
+                error = %error,
+                node_id = %node_id,
+                "failed to delete tunnel attachment from runtime state; clearing system_config shadow anyway"
+            );
         }
         data.delete_system_config_value(&tunnel_attachment_key(node_id))
             .await
@@ -396,6 +396,16 @@ impl EmbeddedTunnelState {
         Self::with_data_and_directory(data, TunnelAttachmentDirectory::from_environment())
     }
 
+    pub(crate) fn with_data_and_runtime_state(
+        data: Arc<GatewayDataState>,
+        runtime_state: Arc<RuntimeState>,
+    ) -> Self {
+        Self::with_data_and_directory(
+            data,
+            TunnelAttachmentDirectory::from_environment().with_runtime_state(runtime_state),
+        )
+    }
+
     pub(crate) fn with_data_and_identity(
         data: Arc<GatewayDataState>,
         instance_id: impl Into<String>,
@@ -405,6 +415,20 @@ impl EmbeddedTunnelState {
         Self::with_data_and_directory(
             data,
             TunnelAttachmentDirectory::from_parts(instance_id, relay_base_url, attachment_ttl_secs),
+        )
+    }
+
+    pub(crate) fn with_data_identity_and_runtime_state(
+        data: Arc<GatewayDataState>,
+        instance_id: impl Into<String>,
+        relay_base_url: Option<impl Into<String>>,
+        attachment_ttl_secs: u64,
+        runtime_state: Arc<RuntimeState>,
+    ) -> Self {
+        Self::with_data_and_directory(
+            data,
+            TunnelAttachmentDirectory::from_parts(instance_id, relay_base_url, attachment_ttl_secs)
+                .with_runtime_state(runtime_state),
         )
     }
 

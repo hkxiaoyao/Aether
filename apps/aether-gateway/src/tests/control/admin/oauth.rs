@@ -1118,9 +1118,16 @@ async fn gateway_handles_admin_provider_oauth_start_key_locally_with_trusted_adm
         .await
         .expect("request should succeed");
 
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.status(), StatusCode::OK);
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
-    assert_eq!(payload["detail"], "provider oauth redis unavailable");
+    assert_eq!(payload["provider_type"], "codex");
+    assert_eq!(
+        payload["redirect_uri"],
+        "http://localhost:1455/auth/callback"
+    );
+    assert!(payload["authorization_url"]
+        .as_str()
+        .is_some_and(|url| url.contains("state=")));
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();
@@ -1174,9 +1181,16 @@ async fn gateway_handles_admin_provider_oauth_start_provider_locally_with_truste
         .await
         .expect("request should succeed");
 
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.status(), StatusCode::OK);
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
-    assert_eq!(payload["detail"], "provider oauth redis unavailable");
+    assert_eq!(payload["provider_type"], "codex");
+    assert_eq!(
+        payload["redirect_uri"],
+        "http://localhost:1455/auth/callback"
+    );
+    assert!(payload["authorization_url"]
+        .as_str()
+        .is_some_and(|url| url.contains("state=")));
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();

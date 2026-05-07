@@ -130,7 +130,7 @@ async fn gateway_clears_admin_external_models_cache_locally_with_trusted_admin_p
     assert_eq!(response.status(), StatusCode::OK);
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
     assert_eq!(payload["cleared"], false);
-    assert_eq!(payload["message"], "Redis 未启用");
+    assert_eq!(payload["message"], "缓存不存在");
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();

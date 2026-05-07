@@ -426,22 +426,13 @@ pub(super) async fn delete_admin_monitoring_cache_affinity_raw_keys(
         return Ok(0);
     }
 
-    if let Some(runner) = state.redis_kv_runner() {
-        let mut connection = runner
-            .client()
-            .get_multiplexed_async_connection()
-            .await
-            .map_err(|err| {
-                GatewayError::Internal(format!("admin monitoring redis connect failed: {err}"))
-            })?;
-        let deleted = redis::cmd("DEL")
-            .arg(raw_keys)
-            .query_async::<i64>(&mut connection)
-            .await
-            .map_err(|err| {
-                GatewayError::Internal(format!("admin monitoring redis delete failed: {err}"))
-            })?;
-        return Ok(usize::try_from(deleted).unwrap_or(0));
+    let deleted = state
+        .runtime_state()
+        .kv_delete_many(raw_keys)
+        .await
+        .map_err(|err| GatewayError::Internal(format!("runtime cache delete failed: {err}")))?;
+    if deleted > 0 {
+        return Ok(deleted);
     }
 
     Ok(delete_admin_monitoring_cache_affinity_entries_for_tests(

@@ -12,3 +12,14 @@ pub use stream::{
     RedisConsumerGroup, RedisConsumerName, RedisStreamEntry, RedisStreamName,
     RedisStreamReclaimConfig, RedisStreamReclaimResult, RedisStreamRunner, RedisStreamRunnerConfig,
 };
+
+pub(crate) type RedisCmd = redis::Cmd;
+pub(crate) type RedisScript = redis::Script;
+
+pub(crate) fn cmd(name: &str) -> RedisCmd {
+    redis::cmd(name)
+}
+
+pub(crate) fn script(source: &str) -> RedisScript {
+    redis::Script::new(source)
+}

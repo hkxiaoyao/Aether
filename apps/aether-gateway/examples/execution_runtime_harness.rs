@@ -4,10 +4,8 @@ use clap::Parser;
 use tracing::info;
 
 use aether_gateway::{serve_execution_runtime_tcp, serve_execution_runtime_unix};
-use aether_runtime::{
-    init_service_runtime, DistributedConcurrencyGate, RedisDistributedConcurrencyConfig,
-    ServiceRuntimeConfig,
-};
+use aether_runtime::{init_service_runtime, ServiceRuntimeConfig};
+use aether_runtime_state::{RedisClientConfig, RuntimeSemaphoreConfig, RuntimeState};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -93,13 +91,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .ok_or_else(|| {
                         std::io::Error::new(
                             std::io::ErrorKind::InvalidInput,
-                            "AETHER_EXECUTION_RUNTIME_DISTRIBUTED_REQUEST_REDIS_URL is required when distributed request limit is enabled",
-                        )
+                    "AETHER_EXECUTION_RUNTIME_DISTRIBUTED_REQUEST_REDIS_URL is required when distributed request limit is enabled",
+                )
                 })?;
-            Some(DistributedConcurrencyGate::new_redis(
-                "execution_runtime_requests_distributed",
-                limit,
-                RedisDistributedConcurrencyConfig {
+            let runtime = RuntimeState::redis(
+                RedisClientConfig {
                     url: redis_url.to_string(),
                     key_prefix: args
                         .distributed_request_redis_key_prefix
@@ -107,6 +103,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .map(str::trim)
                         .filter(|value| !value.is_empty())
                         .map(ToOwned::to_owned),
+                },
+                Some(args.distributed_request_command_timeout_ms.max(1)),
+            )
+            .await?;
+            Some(runtime.semaphore(
+                "execution_runtime_requests_distributed",
+                limit,
+                RuntimeSemaphoreConfig {
                     lease_ttl_ms: args.distributed_request_lease_ttl_ms.max(1),
                     renew_interval_ms: args.distributed_request_renew_interval_ms.max(1),
                     command_timeout_ms: Some(args.distributed_request_command_timeout_ms.max(1)),

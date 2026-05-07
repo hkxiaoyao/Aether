@@ -689,10 +689,10 @@ pub(crate) async fn proxy_request(
             )));
         }
         Err(RequestAdmissionError::Distributed(
-            aether_runtime::DistributedConcurrencyError::Saturated { gate, limit },
+            aether_runtime_state::RuntimeSemaphoreError::Saturated { gate, limit },
         ))
         | Err(RequestAdmissionError::Distributed(
-            aether_runtime::DistributedConcurrencyError::Unavailable { gate, limit, .. },
+            aether_runtime_state::RuntimeSemaphoreError::Unavailable { gate, limit, .. },
         )) => {
             let trace_id = extract_or_generate_trace_id(request.headers());
             let response = build_local_overloaded_response(&trace_id, None, gate, limit)?;
@@ -714,7 +714,7 @@ pub(crate) async fn proxy_request(
             ));
         }
         Err(RequestAdmissionError::Distributed(
-            aether_runtime::DistributedConcurrencyError::InvalidConfiguration(message),
+            aether_runtime_state::RuntimeSemaphoreError::InvalidConfiguration(message),
         )) => return Err(GatewayError::Internal(message)),
     };
     let request_admission_ms = started_at.elapsed().as_millis() as u64;

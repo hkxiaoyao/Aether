@@ -1,6 +1,5 @@
 use aether_billing::enrich_usage_event_with_billing;
 use aether_billing::BillingModelContextLookup;
-use aether_data::driver::redis::RedisStreamRunner;
 use aether_data::repository::audit::RequestAuditReader;
 use aether_data::repository::auth::{
     AuthApiKeyLookupKey, ResolvedAuthApiKeySnapshotReader, StoredAuthApiKeySnapshot,
@@ -15,6 +14,7 @@ use aether_data_contracts::repository::provider_catalog::{
 use aether_data_contracts::repository::settlement::{StoredUsageSettlement, UsageSettlementInput};
 use aether_data_contracts::repository::usage::{StoredRequestUsageAudit, UpsertUsageRecord};
 use aether_data_contracts::repository::video_tasks::{StoredVideoTask, VideoTaskLookupKey};
+use aether_runtime_state::RuntimeQueueStore;
 use aether_usage_runtime::{
     UsageBillingEventEnricher, UsageBodyCapturePolicy, UsageEvent, UsageRecordWriter,
     UsageRequestRecordLevel, UsageRuntimeAccess, UsageSettlementWriter,
@@ -242,12 +242,12 @@ impl UsageRuntimeAccess for GatewayDataState {
         GatewayDataState::has_usage_writer(self)
     }
 
-    fn has_usage_worker_runner(&self) -> bool {
-        GatewayDataState::has_usage_worker_runner(self)
+    fn has_usage_worker_queue(&self) -> bool {
+        GatewayDataState::has_usage_worker_queue(self)
     }
 
-    fn usage_worker_runner(&self) -> Option<RedisStreamRunner> {
-        GatewayDataState::usage_worker_runner(self)
+    fn usage_worker_queue(&self) -> Option<std::sync::Arc<dyn RuntimeQueueStore>> {
+        GatewayDataState::usage_worker_queue(self)
     }
 
     async fn body_capture_policy(&self) -> Result<UsageBodyCapturePolicy, DataLayerError> {

@@ -84,22 +84,12 @@ impl<'a> AdminAppState<'a> {
         });
         let key = provider_oauth_state_storage_key(&nonce);
         let value = payload.to_string();
-        if let Some(runner) = self.redis_kv_runner() {
-            runner
-                .setex(&key, &value, Some(PROVIDER_OAUTH_STATE_TTL_SECS))
-                .await
-                .map_err(|err| GatewayError::Internal(err.to_string()))?;
-            return Ok(nonce);
-        }
-        if self
-            .as_ref()
-            .save_provider_oauth_state_for_tests(&key, &value)
-        {
-            return Ok(nonce);
-        }
-        Err(GatewayError::Internal(
-            "provider oauth redis unavailable".to_string(),
-        ))
+        self.as_ref()
+            .runtime_kv_setex(&key, &value, PROVIDER_OAUTH_STATE_TTL_SECS)
+            .await?;
+        self.as_ref()
+            .save_provider_oauth_state_for_tests(&key, &value);
+        Ok(nonce)
     }
 
     pub(crate) async fn consume_provider_oauth_state(
@@ -107,21 +97,7 @@ impl<'a> AdminAppState<'a> {
         nonce: &str,
     ) -> Result<Option<StoredAdminProviderOAuthState>, GatewayError> {
         let key = provider_oauth_state_storage_key(nonce);
-        let raw = if let Some(runner) = self.redis_kv_runner() {
-            let mut connection = runner
-                .client()
-                .get_multiplexed_async_connection()
-                .await
-                .map_err(|err| GatewayError::Internal(err.to_string()))?;
-            let namespaced_key = runner.keyspace().key(&key);
-            redis::cmd("GETDEL")
-                .arg(&namespaced_key)
-                .query_async::<Option<String>>(&mut connection)
-                .await
-                .map_err(|err| GatewayError::Internal(err.to_string()))?
-        } else {
-            self.as_ref().take_provider_oauth_state_for_tests(&key)
-        };
+        let raw = self.as_ref().runtime_kv_getdel(&key).await?;
         raw.map(|value| {
             serde_json::from_str::<StoredAdminProviderOAuthState>(&value)
                 .map_err(|err| GatewayError::Internal(err.to_string()))
@@ -172,35 +148,12 @@ impl<'a> AdminAppState<'a> {
         let serialized = serde_json::to_string(task_state)
             .map_err(|err| GatewayError::Internal(err.to_string()))?;
 
-        if let Some(runner) = self.redis_kv_runner() {
-            let Ok(mut connection) = runner.client().get_multiplexed_async_connection().await
-            else {
-                return Err(GatewayError::Internal(
-                    "provider oauth batch task redis unavailable".to_string(),
-                ));
-            };
-            let redis_key = runner.keyspace().key(&key);
-            redis::cmd("SET")
-                .arg(redis_key)
-                .arg(&serialized)
-                .arg("EX")
-                .arg(PROVIDER_OAUTH_BATCH_TASK_TTL_SECS)
-                .query_async::<()>(&mut connection)
-                .await
-                .map_err(|err| GatewayError::Internal(err.to_string()))?;
-            return Ok(());
-        }
-
-        if self
-            .as_ref()
-            .save_provider_oauth_batch_task_for_tests(&key, &serialized)
-        {
-            return Ok(());
-        }
-
-        Err(GatewayError::Internal(
-            "provider oauth batch task redis unavailable".to_string(),
-        ))
+        self.as_ref()
+            .runtime_kv_setex(&key, &serialized, PROVIDER_OAUTH_BATCH_TASK_TTL_SECS)
+            .await?;
+        self.as_ref()
+            .save_provider_oauth_batch_task_for_tests(&key, &serialized);
+        Ok(())
     }
 
     pub(crate) async fn read_provider_oauth_batch_task_payload(
@@ -209,22 +162,7 @@ impl<'a> AdminAppState<'a> {
         task_id: &str,
     ) -> Result<Option<serde_json::Value>, GatewayError> {
         let key = provider_oauth_batch_task_storage_key(task_id);
-        let raw = if let Some(runner) = self.redis_kv_runner() {
-            let Ok(mut connection) = runner.client().get_multiplexed_async_connection().await
-            else {
-                return Err(GatewayError::Internal(
-                    "provider oauth batch task redis unavailable".to_string(),
-                ));
-            };
-            let redis_key = runner.keyspace().key(&key);
-            redis::cmd("GET")
-                .arg(redis_key)
-                .query_async(&mut connection)
-                .await
-                .map_err(|err| GatewayError::Internal(err.to_string()))?
-        } else {
-            self.as_ref().load_provider_oauth_batch_task_for_tests(&key)
-        };
+        let raw = self.as_ref().runtime_kv_get(&key).await?;
         let Some(raw) = raw else {
             return Ok(None);
         };
@@ -262,28 +200,18 @@ impl<'a> AdminAppState<'a> {
                 "provider oauth redis unavailable",
             )
         })?;
-        if let Some(runner) = self.redis_kv_runner() {
-            runner
-                .setex(&key, &value, Some(ttl_seconds))
-                .await
-                .map_err(|_| {
-                    build_internal_control_error_response(
-                        http::StatusCode::SERVICE_UNAVAILABLE,
-                        "provider oauth redis unavailable",
-                    )
-                })?;
-            return Ok(());
-        }
-        if self
-            .as_ref()
-            .save_provider_oauth_device_session_for_tests(&key, &value)
-        {
-            return Ok(());
-        }
-        Err(build_internal_control_error_response(
-            http::StatusCode::SERVICE_UNAVAILABLE,
-            "provider oauth redis unavailable",
-        ))
+        self.as_ref()
+            .runtime_kv_setex(&key, &value, ttl_seconds)
+            .await
+            .map_err(|_| {
+                build_internal_control_error_response(
+                    http::StatusCode::SERVICE_UNAVAILABLE,
+                    "provider oauth redis unavailable",
+                )
+            })?;
+        self.as_ref()
+            .save_provider_oauth_device_session_for_tests(&key, &value);
+        Ok(())
     }
 
     pub(crate) async fn read_provider_oauth_device_session(
@@ -291,22 +219,7 @@ impl<'a> AdminAppState<'a> {
         session_id: &str,
     ) -> Result<Option<StoredAdminProviderOAuthDeviceSession>, GatewayError> {
         let key = provider_oauth_device_session_storage_key(session_id);
-        let raw = if let Some(runner) = self.redis_kv_runner() {
-            let mut connection = runner
-                .client()
-                .get_multiplexed_async_connection()
-                .await
-                .map_err(|err| GatewayError::Internal(err.to_string()))?;
-            let namespaced_key = runner.keyspace().key(&key);
-            redis::cmd("GET")
-                .arg(&namespaced_key)
-                .query_async::<Option<String>>(&mut connection)
-                .await
-                .map_err(|err| GatewayError::Internal(err.to_string()))?
-        } else {
-            self.as_ref()
-                .load_provider_oauth_device_session_for_tests(&key)
-        };
+        let raw = self.as_ref().runtime_kv_get(&key).await?;
         raw.map(|value| {
             serde_json::from_str::<StoredAdminProviderOAuthDeviceSession>(&value)
                 .map_err(|err| GatewayError::Internal(err.to_string()))

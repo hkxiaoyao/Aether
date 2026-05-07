@@ -116,8 +116,8 @@ impl<'a> AdminAppState<'a> {
         self.app.mark_provider_key_rpm_reset(key_id, now_unix_secs)
     }
 
-    pub(crate) fn redis_kv_runner(&self) -> Option<aether_data::driver::redis::RedisKvRunner> {
-        self.app.redis_kv_runner()
+    pub(crate) fn runtime_state(&self) -> &aether_runtime_state::RuntimeState {
+        self.app.runtime_state.as_ref()
     }
 
     pub(crate) fn provider_key_rpm_reset_at(

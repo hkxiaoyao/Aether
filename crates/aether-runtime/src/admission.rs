@@ -4,25 +4,32 @@ use axum::http::Response;
 use futures_util::StreamExt;
 
 use crate::concurrency::ConcurrencyPermit;
-use crate::distributed::DistributedConcurrencyPermit;
 
-#[derive(Debug)]
 pub struct AdmissionPermit {
     _local: Option<ConcurrencyPermit>,
-    _distributed: Option<DistributedConcurrencyPermit>,
+    _distributed: Option<Box<dyn Send + Sync>>,
+}
+
+impl std::fmt::Debug for AdmissionPermit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AdmissionPermit")
+            .field("has_local", &self._local.is_some())
+            .field("has_distributed", &self._distributed.is_some())
+            .finish()
+    }
 }
 
 impl AdmissionPermit {
-    pub fn from_parts(
+    pub fn from_parts<D: Send + Sync + 'static>(
         local: Option<ConcurrencyPermit>,
-        distributed: Option<DistributedConcurrencyPermit>,
+        distributed: Option<D>,
     ) -> Option<Self> {
         if local.is_none() && distributed.is_none() {
             None
         } else {
             Some(Self {
                 _local: local,
-                _distributed: distributed,
+                _distributed: distributed.map(|permit| Box::new(permit) as Box<dyn Send + Sync>),
             })
         }
     }
@@ -70,7 +77,7 @@ fn hold_axum_response_permit(response: Response<Body>, permit: AdmissionPermit) 
 #[cfg(test)]
 mod tests {
     use super::{hold_admission_permit_until, maybe_hold_axum_response_permit, AdmissionPermit};
-    use crate::{ConcurrencyGate, DistributedConcurrencyGate};
+    use crate::ConcurrencyGate;
     use axum::body::{to_bytes, Body};
     use axum::http::Response;
 
@@ -96,12 +103,9 @@ mod tests {
     #[tokio::test]
     async fn holds_combined_local_and_distributed_permit_until_future_finishes() {
         let local_gate = ConcurrencyGate::new("local", 1);
-        let distributed_gate = DistributedConcurrencyGate::new_in_memory("distributed", 1);
         let local = local_gate.try_acquire().expect("local permit");
-        let distributed = distributed_gate
-            .try_acquire()
-            .await
-            .expect("distributed permit");
+        let distributed_gate = ConcurrencyGate::new("distributed", 1);
+        let distributed = distributed_gate.try_acquire().expect("distributed permit");
 
         let task = tokio::spawn(hold_admission_permit_until(
             AdmissionPermit::from_parts(Some(local), Some(distributed)),
@@ -116,19 +120,12 @@ mod tests {
             "local permit should still be held"
         );
         assert!(
-            distributed_gate.try_acquire().await.is_err(),
+            distributed_gate.try_acquire().is_err(),
             "distributed permit should still be held"
         );
 
         task.await.expect("task should complete");
         assert_eq!(local_gate.snapshot().in_flight, 0);
-        assert_eq!(
-            distributed_gate
-                .snapshot()
-                .await
-                .expect("snapshot should build")
-                .in_flight,
-            0
-        );
+        assert_eq!(distributed_gate.snapshot().in_flight, 0);
     }
 }

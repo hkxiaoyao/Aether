@@ -4,7 +4,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use aether_contracts::{ExecutionPlan, ExecutionTimeouts, RequestBody};
-use aether_runtime::{DistributedConcurrencyGate, RedisDistributedConcurrencyConfig};
+use aether_runtime_state::{
+    RedisClientConfig, RuntimeSemaphore, RuntimeSemaphoreConfig, RuntimeState,
+};
 use aether_testkit::{
     init_test_runtime_for, run_multi_url_http_load_probe, ExecutionRuntimeHarness,
     ExecutionRuntimeHarnessConfig, GatewayHarness, GatewayHarnessConfig, HttpLoadProbeConfig,
@@ -165,13 +167,15 @@ async fn start_gateway_pair(
         config.request_limit,
         redis_url,
         "gateway-a",
-    )?;
+    )
+    .await?;
     let gate_b = distributed_request_gate(
         "gateway_requests_distributed",
         config.request_limit,
         redis_url,
-        "gateway-a",
-    )?;
+        "gateway-b",
+    )
+    .await?;
     let gateway_a = GatewayHarness::start(GatewayHarnessConfig {
         upstream_base_url: upstream_base_url.to_string(),
         data_config: None,
@@ -209,13 +213,15 @@ async fn start_execution_runtime_pair(
         config.request_limit,
         redis_url,
         "execution-runtime-a",
-    )?;
+    )
+    .await?;
     let gate_b = distributed_request_gate(
         "execution_runtime_requests_distributed",
         config.request_limit,
         redis_url,
-        "execution-runtime-a",
-    )?;
+        "execution-runtime-b",
+    )
+    .await?;
     let runtime_a = ExecutionRuntimeHarness::start(ExecutionRuntimeHarnessConfig {
         max_in_flight_requests: None,
         distributed_request_gate: Some(gate_a),
@@ -245,13 +251,15 @@ async fn start_tunnel_pair(
         config.tunnel_request_limit,
         redis_url,
         "tunnel-a",
-    )?;
+    )
+    .await?;
     let gate_b = distributed_request_gate(
         "tunnel_requests_distributed",
         config.tunnel_request_limit,
         redis_url,
-        "tunnel-a",
-    )?;
+        "tunnel-b",
+    )
+    .await?;
     let tunnel_a = TunnelHarness::start(TunnelHarnessConfig {
         distributed_request_gate: Some(gate_a),
         ..TunnelHarnessConfig::default()
@@ -279,21 +287,27 @@ async fn start_tunnel_pair(
     ))
 }
 
-fn distributed_request_gate(
+async fn distributed_request_gate(
     name: &'static str,
     limit: usize,
     redis_url: &str,
     key_scope: &str,
-) -> Result<DistributedConcurrencyGate, Box<dyn std::error::Error>> {
-    Ok(DistributedConcurrencyGate::new_redis(
-        name,
-        limit,
-        RedisDistributedConcurrencyConfig {
+) -> Result<RuntimeSemaphore, Box<dyn std::error::Error>> {
+    let runtime = RuntimeState::redis(
+        RedisClientConfig {
             url: redis_url.to_string(),
             key_prefix: Some(format!(
                 "aether-baseline-{}-{name}-{key_scope}",
                 std::process::id()
             )),
+        },
+        Some(1_000),
+    )
+    .await?;
+    Ok(runtime.semaphore(
+        name,
+        limit,
+        RuntimeSemaphoreConfig {
             lease_ttl_ms: 30_000,
             renew_interval_ms: 10_000,
             command_timeout_ms: Some(1_000),

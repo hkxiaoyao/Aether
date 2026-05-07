@@ -5,7 +5,7 @@ use super::keys::{
 use crate::handlers::admin::provider::shared::support::{
     AdminProviderPoolConfig, AdminProviderPoolUnschedulableRule,
 };
-use aether_data::driver::redis::RedisKvRunner;
+use aether_runtime_state::RuntimeState;
 use regex::Regex;
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -277,7 +277,7 @@ fn resolve_transient_cooldown_ttl(
 }
 
 async fn set_pool_cooldown(
-    runner: &RedisKvRunner,
+    runtime: &RuntimeState,
     provider_id: &str,
     key_id: &str,
     reason: &str,
@@ -288,39 +288,32 @@ async fn set_pool_cooldown(
     }
     let ttl_seconds = ttl_seconds.min(MAX_POOL_COOLDOWN_SECONDS);
 
-    let Ok(mut connection) = runner.client().get_multiplexed_async_connection().await else {
-        warn!(
-            "gateway admin provider pool: failed to connect redis to set cooldown for key {key_id}"
-        );
-        return;
-    };
-    let keyspace = runner.keyspace().clone();
-    let result: Result<(), _> = redis::pipe()
-        .cmd("SETEX")
-        .arg(pool_cooldown_key(&keyspace, provider_id, key_id))
-        .arg(ttl_seconds)
-        .arg(reason)
-        .ignore()
-        .cmd("SADD")
-        .arg(pool_cooldown_index_key(&keyspace, provider_id))
-        .arg(key_id)
-        .ignore()
-        .cmd("EXPIRE")
-        .arg(pool_cooldown_index_key(&keyspace, provider_id))
-        .arg(ttl_seconds.saturating_add(60))
-        .ignore()
-        .query_async(&mut connection)
-        .await;
-    if let Err(err) = result {
+    if let Err(err) = runtime
+        .kv_set(
+            &pool_cooldown_key(provider_id, key_id),
+            reason.to_string(),
+            Some(std::time::Duration::from_secs(ttl_seconds)),
+        )
+        .await
+    {
         warn!(
             "gateway admin provider pool: failed to set cooldown for provider {provider_id} key {key_id}: {:?}",
             err
         );
     }
+    let _ = runtime
+        .set_add(&pool_cooldown_index_key(provider_id), key_id)
+        .await;
+    let _ = runtime
+        .key_expire(
+            &pool_cooldown_index_key(provider_id),
+            std::time::Duration::from_secs(ttl_seconds.saturating_add(60)),
+        )
+        .await;
 }
 
-async fn invalidate_pool_oauth_cache(runner: &RedisKvRunner, key_id: &str) {
-    if let Err(err) = runner.del(&oauth_cache_key(key_id)).await {
+async fn invalidate_pool_oauth_cache(runtime: &RuntimeState, key_id: &str) {
+    if let Err(err) = runtime.kv_delete(&oauth_cache_key(key_id)).await {
         warn!(
             "gateway admin provider pool: failed to invalidate oauth cache for key {key_id}: {:?}",
             err
@@ -339,7 +332,7 @@ fn matching_unschedulable_rule<'a>(
 }
 
 pub(crate) async fn record_admin_provider_pool_success(
-    runner: &RedisKvRunner,
+    runtime: &RuntimeState,
     provider_id: &str,
     key_id: &str,
     pool_config: &AdminProviderPoolConfig,
@@ -347,111 +340,72 @@ pub(crate) async fn record_admin_provider_pool_success(
     tokens_used: u64,
     ttfb_ms: Option<u64>,
 ) {
-    let Ok(mut connection) = runner.client().get_multiplexed_async_connection().await else {
-        warn!("gateway admin provider pool: failed to connect redis to record success for key {key_id}");
-        return;
-    };
-    let keyspace = runner.keyspace().clone();
     let now = current_unix_secs_f64();
-    let mut pipeline = redis::pipe();
-    let mut has_commands = false;
 
     if let Some(sticky_session_token) = sticky_session_token
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .filter(|_| pool_config.sticky_session_ttl_seconds > 0)
     {
-        pipeline
-            .cmd("SETEX")
-            .arg(pool_sticky_key(
-                &keyspace,
-                provider_id,
-                sticky_session_token,
-            ))
-            .arg(pool_config.sticky_session_ttl_seconds)
-            .arg(key_id)
-            .ignore();
-        has_commands = true;
+        let _ = runtime
+            .kv_set(
+                &pool_sticky_key(provider_id, sticky_session_token),
+                key_id.to_string(),
+                Some(std::time::Duration::from_secs(
+                    pool_config.sticky_session_ttl_seconds,
+                )),
+            )
+            .await;
     }
 
     if should_touch_lru(pool_config) {
-        pipeline
-            .cmd("ZADD")
-            .arg(pool_lru_key(&keyspace, provider_id))
-            .arg(now)
-            .arg(key_id)
-            .ignore();
-        has_commands = true;
+        let _ = runtime
+            .score_set(&pool_lru_key(provider_id), key_id, now)
+            .await;
     }
 
     if tokens_used > 0 && pool_config.cost_limit_per_key_tokens.is_some() {
-        let cost_key = pool_cost_key(&keyspace, provider_id, key_id);
+        let cost_key = pool_cost_key(provider_id, key_id);
         let window_seconds = pool_config.cost_window_seconds.max(1);
         let member = format!("{}:{tokens_used}", Uuid::new_v4().simple());
-        pipeline
-            .cmd("ZADD")
-            .arg(&cost_key)
-            .arg(now)
-            .arg(member)
-            .ignore()
-            .cmd("ZREMRANGEBYSCORE")
-            .arg(&cost_key)
-            .arg("-inf")
-            .arg(now - window_seconds as f64)
-            .ignore()
-            .cmd("EXPIRE")
-            .arg(&cost_key)
-            .arg(window_seconds.saturating_add(600))
-            .ignore();
-        has_commands = true;
+        let _ = runtime.score_set(&cost_key, &member, now).await;
+        let _ = runtime
+            .score_remove_by_score(&cost_key, now - window_seconds as f64)
+            .await;
+        let _ = runtime
+            .key_expire(
+                &cost_key,
+                std::time::Duration::from_secs(window_seconds.saturating_add(600)),
+            )
+            .await;
     }
 
     if let Some(ttfb_ms) = ttfb_ms
         .filter(|value| should_record_latency(pool_config))
         .filter(|_| pool_config.latency_window_seconds > 0)
     {
-        let latency_key = pool_latency_key(&keyspace, provider_id, key_id);
+        let latency_key = pool_latency_key(provider_id, key_id);
         let window_seconds = pool_config.latency_window_seconds.max(1);
         let sample_limit = pool_config.latency_sample_limit.max(1);
         let member = format!("{}:{ttfb_ms}", Uuid::new_v4().simple());
-        pipeline
-            .cmd("ZADD")
-            .arg(&latency_key)
-            .arg(now)
-            .arg(member)
-            .ignore()
-            .cmd("ZREMRANGEBYSCORE")
-            .arg(&latency_key)
-            .arg("-inf")
-            .arg(now - window_seconds as f64)
-            .ignore()
-            .cmd("ZREMRANGEBYRANK")
-            .arg(&latency_key)
-            .arg(0)
-            .arg(-((sample_limit as i64) + 1))
-            .ignore()
-            .cmd("EXPIRE")
-            .arg(&latency_key)
-            .arg(window_seconds.saturating_add(600))
-            .ignore();
-        has_commands = true;
-    }
-
-    if !has_commands {
-        return;
-    }
-
-    let result: Result<(), _> = pipeline.query_async(&mut connection).await;
-    if let Err(err) = result {
-        warn!(
-            "gateway admin provider pool: failed to record success feedback for provider {provider_id} key {key_id}: {:?}",
-            err
-        );
+        let _ = runtime.score_set(&latency_key, &member, now).await;
+        let _ = runtime
+            .score_remove_by_score(&latency_key, now - window_seconds as f64)
+            .await;
+        let _ = runtime
+            .score_remove_by_rank(&latency_key, 0, -((sample_limit as i64) + 1))
+            .await;
+        let _ = runtime
+            .key_expire(
+                &latency_key,
+                std::time::Duration::from_secs(window_seconds.saturating_add(600)),
+            )
+            .await;
     }
 }
 
 pub(crate) async fn record_admin_provider_pool_error(
-    runner: &RedisKvRunner,
+    runtime: &RuntimeState,
     provider_id: &str,
     key_id: &str,
     pool_config: &AdminProviderPoolConfig,
@@ -466,7 +420,7 @@ pub(crate) async fn record_admin_provider_pool_error(
     let error_message = extract_error_message(error_body).to_ascii_lowercase();
 
     if status_code == 401 {
-        invalidate_pool_oauth_cache(runner, key_id).await;
+        invalidate_pool_oauth_cache(runtime, key_id).await;
         return;
     }
 
@@ -482,7 +436,7 @@ pub(crate) async fn record_admin_provider_pool_error(
             return;
         }
         set_pool_cooldown(
-            runner,
+            runtime,
             provider_id,
             key_id,
             "forbidden_403",
@@ -503,7 +457,7 @@ pub(crate) async fn record_admin_provider_pool_error(
     {
         let ttl_seconds = (rule.duration_minutes.max(1)).saturating_mul(60).max(60);
         set_pool_cooldown(
-            runner,
+            runtime,
             provider_id,
             key_id,
             &format!("rule:{}", rule.keyword),
@@ -520,13 +474,20 @@ pub(crate) async fn record_admin_provider_pool_error(
                 .or_else(|| parse_google_quota_cooldown_seconds(error_body)),
             pool_config,
         );
-        set_pool_cooldown(runner, provider_id, key_id, "rate_limited_429", ttl_seconds).await;
+        set_pool_cooldown(
+            runtime,
+            provider_id,
+            key_id,
+            "rate_limited_429",
+            ttl_seconds,
+        )
+        .await;
         return;
     }
 
     if status_code == 529 {
         set_pool_cooldown(
-            runner,
+            runtime,
             provider_id,
             key_id,
             "overloaded_529",
@@ -555,12 +516,12 @@ pub(crate) async fn record_admin_provider_pool_error(
             parse_retry_after_seconds(response_headers),
             pool_config,
         );
-        set_pool_cooldown(runner, provider_id, key_id, &reason, ttl_seconds).await;
+        set_pool_cooldown(runtime, provider_id, key_id, &reason, ttl_seconds).await;
     }
 }
 
 pub(crate) async fn record_admin_provider_pool_stream_timeout(
-    runner: &RedisKvRunner,
+    runtime: &RuntimeState,
     provider_id: &str,
     key_id: &str,
     pool_config: &AdminProviderPoolConfig,
@@ -569,49 +530,25 @@ pub(crate) async fn record_admin_provider_pool_stream_timeout(
         return;
     }
 
-    let Ok(mut connection) = runner.client().get_multiplexed_async_connection().await else {
-        warn!("gateway admin provider pool: failed to connect redis to record stream timeout for key {key_id}");
-        return;
-    };
-    let keyspace = runner.keyspace().clone();
-    let timeout_key = pool_stream_timeout_key(&keyspace, provider_id, key_id);
+    let timeout_key = pool_stream_timeout_key(provider_id, key_id);
     let now = current_unix_secs_f64();
     let window_seconds = pool_config.stream_timeout_window_seconds.max(1);
     let member = Uuid::new_v4().simple().to_string();
-    let results = redis::pipe()
-        .cmd("ZREMRANGEBYSCORE")
-        .arg(&timeout_key)
-        .arg("-inf")
-        .arg(now - window_seconds as f64)
-        .cmd("ZADD")
-        .arg(&timeout_key)
-        .arg(now)
-        .arg(member)
-        .cmd("ZCARD")
-        .arg(&timeout_key)
-        .cmd("EXPIRE")
-        .arg(&timeout_key)
-        .arg(window_seconds.saturating_add(60))
-        .query_async::<Vec<redis::Value>>(&mut connection)
+    let _ = runtime
+        .score_remove_by_score(&timeout_key, now - window_seconds as f64)
         .await;
-
-    let count = match results
-        .ok()
-        .and_then(|values| values.get(2).cloned())
-        .and_then(|value| redis::from_redis_value::<u64>(&value).ok())
-    {
-        Some(count) => count,
-        None => {
-            warn!(
-                "gateway admin provider pool: failed to compute stream timeout count for provider {provider_id} key {key_id}"
-            );
-            return;
-        }
-    };
+    let _ = runtime.score_set(&timeout_key, &member, now).await;
+    let count = runtime.score_len(&timeout_key).await.unwrap_or(0) as u64;
+    let _ = runtime
+        .key_expire(
+            &timeout_key,
+            std::time::Duration::from_secs(window_seconds.saturating_add(60)),
+        )
+        .await;
 
     if count >= pool_config.stream_timeout_threshold {
         set_pool_cooldown(
-            runner,
+            runtime,
             provider_id,
             key_id,
             &format!("stream_timeout_x{count}"),
@@ -628,13 +565,13 @@ mod tests {
         record_admin_provider_pool_error, record_admin_provider_pool_stream_timeout,
         record_admin_provider_pool_success,
     };
-    use crate::data::{GatewayDataConfig, GatewayDataState};
     use crate::handlers::admin::provider::pool::runtime::reads::read_admin_provider_pool_runtime_state;
     use crate::handlers::admin::provider::shared::support::{
         AdminProviderPoolConfig, AdminProviderPoolSchedulingPreset,
         AdminProviderPoolUnschedulableRule,
     };
     use crate::AppState;
+    use aether_runtime_state::{RedisClientConfig, RuntimeState, RuntimeStateConfig};
     use aether_testkit::ManagedRedisServer;
     use std::collections::BTreeMap;
 
@@ -682,14 +619,17 @@ mod tests {
         }
     }
 
-    fn build_runner_app(redis_url: &str, key_prefix: &str) -> AppState {
-        let data_state = GatewayDataState::from_config(
-            GatewayDataConfig::disabled().with_redis_url(redis_url, Some(key_prefix)),
-        )
-        .expect("data state should build");
+    async fn build_runner_app(redis_url: &str, key_prefix: &str) -> AppState {
+        let runtime_state =
+            RuntimeState::from_config(RuntimeStateConfig::redis(RedisClientConfig {
+                url: redis_url.to_string(),
+                key_prefix: Some(key_prefix.to_string()),
+            }))
+            .await
+            .expect("runtime state should build");
         AppState::new()
             .expect("app state should build")
-            .with_data_state_for_tests(data_state)
+            .with_runtime_state(std::sync::Arc::new(runtime_state))
     }
 
     #[test]
@@ -798,13 +738,13 @@ mod tests {
         let Some(redis) = start_managed_redis_or_skip().await else {
             return;
         };
-        let app = build_runner_app(redis.redis_url(), "pool_runtime_success_feedback");
-        let runner = app.redis_kv_runner().expect("redis runner should exist");
+        let app = build_runner_app(redis.redis_url(), "pool_runtime_success_feedback").await;
+        let runtime = app.runtime_state.as_ref();
         let pool_config = sample_pool_config();
         let key_ids = vec!["key-1".to_string()];
 
         record_admin_provider_pool_success(
-            &runner,
+            runtime,
             "provider-1",
             "key-1",
             &pool_config,
@@ -815,7 +755,7 @@ mod tests {
         .await;
 
         let runtime = read_admin_provider_pool_runtime_state(
-            &runner,
+            runtime,
             "provider-1",
             &key_ids,
             &pool_config,
@@ -836,14 +776,15 @@ mod tests {
         let Some(redis) = start_managed_redis_or_skip().await else {
             return;
         };
-        let app = build_runner_app(redis.redis_url(), "pool_runtime_no_sticky_without_affinity");
-        let runner = app.redis_kv_runner().expect("redis runner should exist");
+        let app =
+            build_runner_app(redis.redis_url(), "pool_runtime_no_sticky_without_affinity").await;
+        let runtime = app.runtime_state.as_ref();
         let mut pool_config = sample_pool_config();
         pool_config.sticky_session_ttl_seconds = 0;
         let key_ids = vec!["key-1".to_string()];
 
         record_admin_provider_pool_success(
-            &runner,
+            runtime,
             "provider-1",
             "key-1",
             &pool_config,
@@ -854,7 +795,7 @@ mod tests {
         .await;
 
         let runtime = read_admin_provider_pool_runtime_state(
-            &runner,
+            runtime,
             "provider-1",
             &key_ids,
             &pool_config,
@@ -874,13 +815,13 @@ mod tests {
         let Some(redis) = start_managed_redis_or_skip().await else {
             return;
         };
-        let app = build_runner_app(redis.redis_url(), "pool_runtime_error_feedback");
-        let runner = app.redis_kv_runner().expect("redis runner should exist");
+        let app = build_runner_app(redis.redis_url(), "pool_runtime_error_feedback").await;
+        let runtime = app.runtime_state.as_ref();
         let pool_config = sample_pool_config();
         let key_ids = vec!["key-2".to_string()];
 
         record_admin_provider_pool_error(
-            &runner,
+            runtime,
             "provider-1",
             "key-2",
             &pool_config,
@@ -894,7 +835,7 @@ mod tests {
         .await;
 
         let runtime = read_admin_provider_pool_runtime_state(
-            &runner,
+            runtime,
             "provider-1",
             &key_ids,
             &pool_config,
@@ -920,13 +861,13 @@ mod tests {
         let Some(redis) = start_managed_redis_or_skip().await else {
             return;
         };
-        let app = build_runner_app(redis.redis_url(), "pool_runtime_google_quota_cooldown");
-        let runner = app.redis_kv_runner().expect("redis runner should exist");
+        let app = build_runner_app(redis.redis_url(), "pool_runtime_google_quota_cooldown").await;
+        let runtime = app.runtime_state.as_ref();
         let pool_config = sample_pool_config();
         let key_ids = vec!["key-google-429".to_string()];
 
         record_admin_provider_pool_error(
-            &runner,
+            runtime,
             "provider-1",
             "key-google-429",
             &pool_config,
@@ -949,7 +890,7 @@ mod tests {
         .await;
 
         let runtime = read_admin_provider_pool_runtime_state(
-            &runner,
+            runtime,
             "provider-1",
             &key_ids,
             &pool_config,
@@ -975,13 +916,13 @@ mod tests {
         let Some(redis) = start_managed_redis_or_skip().await else {
             return;
         };
-        let app = build_runner_app(redis.redis_url(), "pool_runtime_capped_cooldown");
-        let runner = app.redis_kv_runner().expect("redis runner should exist");
+        let app = build_runner_app(redis.redis_url(), "pool_runtime_capped_cooldown").await;
+        let runtime = app.runtime_state.as_ref();
         let pool_config = sample_pool_config();
         let key_ids = vec!["key-long-cooldown".to_string()];
 
         record_admin_provider_pool_error(
-            &runner,
+            runtime,
             "provider-1",
             "key-long-cooldown",
             &pool_config,
@@ -995,7 +936,7 @@ mod tests {
         .await;
 
         let runtime = read_admin_provider_pool_runtime_state(
-            &runner,
+            runtime,
             "provider-1",
             &key_ids,
             &pool_config,
@@ -1021,8 +962,8 @@ mod tests {
         let Some(redis) = start_managed_redis_or_skip().await else {
             return;
         };
-        let app = build_runner_app(redis.redis_url(), "pool_runtime_circuit_no_cooldown");
-        let runner = app.redis_kv_runner().expect("redis runner should exist");
+        let app = build_runner_app(redis.redis_url(), "pool_runtime_circuit_no_cooldown").await;
+        let runtime = app.runtime_state.as_ref();
         let pool_config = sample_pool_config();
         let key_ids = vec!["key-account-disabled".to_string()];
 
@@ -1035,7 +976,7 @@ mod tests {
             Some("account_deactivated_401")
         );
         record_admin_provider_pool_error(
-            &runner,
+            runtime,
             "provider-1",
             "key-account-disabled",
             &pool_config,
@@ -1046,7 +987,7 @@ mod tests {
         .await;
 
         let runtime = read_admin_provider_pool_runtime_state(
-            &runner,
+            runtime,
             "provider-1",
             &key_ids,
             &pool_config,
@@ -1067,8 +1008,8 @@ mod tests {
         let Some(redis) = start_managed_redis_or_skip().await else {
             return;
         };
-        let app = build_runner_app(redis.redis_url(), "pool_runtime_unschedulable_rule");
-        let runner = app.redis_kv_runner().expect("redis runner should exist");
+        let app = build_runner_app(redis.redis_url(), "pool_runtime_unschedulable_rule").await;
+        let runtime = app.runtime_state.as_ref();
         let mut pool_config = sample_pool_config();
         pool_config.unschedulable_rules = vec![AdminProviderPoolUnschedulableRule {
             keyword: "review required".to_string(),
@@ -1077,7 +1018,7 @@ mod tests {
         let key_ids = vec!["key-3".to_string()];
 
         record_admin_provider_pool_error(
-            &runner,
+            runtime,
             "provider-1",
             "key-3",
             &pool_config,
@@ -1088,7 +1029,7 @@ mod tests {
         .await;
 
         let runtime = read_admin_provider_pool_runtime_state(
-            &runner,
+            runtime,
             "provider-1",
             &key_ids,
             &pool_config,
@@ -1114,8 +1055,8 @@ mod tests {
         let Some(redis) = start_managed_redis_or_skip().await else {
             return;
         };
-        let app = build_runner_app(redis.redis_url(), "pool_runtime_ignore_400");
-        let runner = app.redis_kv_runner().expect("redis runner should exist");
+        let app = build_runner_app(redis.redis_url(), "pool_runtime_ignore_400").await;
+        let runtime = app.runtime_state.as_ref();
         let mut pool_config = sample_pool_config();
         pool_config.unschedulable_rules = vec![AdminProviderPoolUnschedulableRule {
             keyword: "review required".to_string(),
@@ -1124,7 +1065,7 @@ mod tests {
         let key_ids = vec!["key-client-400".to_string()];
 
         record_admin_provider_pool_error(
-            &runner,
+            runtime,
             "provider-1",
             "key-client-400",
             &pool_config,
@@ -1135,7 +1076,7 @@ mod tests {
         .await;
 
         let runtime = read_admin_provider_pool_runtime_state(
-            &runner,
+            runtime,
             "provider-1",
             &key_ids,
             &pool_config,
@@ -1154,21 +1095,31 @@ mod tests {
         let Some(redis) = start_managed_redis_or_skip().await else {
             return;
         };
-        let app = build_runner_app(redis.redis_url(), "pool_runtime_stream_timeout");
-        let runner = app.redis_kv_runner().expect("redis runner should exist");
+        let app = build_runner_app(redis.redis_url(), "pool_runtime_stream_timeout").await;
+        let runtime_state = app.runtime_state.as_ref();
         let mut pool_config = sample_pool_config();
         pool_config.stream_timeout_threshold = 2;
         pool_config.stream_timeout_window_seconds = 300;
         pool_config.stream_timeout_cooldown_seconds = 90;
         let key_ids = vec!["key-4".to_string()];
 
-        record_admin_provider_pool_stream_timeout(&runner, "provider-1", "key-4", &pool_config)
-            .await;
-        record_admin_provider_pool_stream_timeout(&runner, "provider-1", "key-4", &pool_config)
-            .await;
+        record_admin_provider_pool_stream_timeout(
+            runtime_state,
+            "provider-1",
+            "key-4",
+            &pool_config,
+        )
+        .await;
+        record_admin_provider_pool_stream_timeout(
+            runtime_state,
+            "provider-1",
+            "key-4",
+            &pool_config,
+        )
+        .await;
 
         let mut runtime = read_admin_provider_pool_runtime_state(
-            &runner,
+            runtime_state,
             "provider-1",
             &key_ids,
             &pool_config,
@@ -1186,7 +1137,7 @@ mod tests {
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             runtime = read_admin_provider_pool_runtime_state(
-                &runner,
+                runtime_state,
                 "provider-1",
                 &key_ids,
                 &pool_config,

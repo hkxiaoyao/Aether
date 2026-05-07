@@ -195,27 +195,6 @@ impl GatewayDataState {
         }
     }
 
-    pub(crate) async fn cache_set_string_with_ttl(
-        &self,
-        key: &str,
-        value: &str,
-        ttl_seconds: u64,
-    ) -> Result<(), DataLayerError> {
-        let Some(runner) = self.kv_runner() else {
-            return Ok(());
-        };
-        runner.setex(key, value, Some(ttl_seconds)).await?;
-        Ok(())
-    }
-
-    pub(crate) async fn cache_delete_key(&self, key: &str) -> Result<(), DataLayerError> {
-        let Some(runner) = self.kv_runner() else {
-            return Ok(());
-        };
-        let _deleted = runner.del(key).await?;
-        Ok(())
-    }
-
     pub(crate) async fn list_provider_catalog_providers_by_ids(
         &self,
         provider_ids: &[String],

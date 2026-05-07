@@ -4,10 +4,9 @@ use std::sync::Arc;
 use aether_contracts::ExecutionPlan;
 use aether_runtime::{
     maybe_hold_axum_response_permit, prometheus_response, service_up_sample, AdmissionPermit,
-    ConcurrencyError, ConcurrencyGate, ConcurrencySnapshot, DistributedConcurrencyError,
-    DistributedConcurrencyGate, DistributedConcurrencySnapshot, MetricKind, MetricLabel,
-    MetricSample,
+    ConcurrencyError, ConcurrencyGate, ConcurrencySnapshot, MetricKind, MetricLabel, MetricSample,
 };
+use aether_runtime_state::{RuntimeSemaphore, RuntimeSemaphoreError, RuntimeSemaphoreSnapshot};
 use axum::body::{to_bytes, Body};
 use axum::extract::{Request, State};
 use axum::http::StatusCode;
@@ -30,7 +29,7 @@ const DISTRIBUTED_REQUEST_GATE_NAME: &str = "execution_runtime_requests_distribu
 struct ExecutionRuntimeAppState {
     execution_runtime: DirectSyncExecutionRuntime,
     request_gate: Option<Arc<ConcurrencyGate>>,
-    distributed_request_gate: Option<Arc<DistributedConcurrencyGate>>,
+    distributed_request_gate: Option<Arc<RuntimeSemaphore>>,
 }
 
 impl ExecutionRuntimeAppState {
@@ -44,7 +43,7 @@ impl ExecutionRuntimeAppState {
         }
     }
 
-    fn with_distributed_request_gate(mut self, gate: DistributedConcurrencyGate) -> Self {
+    fn with_distributed_request_gate(mut self, gate: RuntimeSemaphore) -> Self {
         self.distributed_request_gate = Some(Arc::new(gate));
         self
     }
@@ -55,7 +54,7 @@ impl ExecutionRuntimeAppState {
 
     async fn distributed_request_concurrency_snapshot(
         &self,
-    ) -> Result<Option<DistributedConcurrencySnapshot>, DistributedConcurrencyError> {
+    ) -> Result<Option<RuntimeSemaphoreSnapshot>, RuntimeSemaphoreError> {
         match self.distributed_request_gate.as_ref() {
             Some(gate) => gate.snapshot().await.map(Some),
             None => Ok(None),
@@ -122,7 +121,7 @@ pub fn build_execution_runtime_router_with_request_concurrency_limit(
 
 pub fn build_execution_runtime_router_with_request_gates(
     limit: Option<usize>,
-    distributed_gate: Option<DistributedConcurrencyGate>,
+    distributed_gate: Option<RuntimeSemaphore>,
 ) -> Router {
     let state = match distributed_gate {
         Some(gate) => ExecutionRuntimeAppState::with_request_concurrency_limit(limit)
@@ -142,7 +141,7 @@ pub fn build_execution_runtime_router_with_request_gates(
 pub async fn serve_execution_runtime_tcp(
     bind: &str,
     max_in_flight_requests: Option<usize>,
-    distributed_request_gate: Option<DistributedConcurrencyGate>,
+    distributed_request_gate: Option<RuntimeSemaphore>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let listener = tokio::net::TcpListener::bind(bind).await?;
     axum::serve(
@@ -159,7 +158,7 @@ pub async fn serve_execution_runtime_tcp(
 pub async fn serve_execution_runtime_unix(
     socket_path: &Path,
     max_in_flight_requests: Option<usize>,
-    distributed_request_gate: Option<DistributedConcurrencyGate>,
+    distributed_request_gate: Option<RuntimeSemaphore>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(parent) = socket_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -262,11 +261,11 @@ async fn acquire_request_permit(
     match state.try_acquire_request_permit().await {
         Ok(permit) => Ok(permit),
         Err(RequestAdmissionError::Local(ConcurrencyError::Saturated { gate, limit }))
-        | Err(RequestAdmissionError::Distributed(DistributedConcurrencyError::Saturated {
+        | Err(RequestAdmissionError::Distributed(RuntimeSemaphoreError::Saturated {
             gate,
             limit,
         }))
-        | Err(RequestAdmissionError::Distributed(DistributedConcurrencyError::Unavailable {
+        | Err(RequestAdmissionError::Distributed(RuntimeSemaphoreError::Unavailable {
             gate,
             limit,
             ..
@@ -278,9 +277,9 @@ async fn acquire_request_permit(
                 "execution runtime request concurrency gate {gate} is closed"
             ))),
         ),
-        Err(RequestAdmissionError::Distributed(
-            DistributedConcurrencyError::InvalidConfiguration(message),
-        )) => Err(ExecutionRuntimeAppError(
+        Err(RequestAdmissionError::Distributed(RuntimeSemaphoreError::InvalidConfiguration(
+            message,
+        ))) => Err(ExecutionRuntimeAppError(
             ExecutionRuntimeServerError::RequestRead(message),
         )),
     }
@@ -289,7 +288,7 @@ async fn acquire_request_permit(
 #[derive(Debug)]
 enum RequestAdmissionError {
     Local(ConcurrencyError),
-    Distributed(DistributedConcurrencyError),
+    Distributed(RuntimeSemaphoreError),
 }
 
 async fn parse_request_json<T>(request: Request) -> Result<T, ExecutionRuntimeAppError>
@@ -380,6 +379,9 @@ mod tests {
         build_execution_runtime_router_with_request_gates, DISTRIBUTED_REQUEST_GATE_NAME,
     };
     use aether_contracts::{ExecutionPlan, ExecutionTimeouts, RequestBody};
+    use aether_runtime_state::{
+        MemoryRuntimeStateConfig, RuntimeSemaphore, RuntimeSemaphoreConfig, RuntimeState,
+    };
     use axum::body::{Body, Bytes};
     use axum::response::Response;
     use axum::routing::any;
@@ -388,6 +390,12 @@ mod tests {
     use std::convert::Infallible;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+
+    fn distributed_gate(gate: &'static str, limit: usize) -> RuntimeSemaphore {
+        RuntimeState::memory(MemoryRuntimeStateConfig::default())
+            .semaphore(gate, limit, RuntimeSemaphoreConfig::default())
+            .expect("distributed semaphore")
+    }
 
     async fn start_server(app: Router) -> (String, tokio::task::JoinHandle<()>) {
         let listener = crate::test_support::bind_loopback_listener()
@@ -517,10 +525,7 @@ mod tests {
             }),
         );
         let (upstream_url, upstream_handle) = start_server(upstream).await;
-        let distributed_gate = aether_runtime::DistributedConcurrencyGate::new_in_memory(
-            DISTRIBUTED_REQUEST_GATE_NAME,
-            1,
-        );
+        let distributed_gate = distributed_gate(DISTRIBUTED_REQUEST_GATE_NAME, 1);
         let runtime_a =
             build_execution_runtime_router_with_request_gates(None, Some(distributed_gate.clone()));
         let runtime_b =
@@ -571,10 +576,7 @@ mod tests {
     async fn execution_runtime_exposes_request_concurrency_metrics() {
         let runtime = build_execution_runtime_router_with_request_gates(
             Some(4),
-            Some(aether_runtime::DistributedConcurrencyGate::new_in_memory(
-                DISTRIBUTED_REQUEST_GATE_NAME,
-                6,
-            )),
+            Some(distributed_gate(DISTRIBUTED_REQUEST_GATE_NAME, 6)),
         );
         let (runtime_url, runtime_handle) = start_server(runtime).await;
 

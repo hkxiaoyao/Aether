@@ -6,10 +6,8 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use aether_http::{jittered_delay_for_retry, HttpRetryConfig};
-use aether_runtime::{
-    init_reloadable_service_tracing, wait_for_shutdown_signal, ConcurrencyGate,
-    DistributedConcurrencyGate, RedisDistributedConcurrencyConfig,
-};
+use aether_runtime::{init_reloadable_service_tracing, wait_for_shutdown_signal, ConcurrencyGate};
+use aether_runtime_state::{RedisClientConfig, RuntimeSemaphoreConfig, RuntimeState};
 use arc_swap::ArcSwap;
 use tokio::sync::{watch, Mutex};
 use tokio::task::JoinHandle;
@@ -225,12 +223,18 @@ pub async fn run(mut config: Config, servers: Vec<ServerEntry>) -> anyhow::Resul
             .distributed_stream_redis_url
             .clone()
             .expect("distributed stream redis url should be validated");
-        let distributed_gate = DistributedConcurrencyGate::new_redis(
-            "proxy_streams_distributed",
-            limit,
-            RedisDistributedConcurrencyConfig {
+        let runtime = RuntimeState::redis(
+            RedisClientConfig {
                 url: redis_url,
                 key_prefix: state.config.distributed_stream_redis_key_prefix.clone(),
+            },
+            Some(state.config.distributed_stream_command_timeout_ms),
+        )
+        .await?;
+        let distributed_gate = runtime.semaphore(
+            "proxy_streams_distributed",
+            limit,
+            RuntimeSemaphoreConfig {
                 lease_ttl_ms: state.config.distributed_stream_lease_ttl_ms,
                 renew_interval_ms: state.config.distributed_stream_renew_interval_ms,
                 command_timeout_ms: Some(state.config.distributed_stream_command_timeout_ms),

@@ -1307,9 +1307,11 @@ async fn gateway_handles_admin_monitoring_cache_redis_keys_delete_locally_with_t
         .await
         .expect("request should succeed");
 
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.status(), StatusCode::OK);
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
-    assert_eq!(payload["detail"], json!("Redis 未启用"));
+    assert_eq!(payload["status"], json!("ok"));
+    assert_eq!(payload["category"], json!("upstream_models"));
+    assert_eq!(payload["deleted_count"], json!(0));
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();
@@ -1485,11 +1487,9 @@ async fn gateway_handles_admin_monitoring_model_mapping_stats_locally_with_trust
     assert_eq!(response.status(), StatusCode::OK);
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
     assert_eq!(payload["status"], json!("ok"));
-    assert_eq!(payload["data"]["available"], json!(false));
-    assert_eq!(
-        payload["data"]["message"],
-        json!("Redis 未启用，模型映射缓存不可用")
-    );
+    assert_eq!(payload["data"]["available"], json!(true));
+    assert_eq!(payload["data"]["backend"], json!("memory"));
+    assert_eq!(payload["data"]["total_keys"], json!(0));
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();
@@ -1707,8 +1707,9 @@ async fn gateway_handles_admin_monitoring_redis_keys_locally_with_trusted_admin_
     assert_eq!(response.status(), StatusCode::OK);
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
     assert_eq!(payload["status"], json!("ok"));
-    assert_eq!(payload["data"]["available"], json!(false));
-    assert_eq!(payload["data"]["message"], json!("Redis 未启用"));
+    assert_eq!(payload["data"]["available"], json!(true));
+    assert_eq!(payload["data"]["backend"], json!("memory"));
+    assert_eq!(payload["data"]["total_keys"], json!(0));
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();

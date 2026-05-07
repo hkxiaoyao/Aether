@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex};
+use std::time::Duration;
 
 use aether_contracts::{ExecutionPlan, ExecutionResult};
 use aether_data_contracts::repository::candidates::RequestCandidateReadRepository;
@@ -207,6 +208,13 @@ impl AppState {
             .lock()
             .expect("provider oauth state store should lock")
             .insert(format!("provider_oauth_state:{nonce}"), payload.to_string());
+        self.runtime_state.kv_set_local_nowait(
+            &format!("provider_oauth_state:{nonce}"),
+            payload.to_string(),
+            Some(Duration::from_secs(
+                aether_data::repository::provider_oauth::PROVIDER_OAUTH_STATE_TTL_SECS,
+            )),
+        );
         self
     }
 
@@ -225,6 +233,11 @@ impl AppState {
                 format!("device_auth_session:{session_id}"),
                 payload.to_string(),
             );
+        self.runtime_state.kv_set_local_nowait(
+            &format!("device_auth_session:{session_id}"),
+            payload.to_string(),
+            Some(Duration::from_secs(3600)),
+        );
         self
     }
 
@@ -243,6 +256,13 @@ impl AppState {
                 format!("provider_oauth_batch_task:{task_id}"),
                 payload.to_string(),
             );
+        self.runtime_state.kv_set_local_nowait(
+            &format!("provider_oauth_batch_task:{task_id}"),
+            payload.to_string(),
+            Some(Duration::from_secs(
+                aether_data::repository::provider_oauth::PROVIDER_OAUTH_BATCH_TASK_TTL_SECS,
+            )),
+        );
         self
     }
 
@@ -417,6 +437,11 @@ impl AppState {
             .lock()
             .expect("admin security blacklist store should lock");
         for (ip_address, reason) in entries {
+            self.runtime_state.kv_set_local_nowait(
+                &format!("ip:blacklist:{ip_address}"),
+                reason.clone(),
+                None,
+            );
             guard.insert(ip_address, reason);
         }
         drop(guard);
@@ -434,6 +459,8 @@ impl AppState {
             .lock()
             .expect("admin security whitelist store should lock");
         for ip_address in entries {
+            self.runtime_state
+                .set_add_local_nowait("ip:whitelist", &ip_address);
             guard.insert(ip_address);
         }
         drop(guard);
@@ -552,6 +579,15 @@ impl AppState {
                 })
                 .to_string(),
             );
+        self.runtime_state.kv_set_local_nowait(
+            &format!("email:verification:{}", email.trim().to_ascii_lowercase()),
+            json!({
+                "code": code,
+                "created_at": created_at.to_rfc3339(),
+            })
+            .to_string(),
+            Some(Duration::from_secs(600)),
+        );
         self
     }
 
@@ -566,6 +602,11 @@ impl AppState {
                 format!("email:verified:{}", email.trim().to_ascii_lowercase()),
                 "verified".to_string(),
             );
+        self.runtime_state.kv_set_local_nowait(
+            &format!("email:verified:{}", email.trim().to_ascii_lowercase()),
+            "verified".to_string(),
+            Some(Duration::from_secs(3600)),
+        );
         self
     }
 

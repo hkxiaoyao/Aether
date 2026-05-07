@@ -139,11 +139,8 @@ pub(super) async fn build_admin_pool_list_keys_response(
     let page_offset = page.saturating_sub(1).saturating_mul(page_size);
 
     let (keys, total) = if status == "cooldown" {
-        let cooldown_key_ids = if let Some(runner) = state.redis_kv_runner() {
-            read_admin_provider_pool_cooldown_key_ids(&runner, &provider.id).await
-        } else {
-            Vec::new()
-        };
+        let cooldown_key_ids =
+            read_admin_provider_pool_cooldown_key_ids(state.runtime_state(), &provider.id).await;
         let mut keys = if cooldown_key_ids.is_empty() {
             Vec::new()
         } else {
@@ -240,10 +237,10 @@ pub(super) async fn build_admin_pool_list_keys_response(
     let endpoints = state
         .list_provider_catalog_endpoints_by_provider_ids(std::slice::from_ref(&provider.id))
         .await?;
-    let runtime = match (state.redis_kv_runner(), pool_config.as_ref()) {
-        (Some(runner), Some(pool_config)) if !key_ids.is_empty() => {
+    let runtime = match pool_config.as_ref() {
+        Some(pool_config) if !key_ids.is_empty() => {
             read_admin_provider_pool_runtime_state(
-                &runner,
+                state.runtime_state(),
                 &provider.id,
                 &key_ids,
                 pool_config,

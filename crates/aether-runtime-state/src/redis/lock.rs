@@ -1,8 +1,8 @@
 use std::future::Future;
 use std::time::Duration;
 
-use crate::driver::redis::{RedisClient, RedisKeyspace};
 use crate::error::RedisResultExt;
+use crate::redis::{RedisClient, RedisKeyspace};
 use crate::DataLayerError;
 use uuid::Uuid;
 
@@ -242,7 +242,7 @@ fn validate_lease(lease: &RedisLockLease) -> Result<(), DataLayerError> {
 #[cfg(test)]
 mod tests {
     use super::{RedisLockKey, RedisLockLease, RedisLockRunner, RedisLockRunnerConfig};
-    use crate::driver::redis::{RedisClientConfig, RedisClientFactory};
+    use crate::redis::{RedisClientConfig, RedisClientFactory};
 
     fn sample_runner() -> RedisLockRunner {
         let client = RedisClientFactory::new(RedisClientConfig {

@@ -86,8 +86,25 @@ pub(super) async fn handle_admin_provider_ops_batch_balance(
                         cached
                     }
                     AdminProviderOpsBalanceCacheLookup::Miss => {
-                        spawn_admin_provider_ops_balance_refresh(state, &provider_id).await;
-                        admin_provider_ops_pending_balance_response("余额数据加载中，请稍后刷新")
+                        if state.runtime_state().is_memory() {
+                            let payload = admin_provider_ops_local_action_response(
+                                state,
+                                &provider_id,
+                                provider.as_ref(),
+                                &provider_endpoints,
+                                "query_balance",
+                                None,
+                            )
+                            .await;
+                            store_admin_provider_ops_balance_cache(state, &provider_id, &payload)
+                                .await;
+                            payload
+                        } else {
+                            spawn_admin_provider_ops_balance_refresh(state, &provider_id).await;
+                            admin_provider_ops_pending_balance_response(
+                                "余额数据加载中，请稍后刷新",
+                            )
+                        }
                     }
                     AdminProviderOpsBalanceCacheLookup::Unavailable => {
                         let payload = admin_provider_ops_local_action_response(

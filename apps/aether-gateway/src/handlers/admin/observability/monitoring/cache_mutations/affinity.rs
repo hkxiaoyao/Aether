@@ -3,15 +3,8 @@ use super::super::cache_affinity::{
     delete_admin_monitoring_cache_affinity_raw_keys,
 };
 use super::super::cache_identity::admin_monitoring_list_export_api_key_records_by_ids;
-use super::super::cache_route_helpers::{
-    admin_monitoring_cache_affinity_delete_params_from_path,
-    admin_monitoring_cache_affinity_unavailable_response,
-};
-use super::super::cache_store::{
-    admin_monitoring_has_runtime_scheduler_affinity_entries,
-    list_admin_monitoring_cache_affinity_records_by_affinity_keys,
-    load_admin_monitoring_cache_affinity_entries_for_tests,
-};
+use super::super::cache_route_helpers::admin_monitoring_cache_affinity_delete_params_from_path;
+use super::super::cache_store::list_admin_monitoring_cache_affinity_records_by_affinity_keys;
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::GatewayError;
 use aether_admin::observability::monitoring::{
@@ -75,13 +68,6 @@ pub(in super::super) async fn build_admin_monitoring_cache_affinity_delete_respo
             "缺少 affinity_key、endpoint_id、model_id 或 api_format",
         ));
     };
-
-    if state.redis_kv_runner().is_none()
-        && load_admin_monitoring_cache_affinity_entries_for_tests(state).is_empty()
-        && !admin_monitoring_has_runtime_scheduler_affinity_entries(state)
-    {
-        return Ok(admin_monitoring_cache_affinity_unavailable_response());
-    }
 
     let target_affinity_keys =
         std::iter::once(affinity_key.clone()).collect::<std::collections::BTreeSet<_>>();

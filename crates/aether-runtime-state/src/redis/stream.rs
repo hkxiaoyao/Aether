@@ -6,8 +6,8 @@ use redis::from_redis_value;
 use redis::streams::StreamReadReply;
 use redis::Value as RedisValue;
 
-use crate::driver::redis::{RedisClient, RedisKeyspace};
 use crate::error::{redis_error, RedisResultExt};
+use crate::redis::{RedisClient, RedisKeyspace};
 use crate::DataLayerError;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -575,7 +575,7 @@ mod tests {
         RedisStreamReclaimConfig, RedisStreamReclaimResult, RedisStreamRunner,
         RedisStreamRunnerConfig,
     };
-    use crate::driver::redis::{RedisClientConfig, RedisClientFactory};
+    use crate::redis::{RedisClientConfig, RedisClientFactory};
     use redis::Value as RedisValue;
 
     fn sample_runner() -> RedisStreamRunner {

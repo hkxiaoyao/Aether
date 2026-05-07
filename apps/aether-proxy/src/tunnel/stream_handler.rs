@@ -1515,7 +1515,10 @@ mod tests {
     use std::sync::{Mutex, Once};
     use std::task::{Context, Poll};
 
-    use aether_runtime::{ConcurrencyGate, DistributedConcurrencyGate};
+    use aether_runtime::ConcurrencyGate;
+    use aether_runtime_state::{
+        MemoryRuntimeStateConfig, RuntimeSemaphore, RuntimeSemaphoreConfig, RuntimeState,
+    };
     use arc_swap::ArcSwap;
     use axum::body::Body;
     use axum::http::{header, HeaderMap, Response, StatusCode};
@@ -2206,10 +2209,15 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_stream_when_distributed_admission_gate_is_saturated() {
-        let gate = Arc::new(DistributedConcurrencyGate::new_in_memory(
-            "proxy_streams_distributed",
-            1,
-        ));
+        let gate = Arc::new(
+            RuntimeState::memory(MemoryRuntimeStateConfig::default())
+                .semaphore(
+                    "proxy_streams_distributed",
+                    1,
+                    RuntimeSemaphoreConfig::default(),
+                )
+                .expect("distributed semaphore"),
+        );
         let _permit = gate.try_acquire().await.expect("first permit");
         let state = sample_state(None, Some(gate));
         let server = sample_server(&state);
@@ -2264,7 +2272,7 @@ mod tests {
 
     fn sample_state(
         stream_gate: Option<Arc<ConcurrencyGate>>,
-        distributed_stream_gate: Option<Arc<DistributedConcurrencyGate>>,
+        distributed_stream_gate: Option<Arc<RuntimeSemaphore>>,
     ) -> Arc<AppState> {
         ensure_rustls_provider();
         let config = Arc::new(sample_config());

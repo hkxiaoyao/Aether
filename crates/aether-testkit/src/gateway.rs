@@ -1,5 +1,5 @@
 use aether_gateway::{build_router_with_state, AppState, GatewayDataConfig};
-use aether_runtime::DistributedConcurrencyGate;
+use aether_runtime_state::RuntimeSemaphore;
 
 use crate::server::SpawnedServer;
 
@@ -8,7 +8,7 @@ pub struct GatewayHarnessConfig {
     pub upstream_base_url: String,
     pub data_config: Option<GatewayDataConfig>,
     pub max_in_flight_requests: Option<usize>,
-    pub distributed_request_gate: Option<DistributedConcurrencyGate>,
+    pub distributed_request_gate: Option<RuntimeSemaphore>,
     pub tunnel_instance_id: Option<String>,
     pub tunnel_relay_base_url: Option<String>,
 }

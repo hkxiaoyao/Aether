@@ -67,7 +67,7 @@ impl AppState {
     }
 
     pub fn has_usage_worker_backend(&self) -> bool {
-        self.data.has_usage_worker_runner()
+        self.data.has_usage_worker_queue()
     }
 
     pub fn has_wallet_data_reader(&self) -> bool {

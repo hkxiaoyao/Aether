@@ -1,5 +1,6 @@
-use aether_data::driver::redis::{RedisKvRunner, RedisKvRunnerConfig, RedisLockRunner};
 use aether_data::{DataBackends, DataLayerError, DatabaseDriver};
+use aether_runtime_state::RuntimeQueueStore;
+use std::sync::Arc;
 
 use super::{GatewayDataConfig, GatewayDataState, StoredSystemConfigEntry};
 
@@ -48,7 +49,7 @@ impl GatewayDataState {
                 usage_writer: None,
                 user_reader: None,
                 user_preferences: None,
-                usage_worker_runner: None,
+                usage_worker_queue: None,
                 video_task_reader: None,
                 video_task_writer: None,
                 wallet_reader: None,
@@ -86,7 +87,7 @@ impl GatewayDataState {
         let usage_reader = backends.read().usage();
         let usage_writer = backends.write().usage();
         let user_reader = backends.read().users();
-        let usage_worker_runner = backends.workers().redis();
+        let usage_worker_queue = None;
         let video_task_reader = backends.read().video_tasks();
         let video_task_writer = backends.write().video_tasks();
         let wallet_reader = backends.read().wallets();
@@ -124,7 +125,7 @@ impl GatewayDataState {
             usage_writer,
             user_reader,
             user_preferences: None,
-            usage_worker_runner,
+            usage_worker_queue,
             video_task_reader,
             video_task_writer,
             wallet_reader,
@@ -136,6 +137,14 @@ impl GatewayDataState {
 
     pub(crate) fn has_backends(&self) -> bool {
         self.backends.is_some()
+    }
+
+    pub(crate) fn with_usage_worker_queue(
+        mut self,
+        queue: Option<Arc<dyn RuntimeQueueStore>>,
+    ) -> Self {
+        self.usage_worker_queue = queue;
+        self
     }
 
     pub(crate) fn has_database_maintenance_backend(&self) -> bool {
@@ -219,13 +228,6 @@ impl GatewayDataState {
         self.global_model_writer.is_some()
     }
 
-    pub(crate) fn has_redis_backend(&self) -> bool {
-        self.backends
-            .as_ref()
-            .and_then(|backends| backends.redis())
-            .is_some()
-    }
-
     #[allow(dead_code)]
     pub(crate) fn has_minimal_candidate_selection_reader(&self) -> bool {
         self.minimal_candidate_selection_reader.is_some()
@@ -263,19 +265,6 @@ impl GatewayDataState {
                 .is_some_and(|backends| backends.has_system_config_backend())
     }
 
-    pub(crate) fn oauth_refresh_lock_runner(&self) -> Option<RedisLockRunner> {
-        self.backends
-            .as_ref()
-            .and_then(|backends| backends.locks().redis())
-    }
-
-    pub(crate) fn kv_runner(&self) -> Option<RedisKvRunner> {
-        self.backends
-            .as_ref()
-            .and_then(|backends| backends.redis())
-            .and_then(|backend| backend.kv_runner(RedisKvRunnerConfig::default()).ok())
-    }
-
     pub(crate) fn database_driver(&self) -> Option<DatabaseDriver> {
         self.backends
             .as_ref()
@@ -298,8 +287,8 @@ impl GatewayDataState {
         self.usage_writer.is_some()
     }
 
-    pub(crate) fn has_usage_worker_runner(&self) -> bool {
-        self.usage_worker_runner.is_some()
+    pub(crate) fn has_usage_worker_queue(&self) -> bool {
+        self.usage_worker_queue.is_some()
     }
 
     pub(crate) fn has_video_task_reader(&self) -> bool {

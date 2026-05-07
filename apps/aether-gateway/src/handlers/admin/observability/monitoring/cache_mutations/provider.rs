@@ -2,10 +2,7 @@ use super::super::cache_affinity::{
     clear_admin_monitoring_scheduler_affinity_entries,
     delete_admin_monitoring_cache_affinity_raw_keys,
 };
-use super::super::cache_route_helpers::{
-    admin_monitoring_cache_affinity_unavailable_response,
-    admin_monitoring_cache_provider_id_from_path,
-};
+use super::super::cache_route_helpers::admin_monitoring_cache_provider_id_from_path;
 use super::super::cache_store::list_admin_monitoring_cache_affinity_records;
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::GatewayError;
@@ -26,10 +23,6 @@ pub(in super::super) async fn build_admin_monitoring_cache_provider_delete_respo
     };
 
     let raw_affinities = list_admin_monitoring_cache_affinity_records(state).await?;
-    if state.redis_kv_runner().is_none() && raw_affinities.is_empty() {
-        return Ok(admin_monitoring_cache_affinity_unavailable_response());
-    }
-
     let target_affinities = raw_affinities
         .into_iter()
         .filter(|item| item.provider_id.as_deref() == Some(provider_id.as_str()))

@@ -2,37 +2,31 @@
 //!
 //! `DataBackends` chooses the configured SQL driver, builds low-level pools,
 //! instantiates concrete repositories, and exposes app-facing read/write,
-//! lease, lock, worker, and maintenance handles. Request-path repository SQL
+//! lease, transaction, and maintenance handles. Request-path repository SQL
 //! belongs in `repository/*`; backend-owned maintenance SQL lives in focused
 //! modules such as `stats`, `wallet`, and `system`. Pool/client primitives
 //! belong in `driver/*`.
 
 mod leases;
-mod locks;
 mod maintenance;
 mod mysql;
 mod postgres;
 mod read;
-mod redis;
 mod sqlite;
 mod stats;
 mod stats_common;
 mod system;
 mod transactions;
 mod wallet;
-mod workers;
 mod write;
 
 use crate::maintenance::DatabasePoolSummary;
 pub use leases::DataLeaseBackends;
-pub use locks::DataLockBackends;
 pub use mysql::MysqlBackend;
 pub use postgres::PostgresBackend;
 pub use read::DataReadRepositories;
-pub use redis::RedisBackend;
 pub use sqlite::SqliteBackend;
 pub use transactions::DataTransactionBackends;
-pub use workers::DataWorkerBackends;
 pub use write::DataWriteRepositories;
 
 use crate::database::DatabaseDriver;
@@ -51,12 +45,9 @@ pub struct DataBackends {
     postgres: Option<PostgresBackend>,
     mysql: Option<MysqlBackend>,
     sqlite: Option<SqliteBackend>,
-    redis: Option<RedisBackend>,
     leases: DataLeaseBackends,
-    locks: DataLockBackends,
     read: DataReadRepositories,
     transactions: DataTransactionBackends,
-    workers: DataWorkerBackends,
     write: DataWriteRepositories,
 }
 
@@ -111,17 +102,10 @@ impl DataBackends {
             }
             _ => None,
         };
-        let redis = config
-            .redis
-            .clone()
-            .map(RedisBackend::from_config)
-            .transpose()?;
         let leases = DataLeaseBackends::from_postgres(postgres.as_ref())?;
-        let locks = DataLockBackends::from_redis(redis.as_ref())?;
         let read =
             DataReadRepositories::from_backends(postgres.as_ref(), mysql.as_ref(), sqlite.as_ref());
         let transactions = DataTransactionBackends::from_postgres(postgres.as_ref());
-        let workers = DataWorkerBackends::from_redis(redis.as_ref())?;
         let write = DataWriteRepositories::from_backends(
             postgres.as_ref(),
             mysql.as_ref(),
@@ -133,12 +117,9 @@ impl DataBackends {
             postgres,
             mysql,
             sqlite,
-            redis,
             leases,
-            locks,
             read,
             transactions,
-            workers,
             write,
         })
     }
@@ -165,10 +146,6 @@ impl DataBackends {
         self.sqlite.as_ref()
     }
 
-    pub fn redis(&self) -> Option<&RedisBackend> {
-        self.redis.as_ref()
-    }
-
     pub fn read(&self) -> &DataReadRepositories {
         &self.read
     }
@@ -177,16 +154,8 @@ impl DataBackends {
         &self.leases
     }
 
-    pub fn locks(&self) -> &DataLockBackends {
-        &self.locks
-    }
-
     pub fn transactions(&self) -> &DataTransactionBackends {
         &self.transactions
-    }
-
-    pub fn workers(&self) -> &DataWorkerBackends {
-        &self.workers
     }
 
     pub fn write(&self) -> &DataWriteRepositories {
@@ -197,12 +166,9 @@ impl DataBackends {
         self.postgres.is_some()
             || self.mysql.is_some()
             || self.sqlite.is_some()
-            || self.redis.is_some()
             || self.leases.has_any()
-            || self.locks.has_any()
             || self.read.has_any()
             || self.transactions.has_any()
-            || self.workers.has_any()
             || self.write.has_any()
     }
 }
@@ -224,9 +190,7 @@ mod tests {
         assert!(backends.postgres().is_none());
         assert!(backends.mysql().is_none());
         assert!(backends.sqlite().is_none());
-        assert!(backends.redis().is_none());
         assert!(backends.leases().postgres().is_none());
-        assert!(backends.locks().redis().is_none());
         assert!(backends.read().auth_api_keys().is_none());
         assert!(backends.read().auth_modules().is_none());
         assert!(backends.read().billing().is_none());
@@ -241,7 +205,6 @@ mod tests {
         assert!(backends.read().usage().is_none());
         assert!(backends.read().video_tasks().is_none());
         assert!(backends.transactions().postgres().is_none());
-        assert!(backends.workers().redis().is_none());
         assert!(backends.write().settlement().is_none());
         assert!(backends.write().usage().is_none());
     }
@@ -260,7 +223,6 @@ mod tests {
                 statement_cache_capacity: 64,
                 require_ssl: false,
             }),
-            redis: None,
         })
         .expect("postgres backend should build");
 
@@ -308,7 +270,6 @@ mod tests {
                 pool: SqlPoolConfig::default(),
             }),
             postgres: None,
-            redis: None,
         })
         .expect("mysql backend should build");
 
@@ -360,7 +321,6 @@ mod tests {
                 pool: SqlPoolConfig::default(),
             }),
             postgres: None,
-            redis: None,
         })
         .expect("sqlite backend should build");
 
@@ -400,35 +360,5 @@ mod tests {
         assert!(backends.write().video_tasks().is_some());
         assert!(backends.write().wallets().is_some());
         assert!(backends.config().effective_database().is_some());
-    }
-
-    #[test]
-    fn builds_redis_backend_from_config() {
-        let backends = DataBackends::from_config(DataLayerConfig {
-            database: None,
-            postgres: None,
-            redis: Some(crate::driver::redis::RedisClientConfig {
-                url: "redis://127.0.0.1/0".to_string(),
-                key_prefix: Some("aether".to_string()),
-            }),
-        })
-        .expect("redis backend should build");
-
-        assert!(backends.has_runtime_backends());
-        assert!(backends.postgres().is_none());
-        assert!(backends.mysql().is_none());
-        assert!(backends.sqlite().is_none());
-        assert!(backends.redis().is_some());
-        assert!(backends.leases().postgres().is_none());
-        assert!(backends.locks().redis().is_some());
-        assert!(backends.workers().redis().is_some());
-        assert!(backends.read().auth_api_keys().is_none());
-        assert!(backends.read().auth_modules().is_none());
-        assert!(backends.read().global_models().is_none());
-        assert!(backends.read().oauth_providers().is_none());
-        assert!(backends.transactions().postgres().is_none());
-        assert!(backends.write().settlement().is_none());
-        assert!(backends.write().usage().is_none());
-        assert!(backends.config().redis.is_some());
     }
 }

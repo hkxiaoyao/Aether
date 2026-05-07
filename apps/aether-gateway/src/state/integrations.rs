@@ -159,19 +159,19 @@ impl ModelFetchRuntimeState for AppState {
         key_id: &str,
         cached_models: &[Value],
     ) {
-        let Some(runner) = AppState::redis_kv_runner(self) else {
-            return;
-        };
         let Ok(serialized) = serde_json::to_string(&aggregate_models_for_cache(cached_models))
         else {
             return;
         };
         let cache_key = format!("upstream_models:{provider_id}:{key_id}");
-        if let Err(err) = runner
-            .setex(
+        if let Err(err) = self
+            .runtime_state
+            .kv_set(
                 &cache_key,
-                &serialized,
-                Some(model_fetch_interval_minutes().saturating_mul(60)),
+                serialized,
+                Some(std::time::Duration::from_secs(
+                    model_fetch_interval_minutes().saturating_mul(60),
+                )),
             )
             .await
         {

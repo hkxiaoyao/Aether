@@ -102,7 +102,9 @@ pub(super) async fn handle_admin_provider_ops_action(
                 cached
             }
             AdminProviderOpsBalanceCacheLookup::Miss => {
-                if query_param_bool(query_string, "refresh", true) {
+                if query_param_bool(query_string, "refresh", true)
+                    && !state.runtime_state().is_memory()
+                {
                     spawn_admin_provider_ops_balance_refresh(state, provider_id).await;
                     admin_provider_ops_pending_balance_response("余额数据加载中，请稍后刷新")
                 } else {

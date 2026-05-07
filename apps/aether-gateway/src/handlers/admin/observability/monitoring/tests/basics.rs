@@ -1,4 +1,3 @@
-use super::super::cache_config::ADMIN_MONITORING_REDIS_REQUIRED_DETAIL;
 use super::super::test_support::{request_context, sample_key, sample_provider, sample_usage};
 use super::local_monitoring_response;
 use crate::AppState;
@@ -69,7 +68,7 @@ fn admin_monitoring_matches_cache_delete_shapes_and_trailing_slashes() {
 }
 
 #[tokio::test]
-async fn admin_monitoring_model_mapping_delete_requires_redis_without_runtime_or_test_entries() {
+async fn admin_monitoring_model_mapping_delete_returns_empty_runtime_payload_without_entries() {
     let state = AppState::new().expect("state should build");
     let context = request_context(
         http::Method::DELETE,
@@ -80,15 +79,13 @@ async fn admin_monitoring_model_mapping_delete_requires_redis_without_runtime_or
         .expect("handler should not error")
         .expect("monitoring route should be handled locally");
 
-    assert_eq!(response.status(), http::StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.status(), http::StatusCode::OK);
     let body = to_bytes(response.into_body(), usize::MAX)
         .await
         .expect("body should read");
     let payload: serde_json::Value = serde_json::from_slice(&body).expect("json body should parse");
-    assert_eq!(
-        payload,
-        json!({ "detail": ADMIN_MONITORING_REDIS_REQUIRED_DETAIL })
-    );
+    assert_eq!(payload["status"], json!("ok"));
+    assert_eq!(payload["deleted_count"], json!(0));
 }
 
 #[tokio::test]

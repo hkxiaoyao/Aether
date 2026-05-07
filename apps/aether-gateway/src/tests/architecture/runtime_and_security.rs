@@ -2,6 +2,15 @@ use std::path::{Path, PathBuf};
 
 use super::*;
 
+fn production_workspace_source(path: &Path) -> String {
+    let source = std::fs::read_to_string(path).expect("source file should be readable");
+    source
+        .split("#[cfg(test)]")
+        .next()
+        .unwrap_or(&source)
+        .to_string()
+}
+
 #[test]
 fn gateway_small_runtime_shims_stay_deleted() {
     for path in [
@@ -76,6 +85,120 @@ fn gateway_small_runtime_shims_stay_deleted() {
             !executor_mod.contains(forbidden),
             "executor/mod.rs should not keep deleted shim module {forbidden}"
         );
+    }
+}
+
+#[test]
+fn runtime_state_owns_redis_runtime_boundaries() {
+    let forbidden_business_patterns = [
+        "use redis::",
+        "redis::cmd",
+        "::redis::cmd",
+        "::redis::Script",
+        "aether_data::driver::redis",
+        "RedisKvRunner",
+        "RedisLockRunner",
+        "RedisStreamRunner",
+        "redis_kv_runner(",
+    ];
+    let mut violations = Vec::new();
+    for root in [
+        "apps/aether-gateway/src",
+        "crates/aether-runtime/src",
+        "crates/aether-usage-runtime/src",
+        "crates/aether-provider-transport/src",
+    ] {
+        for path in collect_workspace_rust_files(root) {
+            if path
+                .components()
+                .any(|component| component.as_os_str() == "tests")
+            {
+                continue;
+            }
+            let source = production_workspace_source(&path);
+            let hits = forbidden_business_patterns
+                .iter()
+                .filter(|pattern| source.contains(**pattern))
+                .copied()
+                .collect::<Vec<_>>();
+            if !hits.is_empty() {
+                violations.push(format!("{} -> {}", path.display(), hits.join(", ")));
+            }
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "business/runtime crates must use aether-runtime-state instead of Redis directly:\n{}",
+        violations.join("\n")
+    );
+
+    let mut runtime_state_violations = Vec::new();
+    for path in collect_workspace_rust_files("crates/aether-runtime-state/src") {
+        if path
+            .components()
+            .any(|component| component.as_os_str() == "redis")
+        {
+            continue;
+        }
+        let source = production_workspace_source(&path);
+        let hits = [
+            "use redis::",
+            "redis::cmd",
+            "::redis::cmd",
+            "::redis::Script",
+        ]
+        .iter()
+        .filter(|pattern| source.contains(**pattern))
+        .copied()
+        .collect::<Vec<_>>();
+        if !hits.is_empty() {
+            runtime_state_violations.push(format!("{} -> {}", path.display(), hits.join(", ")));
+        }
+    }
+    assert!(
+        runtime_state_violations.is_empty(),
+        "only crates/aether-runtime-state/src/redis may depend on the redis crate directly:\n{}",
+        runtime_state_violations.join("\n")
+    );
+}
+
+#[test]
+fn aether_data_stays_free_of_redis_runtime_backends() {
+    let cargo = read_workspace_file("crates/aether-data/Cargo.toml");
+    assert!(
+        !cargo.contains("redis.workspace"),
+        "aether-data should not depend on redis; runtime Redis belongs to aether-runtime-state"
+    );
+
+    for removed_path in [
+        "crates/aether-data/src/backend/redis.rs",
+        "crates/aether-data/src/backend/locks.rs",
+        "crates/aether-data/src/backend/workers.rs",
+        "crates/aether-data/src/driver/redis/mod.rs",
+    ] {
+        assert!(
+            !workspace_file_exists(removed_path),
+            "{removed_path} should stay removed from aether-data"
+        );
+    }
+
+    for path in collect_workspace_rust_files("crates/aether-data/src") {
+        let source = production_workspace_source(&path);
+        for forbidden in [
+            "pub mod redis",
+            "driver::redis",
+            "RedisBackend",
+            "DataLockBackends",
+            "DataWorkerBackends",
+            "redis::cmd",
+            "use redis::",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "{} should not keep Redis runtime backend surface {forbidden}",
+                path.display()
+            );
+        }
     }
 }
 

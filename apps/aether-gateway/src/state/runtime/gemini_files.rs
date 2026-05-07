@@ -77,16 +77,21 @@ impl AppState {
         value: &str,
         ttl_seconds: u64,
     ) -> Result<(), GatewayError> {
-        self.data
-            .cache_set_string_with_ttl(key, value, ttl_seconds)
+        self.runtime_state
+            .kv_set(
+                key,
+                value.to_string(),
+                Some(std::time::Duration::from_secs(ttl_seconds)),
+            )
             .await
             .map_err(|err| GatewayError::Internal(err.to_string()))
     }
 
     pub(crate) async fn cache_delete_key(&self, key: &str) -> Result<(), GatewayError> {
-        self.data
-            .cache_delete_key(key)
+        self.runtime_state
+            .kv_delete(key)
             .await
+            .map(|_| ())
             .map_err(|err| GatewayError::Internal(err.to_string()))
     }
 }

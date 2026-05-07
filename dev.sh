@@ -49,6 +49,49 @@ dotenv_has_key() {
     rg -q "^[[:space:]]*${key}=" .env
 }
 
+lowercase() {
+    printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
+}
+
+dev_uses_sqlite_database() {
+    local driver
+    local url
+    driver="$(lowercase "${AETHER_DATABASE_DRIVER:-}")"
+    url="${AETHER_DATABASE_URL:-${DATABASE_URL:-}}"
+
+    [[ "${driver}" == "sqlite" || "${url}" == sqlite:* ]]
+}
+
+dev_uses_postgres_database() {
+    local driver
+    local url
+    driver="$(lowercase "${AETHER_DATABASE_DRIVER:-}")"
+    url="${AETHER_DATABASE_URL:-${DATABASE_URL:-}}"
+
+    if [[ -z "${driver}" && -z "${url}" ]]; then
+        return 0
+    fi
+
+    [[ "${driver}" == "postgres" || "${driver}" == "postgresql" || "${url}" == postgres:* || "${url}" == postgresql:* ]]
+}
+
+dev_uses_redis_runtime() {
+    local backend
+    backend="$(lowercase "${AETHER_RUNTIME_BACKEND:-}")"
+
+    if [[ "${backend}" == "memory" ]]; then
+        return 1
+    fi
+    if [[ "${backend}" == "redis" ]]; then
+        return 0
+    fi
+    if dev_uses_sqlite_database; then
+        return 1
+    fi
+
+    return 0
+}
+
 print_dev_infra_hint() {
     echo "=> 本地开发依赖未就绪。"
     echo "=> 请先启动 Postgres / Redis:"
@@ -103,13 +146,13 @@ preflight_dev_infra() {
     local redis_port="${REDIS_PORT:-6379}"
     local redis_password="${REDIS_PASSWORD:-}"
 
-    if ! check_postgres_ready "${postgres_host}" "${postgres_port}"; then
+    if dev_uses_postgres_database && ! check_postgres_ready "${postgres_host}" "${postgres_port}"; then
         echo "=> PostgreSQL 不可用: ${postgres_host}:${postgres_port}"
         print_dev_infra_hint
         return 1
     fi
 
-    if ! check_redis_ready "${redis_host}" "${redis_port}" "${redis_password}"; then
+    if dev_uses_redis_runtime && ! check_redis_ready "${redis_host}" "${redis_port}" "${redis_password}"; then
         echo "=> Redis 不可用: ${redis_host}:${redis_port}"
         print_dev_infra_hint
         return 1
@@ -131,15 +174,21 @@ preflight_postgres_only() {
     return 0
 }
 
-# 构建 DATABASE_URL
-export DATABASE_URL="postgresql://${DB_USER:-postgres}:${DB_PASSWORD}@${DB_HOST:-localhost}:${DB_PORT:-5432}/${DB_NAME:-aether}"
-export REDIS_URL=redis://:${REDIS_PASSWORD}@${REDIS_HOST:-localhost}:${REDIS_PORT:-6379}/0
-
-if ! dotenv_has_key "AETHER_GATEWAY_DATA_POSTGRES_URL"; then
-    export AETHER_GATEWAY_DATA_POSTGRES_URL="${DATABASE_URL}"
+# 构建共享后端 URL。SQLite + memory 模式不注入 Redis，避免运行时误走 Redis 路径。
+if dev_uses_postgres_database; then
+    export DATABASE_URL="postgresql://${DB_USER:-postgres}:${DB_PASSWORD}@${DB_HOST:-localhost}:${DB_PORT:-5432}/${DB_NAME:-aether}"
+    if ! dotenv_has_key "AETHER_GATEWAY_DATA_POSTGRES_URL"; then
+        export AETHER_GATEWAY_DATA_POSTGRES_URL="${DATABASE_URL}"
+    fi
 fi
-if ! dotenv_has_key "AETHER_GATEWAY_DATA_REDIS_URL"; then
-    export AETHER_GATEWAY_DATA_REDIS_URL="${REDIS_URL}"
+if dev_uses_redis_runtime; then
+    export REDIS_URL=redis://:${REDIS_PASSWORD}@${REDIS_HOST:-localhost}:${REDIS_PORT:-6379}/0
+    if ! dotenv_has_key "AETHER_GATEWAY_DATA_REDIS_URL"; then
+        export AETHER_GATEWAY_DATA_REDIS_URL="${REDIS_URL}"
+    fi
+else
+    unset REDIS_URL
+    unset AETHER_GATEWAY_DATA_REDIS_URL
 fi
 if ! dotenv_has_key "AETHER_GATEWAY_DATA_ENCRYPTION_KEY"; then
     export AETHER_GATEWAY_DATA_ENCRYPTION_KEY="${ENCRYPTION_KEY:-}"
@@ -260,7 +309,7 @@ fi
 export AETHER_GATEWAY_VIDEO_TASK_TRUTH_SOURCE_MODE=${AETHER_GATEWAY_VIDEO_TASK_TRUTH_SOURCE_MODE:-rust-authoritative}
 
 if [ "${RUN_MIGRATE_ONLY}" = "true" ] && [ "${RUN_APPLY_BACKFILLS_ONLY}" = "true" ]; then
-    if ! preflight_postgres_only; then
+    if dev_uses_postgres_database && ! preflight_postgres_only; then
         exit 1
     fi
 
@@ -272,7 +321,7 @@ if [ "${RUN_MIGRATE_ONLY}" = "true" ] && [ "${RUN_APPLY_BACKFILLS_ONLY}" = "true
 fi
 
 if [ "${RUN_MIGRATE_ONLY}" = "true" ]; then
-    if ! preflight_postgres_only; then
+    if dev_uses_postgres_database && ! preflight_postgres_only; then
         exit 1
     fi
 
@@ -282,7 +331,7 @@ if [ "${RUN_MIGRATE_ONLY}" = "true" ]; then
 fi
 
 if [ "${RUN_APPLY_BACKFILLS_ONLY}" = "true" ]; then
-    if ! preflight_postgres_only; then
+    if dev_uses_postgres_database && ! preflight_postgres_only; then
         exit 1
     fi
 

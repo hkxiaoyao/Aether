@@ -1,12 +1,12 @@
 use aether_gateway::build_execution_runtime_router_with_request_gates;
-use aether_runtime::DistributedConcurrencyGate;
+use aether_runtime_state::RuntimeSemaphore;
 
 use crate::server::SpawnedServer;
 
 #[derive(Debug, Clone, Default)]
 pub struct ExecutionRuntimeHarnessConfig {
     pub max_in_flight_requests: Option<usize>,
-    pub distributed_request_gate: Option<DistributedConcurrencyGate>,
+    pub distributed_request_gate: Option<RuntimeSemaphore>,
 }
 
 #[derive(Debug)]
