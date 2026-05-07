@@ -2008,7 +2008,7 @@ fn ai_serving_video_routes_request_preparation_through_request_payload_seams() {
     }
 
     let provider_transport_video =
-        read_workspace_file("crates/aether-provider-transport/src/video.rs");
+        read_workspace_file("crates/aether-provider-transport/src/video/mod.rs");
     for pattern in [
         "pub enum ProviderVideoCreateFamily",
         "pub fn video_create_transport_unsupported_reason(",
@@ -2083,7 +2083,7 @@ fn ai_serving_files_routes_request_preparation_through_request_payload_seams() {
     }
 
     let provider_transport_files =
-        read_workspace_file("crates/aether-provider-transport/src/gemini_files.rs");
+        read_workspace_file("crates/aether-provider-transport/src/gemini_files/mod.rs");
     for pattern in [
         "pub fn gemini_files_transport_unsupported_reason(",
         "pub fn resolve_gemini_files_auth(",
@@ -2169,7 +2169,7 @@ fn ai_serving_image_routes_split_surface_normalization_and_transport_policy() {
     }
 
     let provider_transport_image =
-        read_workspace_file("crates/aether-provider-transport/src/openai_image.rs");
+        read_workspace_file("crates/aether-provider-transport/src/openai_image/mod.rs");
     for pattern in [
         "pub fn openai_image_transport_unsupported_reason(",
         "pub fn resolve_openai_image_auth(",
@@ -2622,7 +2622,7 @@ fn ai_serving_standard_attempts_consume_eligible_local_candidates_without_transp
     }
 
     let provider_transport_standard =
-        read_workspace_file("crates/aether-provider-transport/src/standard.rs");
+        read_workspace_file("crates/aether-provider-transport/src/standard/mod.rs");
     for pattern in [
         "pub struct StandardProviderRequestHeadersInput",
         "pub struct StandardProviderRequestHeaders",
@@ -2642,7 +2642,7 @@ fn ai_serving_standard_attempts_consume_eligible_local_candidates_without_transp
     }
 
     let provider_transport_request_url =
-        read_workspace_file("crates/aether-provider-transport/src/request_url.rs");
+        read_workspace_file("crates/aether-provider-transport/src/request_url/mod.rs");
     assert!(
         provider_transport_request_url.contains("pub fn build_kiro_cross_format_upstream_url("),
         "provider-transport request_url.rs should own Kiro cross-format URL hook"
@@ -2704,7 +2704,7 @@ fn ai_serving_standard_plan_builders_delegate_fallback_transport_policy() {
     }
 
     let provider_transport_standard =
-        read_workspace_file("crates/aether-provider-transport/src/standard.rs");
+        read_workspace_file("crates/aether-provider-transport/src/standard/mod.rs");
     for pattern in [
         "pub enum StandardPlanFallbackAcceptPolicy",
         "pub struct StandardPlanFallbackHeadersInput",
@@ -2972,7 +2972,7 @@ fn ai_serving_same_format_provider_request_policy_owns_provider_type_behavior() 
         "apps/aether-gateway/src/ai_serving/planner/passthrough/provider/family/request/policy.rs",
     );
     let provider_transport_policy =
-        read_workspace_file("crates/aether-provider-transport/src/same_format_provider.rs");
+        read_workspace_file("crates/aether-provider-transport/src/same_format_provider/mod.rs");
     for pattern in [
         "pub struct SameFormatProviderRequestBehavior {",
         "pub struct SameFormatProviderRequestBodyInput",

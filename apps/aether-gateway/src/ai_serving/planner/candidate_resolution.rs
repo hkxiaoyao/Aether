@@ -12,6 +12,7 @@ use aether_scheduler_core::{
     ClientSessionAffinity, SchedulerMinimalCandidateSelectionCandidate, SchedulerRankingOutcome,
 };
 
+use crate::ai_serving::transport::provider_types::provider_runtime_policy;
 use crate::ai_serving::{
     candidate_common_transport_skip_reason, candidate_transport_pair_skip_reason,
     CandidateTransportPolicyFacts, GatewayAuthApiKeySnapshot, GatewayProviderTransportSnapshot,
@@ -398,6 +399,8 @@ pub(crate) fn candidate_auth_channel_skip_reason(
     let request_auth_channel = normalize_request_auth_channel(request_auth_channel?)?;
     let upstream_auth_channel = resolve_transport_request_auth_channel(transport)?;
     if request_auth_channel == upstream_auth_channel
+        || provider_runtime_policy(&transport.provider.provider_type)
+            .allow_auth_channel_mismatch_by_default
         || allow_auth_channel_mismatch_for_format(transport)
     {
         None
@@ -418,12 +421,11 @@ fn resolve_transport_request_auth_channel(
     transport: &GatewayProviderTransportSnapshot,
 ) -> Option<&'static str> {
     let auth_type = resolve_transport_auth_type_for_endpoint_format(transport);
+    let provider_policy = provider_runtime_policy(&transport.provider.provider_type);
     match auth_type.as_str() {
         "api_key" => Some("api_key"),
         "bearer" => Some("bearer_like"),
-        "oauth" if provider_uses_bearer_like_oauth(&transport.provider.provider_type) => {
-            Some("bearer_like")
-        }
+        "oauth" if provider_policy.oauth_is_bearer_like => Some("bearer_like"),
         _ => None,
     }
 }
@@ -448,13 +450,6 @@ fn resolve_transport_auth_type_for_endpoint_format(
         .map(str::to_ascii_lowercase)
         .filter(|value| matches!(value.as_str(), "api_key" | "bearer"))
         .unwrap_or(default_auth_type)
-}
-
-fn provider_uses_bearer_like_oauth(provider_type: &str) -> bool {
-    matches!(
-        provider_type.trim().to_ascii_lowercase().as_str(),
-        "claude_code" | "chatgpt_web" | "gemini_cli" | "antigravity" | "kiro"
-    )
 }
 
 fn allow_auth_channel_mismatch_for_format(transport: &GatewayProviderTransportSnapshot) -> bool {
@@ -619,6 +614,16 @@ mod tests {
         assert_eq!(
             candidate_auth_channel_skip_reason(&transport, Some("api_key")),
             Some("auth_channel_mismatch")
+        );
+    }
+
+    #[test]
+    fn auth_channel_gate_allows_kiro_provider_mismatch_by_default() {
+        let mut transport = sample_transport("oauth");
+        transport.provider.provider_type = "kiro".to_string();
+        assert_eq!(
+            candidate_auth_channel_skip_reason(&transport, Some("api_key")),
+            None
         );
     }
 

@@ -43,11 +43,116 @@ pub struct FixedProviderEndpointTemplate {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderApiFormatInheritance {
+    None,
+    OAuth,
+    OAuthOrBearer,
+    OAuthOrConfiguredBearer,
+}
+
+impl ProviderApiFormatInheritance {
+    pub fn key_inherits_api_formats(
+        self,
+        auth_type: &str,
+        decrypted_auth_config: Option<&str>,
+    ) -> bool {
+        let auth_type = auth_type.trim().to_ascii_lowercase();
+        match self {
+            Self::None => false,
+            Self::OAuth => auth_type == "oauth",
+            Self::OAuthOrBearer => auth_type == "oauth" || auth_type == "bearer",
+            Self::OAuthOrConfiguredBearer => {
+                auth_type == "oauth"
+                    || auth_type == "bearer"
+                        && decrypted_auth_config
+                            .map(str::trim)
+                            .is_some_and(|value| !value.is_empty())
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderLocalEmbeddingSupport {
+    None,
+    AnyKnown,
+    OpenAi,
+    Gemini,
+    Jina,
+    Doubao,
+}
+
+impl ProviderLocalEmbeddingSupport {
+    pub fn supports_api_format(self, api_format: &str) -> bool {
+        let api_format = aether_ai_formats::normalize_api_format_alias(api_format);
+        match self {
+            Self::None => false,
+            Self::AnyKnown => matches!(
+                api_format.as_str(),
+                "openai:embedding"
+                    | "openai:rerank"
+                    | "gemini:embedding"
+                    | "jina:embedding"
+                    | "jina:rerank"
+                    | "doubao:embedding"
+            ),
+            Self::OpenAi => matches!(api_format.as_str(), "openai:embedding" | "openai:rerank"),
+            Self::Gemini => api_format == "gemini:embedding",
+            Self::Jina => matches!(api_format.as_str(), "jina:embedding" | "jina:rerank"),
+            Self::Doubao => api_format == "doubao:embedding",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProviderRuntimePolicy {
+    pub fixed_provider: bool,
+    pub api_format_inheritance: ProviderApiFormatInheritance,
+    pub enable_format_conversion_by_default: bool,
+    pub allow_auth_channel_mismatch_by_default: bool,
+    pub oauth_is_bearer_like: bool,
+    pub supports_model_fetch: bool,
+    pub supports_local_openai_chat_transport: bool,
+    pub supports_local_same_format_transport: bool,
+    pub local_embedding_support: ProviderLocalEmbeddingSupport,
+}
+
+impl ProviderRuntimePolicy {
+    pub const fn standard() -> Self {
+        Self {
+            fixed_provider: false,
+            api_format_inheritance: ProviderApiFormatInheritance::None,
+            enable_format_conversion_by_default: false,
+            allow_auth_channel_mismatch_by_default: false,
+            oauth_is_bearer_like: false,
+            supports_model_fetch: true,
+            supports_local_openai_chat_transport: true,
+            supports_local_same_format_transport: true,
+            local_embedding_support: ProviderLocalEmbeddingSupport::None,
+        }
+    }
+
+    pub fn key_inherits_api_formats(
+        self,
+        auth_type: &str,
+        decrypted_auth_config: Option<&str>,
+    ) -> bool {
+        self.api_format_inheritance
+            .key_inherits_api_formats(auth_type, decrypted_auth_config)
+    }
+
+    pub fn supports_local_embedding_transport(self, api_format: &str) -> bool {
+        self.local_embedding_support.supports_api_format(api_format)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FixedProviderTemplate {
     pub provider_type: &'static str,
     pub version: u32,
     pub base_url: &'static str,
     pub endpoints: &'static [FixedProviderEndpointTemplate],
+    pub runtime_policy: ProviderRuntimePolicy,
 }
 
 const EMPTY_ENDPOINT_CONFIG_DEFAULTS: &[FixedProviderEndpointConfigDefault] = &[];
@@ -56,6 +161,83 @@ const FORCE_STREAM_ENDPOINT_CONFIG_DEFAULTS: &[FixedProviderEndpointConfigDefaul
         key: "upstream_stream_policy",
         value: FixedProviderEndpointConfigValue::String("force_stream"),
     }];
+
+const STANDARD_RUNTIME_POLICY: ProviderRuntimePolicy = ProviderRuntimePolicy::standard();
+const CUSTOM_RUNTIME_POLICY: ProviderRuntimePolicy = ProviderRuntimePolicy {
+    local_embedding_support: ProviderLocalEmbeddingSupport::AnyKnown,
+    ..STANDARD_RUNTIME_POLICY
+};
+const OPENAI_RUNTIME_POLICY: ProviderRuntimePolicy = ProviderRuntimePolicy {
+    local_embedding_support: ProviderLocalEmbeddingSupport::OpenAi,
+    ..STANDARD_RUNTIME_POLICY
+};
+const GEMINI_RUNTIME_POLICY: ProviderRuntimePolicy = ProviderRuntimePolicy {
+    local_embedding_support: ProviderLocalEmbeddingSupport::Gemini,
+    ..STANDARD_RUNTIME_POLICY
+};
+const JINA_RUNTIME_POLICY: ProviderRuntimePolicy = ProviderRuntimePolicy {
+    local_embedding_support: ProviderLocalEmbeddingSupport::Jina,
+    ..STANDARD_RUNTIME_POLICY
+};
+const DOUBAO_RUNTIME_POLICY: ProviderRuntimePolicy = ProviderRuntimePolicy {
+    local_embedding_support: ProviderLocalEmbeddingSupport::Doubao,
+    ..STANDARD_RUNTIME_POLICY
+};
+
+const CLAUDE_CODE_RUNTIME_POLICY: ProviderRuntimePolicy = ProviderRuntimePolicy {
+    fixed_provider: true,
+    api_format_inheritance: ProviderApiFormatInheritance::OAuth,
+    enable_format_conversion_by_default: true,
+    oauth_is_bearer_like: true,
+    supports_model_fetch: false,
+    supports_local_openai_chat_transport: false,
+    supports_local_same_format_transport: false,
+    ..STANDARD_RUNTIME_POLICY
+};
+const CODEX_RUNTIME_POLICY: ProviderRuntimePolicy = ProviderRuntimePolicy {
+    fixed_provider: true,
+    api_format_inheritance: ProviderApiFormatInheritance::OAuth,
+    enable_format_conversion_by_default: true,
+    supports_model_fetch: false,
+    supports_local_openai_chat_transport: false,
+    ..STANDARD_RUNTIME_POLICY
+};
+const CHATGPT_WEB_RUNTIME_POLICY: ProviderRuntimePolicy = ProviderRuntimePolicy {
+    fixed_provider: true,
+    api_format_inheritance: ProviderApiFormatInheritance::OAuthOrBearer,
+    enable_format_conversion_by_default: true,
+    oauth_is_bearer_like: true,
+    supports_model_fetch: false,
+    supports_local_openai_chat_transport: false,
+    supports_local_same_format_transport: false,
+    ..STANDARD_RUNTIME_POLICY
+};
+const GEMINI_CLI_RUNTIME_POLICY: ProviderRuntimePolicy = ProviderRuntimePolicy {
+    fixed_provider: true,
+    api_format_inheritance: ProviderApiFormatInheritance::OAuth,
+    oauth_is_bearer_like: true,
+    supports_local_openai_chat_transport: false,
+    ..STANDARD_RUNTIME_POLICY
+};
+const VERTEX_AI_RUNTIME_POLICY: ProviderRuntimePolicy = ProviderRuntimePolicy {
+    fixed_provider: true,
+    api_format_inheritance: ProviderApiFormatInheritance::OAuth,
+    enable_format_conversion_by_default: true,
+    supports_model_fetch: false,
+    supports_local_openai_chat_transport: false,
+    supports_local_same_format_transport: false,
+    ..STANDARD_RUNTIME_POLICY
+};
+const ANTIGRAVITY_RUNTIME_POLICY: ProviderRuntimePolicy = ProviderRuntimePolicy {
+    fixed_provider: true,
+    api_format_inheritance: ProviderApiFormatInheritance::OAuth,
+    enable_format_conversion_by_default: true,
+    oauth_is_bearer_like: true,
+    supports_model_fetch: false,
+    supports_local_openai_chat_transport: false,
+    supports_local_same_format_transport: false,
+    ..STANDARD_RUNTIME_POLICY
+};
 
 const CLAUDE_CODE_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProviderTemplate {
     provider_type: "claude_code",
@@ -67,6 +249,7 @@ const CLAUDE_CODE_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProvider
         custom_path: None,
         config_defaults: EMPTY_ENDPOINT_CONFIG_DEFAULTS,
     }],
+    runtime_policy: CLAUDE_CODE_RUNTIME_POLICY,
 };
 
 const CODEX_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProviderTemplate {
@@ -93,6 +276,7 @@ const CODEX_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProviderTempla
             config_defaults: FORCE_STREAM_ENDPOINT_CONFIG_DEFAULTS,
         },
     ],
+    runtime_policy: CODEX_RUNTIME_POLICY,
 };
 
 const CHATGPT_WEB_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProviderTemplate {
@@ -105,6 +289,7 @@ const CHATGPT_WEB_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProvider
         custom_path: None,
         config_defaults: FORCE_STREAM_ENDPOINT_CONFIG_DEFAULTS,
     }],
+    runtime_policy: CHATGPT_WEB_RUNTIME_POLICY,
 };
 
 const KIRO_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProviderTemplate {
@@ -117,6 +302,7 @@ const KIRO_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProviderTemplat
         custom_path: None,
         config_defaults: EMPTY_ENDPOINT_CONFIG_DEFAULTS,
     }],
+    runtime_policy: crate::kiro::RUNTIME_POLICY,
 };
 
 const GEMINI_CLI_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProviderTemplate {
@@ -129,6 +315,7 @@ const GEMINI_CLI_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProviderT
         custom_path: None,
         config_defaults: EMPTY_ENDPOINT_CONFIG_DEFAULTS,
     }],
+    runtime_policy: GEMINI_CLI_RUNTIME_POLICY,
 };
 
 const VERTEX_AI_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProviderTemplate {
@@ -149,6 +336,7 @@ const VERTEX_AI_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProviderTe
             config_defaults: EMPTY_ENDPOINT_CONFIG_DEFAULTS,
         },
     ],
+    runtime_policy: VERTEX_AI_RUNTIME_POLICY,
 };
 
 const ANTIGRAVITY_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProviderTemplate {
@@ -161,19 +349,11 @@ const ANTIGRAVITY_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProvider
         custom_path: None,
         config_defaults: EMPTY_ENDPOINT_CONFIG_DEFAULTS,
     }],
+    runtime_policy: ANTIGRAVITY_RUNTIME_POLICY,
 };
 
 pub fn provider_type_is_fixed(provider_type: &str) -> bool {
-    matches!(
-        provider_type.trim().to_ascii_lowercase().as_str(),
-        "claude_code"
-            | "kiro"
-            | "codex"
-            | "chatgpt_web"
-            | "gemini_cli"
-            | "antigravity"
-            | "vertex_ai"
-    )
+    provider_runtime_policy(provider_type).fixed_provider
 }
 
 pub fn fixed_provider_key_inherits_api_formats(
@@ -181,23 +361,35 @@ pub fn fixed_provider_key_inherits_api_formats(
     auth_type: &str,
     decrypted_auth_config: Option<&str>,
 ) -> bool {
-    let provider_type = provider_type.trim().to_ascii_lowercase();
-    let auth_type = auth_type.trim().to_ascii_lowercase();
-    provider_type_is_fixed(&provider_type)
-        && (auth_type == "oauth"
-            || provider_type == "chatgpt_web" && auth_type == "bearer"
-            || provider_type == "kiro"
-                && auth_type == "bearer"
-                && decrypted_auth_config
-                    .map(str::trim)
-                    .is_some_and(|value| !value.is_empty()))
+    provider_runtime_policy(provider_type)
+        .key_inherits_api_formats(auth_type, decrypted_auth_config)
 }
 
 pub fn provider_type_enables_format_conversion_by_default(provider_type: &str) -> bool {
-    matches!(
-        provider_type.trim().to_ascii_lowercase().as_str(),
-        "claude_code" | "kiro" | "codex" | "chatgpt_web" | "antigravity" | "vertex_ai"
-    )
+    provider_runtime_policy(provider_type).enable_format_conversion_by_default
+}
+
+pub fn provider_type_allows_auth_channel_mismatch_by_default(provider_type: &str) -> bool {
+    provider_runtime_policy(provider_type).allow_auth_channel_mismatch_by_default
+}
+
+pub fn provider_type_oauth_is_bearer_like(provider_type: &str) -> bool {
+    provider_runtime_policy(provider_type).oauth_is_bearer_like
+}
+
+pub fn provider_runtime_policy(provider_type: &str) -> ProviderRuntimePolicy {
+    if let Some(template) = fixed_provider_template(provider_type) {
+        return template.runtime_policy;
+    }
+
+    match provider_type.trim().to_ascii_lowercase().as_str() {
+        "custom" => CUSTOM_RUNTIME_POLICY,
+        "openai" => OPENAI_RUNTIME_POLICY,
+        "gemini" | "google" => GEMINI_RUNTIME_POLICY,
+        "jina" => JINA_RUNTIME_POLICY,
+        "doubao" | "volcengine" => DOUBAO_RUNTIME_POLICY,
+        _ => STANDARD_RUNTIME_POLICY,
+    }
 }
 
 pub fn fixed_provider_template(provider_type: &str) -> Option<&'static FixedProviderTemplate> {
@@ -225,48 +417,22 @@ pub fn fixed_provider_endpoint_template_by_api_format(
 }
 
 pub fn provider_type_supports_model_fetch(provider_type: &str) -> bool {
-    !matches!(
-        provider_type.trim().to_ascii_lowercase().as_str(),
-        "vertex_ai" | "antigravity" | "codex" | "chatgpt_web" | "kiro" | "claude_code"
-    )
+    provider_runtime_policy(provider_type).supports_model_fetch
 }
 
 pub fn provider_type_supports_local_openai_chat_transport(provider_type: &str) -> bool {
-    !matches!(
-        provider_type.trim().to_ascii_lowercase().as_str(),
-        "antigravity"
-            | "claude_code"
-            | "codex"
-            | "chatgpt_web"
-            | "gemini_cli"
-            | "kiro"
-            | "vertex_ai"
-    )
+    provider_runtime_policy(provider_type).supports_local_openai_chat_transport
 }
 
 pub fn provider_type_supports_local_same_format_transport(provider_type: &str) -> bool {
-    !matches!(
-        provider_type.trim().to_ascii_lowercase().as_str(),
-        "antigravity" | "chatgpt_web" | "claude_code" | "kiro" | "vertex_ai"
-    )
+    provider_runtime_policy(provider_type).supports_local_same_format_transport
 }
 
 pub fn provider_type_supports_local_embedding_transport(
     provider_type: &str,
     api_format: &str,
 ) -> bool {
-    let provider_type = provider_type.trim().to_ascii_lowercase();
-    let api_format = aether_ai_formats::normalize_api_format_alias(api_format);
-
-    match api_format.as_str() {
-        "openai:embedding" => matches!(provider_type.as_str(), "custom" | "openai"),
-        "openai:rerank" => matches!(provider_type.as_str(), "custom" | "openai"),
-        "gemini:embedding" => matches!(provider_type.as_str(), "custom" | "gemini" | "google"),
-        "jina:embedding" => matches!(provider_type.as_str(), "custom" | "jina"),
-        "jina:rerank" => matches!(provider_type.as_str(), "custom" | "jina"),
-        "doubao:embedding" => matches!(provider_type.as_str(), "custom" | "doubao" | "volcengine"),
-        _ => false,
-    }
+    provider_runtime_policy(provider_type).supports_local_embedding_transport(api_format)
 }
 
 pub fn is_codex_cli_backend_url(url: &str) -> bool {
@@ -361,7 +527,9 @@ pub const ADMIN_PROVIDER_OAUTH_TEMPLATE_TYPES: &[&str] = &[
 mod tests {
     use super::{
         fixed_provider_endpoint_template_by_api_format, fixed_provider_key_inherits_api_formats,
-        fixed_provider_template, provider_type_supports_local_embedding_transport,
+        fixed_provider_template, provider_runtime_policy,
+        provider_type_allows_auth_channel_mismatch_by_default, provider_type_oauth_is_bearer_like,
+        provider_type_supports_local_embedding_transport,
         provider_type_supports_local_same_format_transport, FixedProviderEndpointConfigValue,
     };
 
@@ -451,6 +619,52 @@ mod tests {
         assert!(!fixed_provider_key_inherits_api_formats(
             "custom", "oauth", None
         ));
+    }
+
+    #[test]
+    fn kiro_allows_auth_channel_mismatch_by_default() {
+        let policy = provider_runtime_policy("kiro");
+        assert!(policy.fixed_provider);
+        assert!(policy.enable_format_conversion_by_default);
+        assert!(policy.oauth_is_bearer_like);
+        assert!(!policy.supports_model_fetch);
+        assert!(!policy.supports_local_openai_chat_transport);
+        assert!(!policy.supports_local_same_format_transport);
+        assert!(policy.key_inherits_api_formats("oauth", None));
+        assert!(policy.key_inherits_api_formats("bearer", Some("{}")));
+        assert!(!policy.key_inherits_api_formats("bearer", None));
+
+        assert!(provider_type_allows_auth_channel_mismatch_by_default(
+            "kiro"
+        ));
+        assert!(provider_type_allows_auth_channel_mismatch_by_default(
+            " KIRO "
+        ));
+        assert!(!provider_type_allows_auth_channel_mismatch_by_default(
+            "claude_code"
+        ));
+        assert!(!provider_type_allows_auth_channel_mismatch_by_default(
+            "custom"
+        ));
+    }
+
+    #[test]
+    fn runtime_policy_preserves_other_fixed_provider_behavior() {
+        let codex = provider_runtime_policy("codex");
+        assert!(codex.fixed_provider);
+        assert!(codex.enable_format_conversion_by_default);
+        assert!(!codex.oauth_is_bearer_like);
+        assert!(!codex.supports_model_fetch);
+        assert!(!codex.supports_local_openai_chat_transport);
+        assert!(codex.supports_local_same_format_transport);
+
+        let gemini_cli = provider_runtime_policy("gemini_cli");
+        assert!(gemini_cli.fixed_provider);
+        assert!(!gemini_cli.enable_format_conversion_by_default);
+        assert!(provider_type_oauth_is_bearer_like("gemini_cli"));
+        assert!(gemini_cli.supports_model_fetch);
+        assert!(!gemini_cli.supports_local_openai_chat_transport);
+        assert!(gemini_cli.supports_local_same_format_transport);
     }
 
     #[test]

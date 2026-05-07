@@ -7,6 +7,22 @@ mod refresh;
 mod request;
 mod url;
 
+use crate::provider_types::{
+    ProviderApiFormatInheritance, ProviderLocalEmbeddingSupport, ProviderRuntimePolicy,
+};
+
+pub const RUNTIME_POLICY: ProviderRuntimePolicy = ProviderRuntimePolicy {
+    fixed_provider: true,
+    api_format_inheritance: ProviderApiFormatInheritance::OAuthOrConfiguredBearer,
+    enable_format_conversion_by_default: true,
+    allow_auth_channel_mismatch_by_default: true,
+    oauth_is_bearer_like: true,
+    supports_model_fetch: false,
+    supports_local_openai_chat_transport: false,
+    supports_local_same_format_transport: false,
+    local_embedding_support: ProviderLocalEmbeddingSupport::None,
+};
+
 pub use auth::{
     build_kiro_request_auth_from_config, is_kiro_claude_messages_transport,
     is_kiro_provider_transport, resolve_local_kiro_bearer_auth, resolve_local_kiro_request_auth,
