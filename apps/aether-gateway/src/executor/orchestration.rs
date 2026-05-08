@@ -18,7 +18,8 @@ use crate::ai_serving::api::{
     resolve_claude_stream_spec, resolve_claude_sync_spec, resolve_gemini_stream_spec,
     resolve_gemini_sync_spec, resolve_local_same_format_stream_spec,
     resolve_local_same_format_sync_spec, set_local_openai_chat_execution_exhausted_diagnostic,
-    AiStreamAttempt, AiSyncAttempt, LocalStandardSpec, EXECUTION_RUNTIME_STREAM_DECISION_ACTION,
+    set_local_openai_image_execution_exhausted_diagnostic, AiStreamAttempt, AiSyncAttempt,
+    LocalStandardSpec, EXECUTION_RUNTIME_STREAM_DECISION_ACTION,
     EXECUTION_RUNTIME_SYNC_DECISION_ACTION,
 };
 use crate::control::GatewayControlDecision;
@@ -457,7 +458,7 @@ pub(crate) async fn maybe_execute_sync_via_local_image_decision(
     decision: &GatewayControlDecision,
     plan_kind: &str,
 ) -> Result<LocalExecutionRequestOutcome, GatewayError> {
-    let Some((attempt_source, _candidate_count)) = build_local_image_sync_attempt_source_for_kind(
+    let Some((attempt_source, candidate_count)) = build_local_image_sync_attempt_source_for_kind(
         state,
         parts,
         body_json,
@@ -471,7 +472,7 @@ pub(crate) async fn maybe_execute_sync_via_local_image_decision(
         return Ok(LocalExecutionRequestOutcome::NoPath);
     };
 
-    execute_sync_attempt_source::<AiSyncAttempt, _>(
+    let outcome = execute_sync_attempt_source::<AiSyncAttempt, _>(
         state,
         parts,
         trace_id,
@@ -479,7 +480,20 @@ pub(crate) async fn maybe_execute_sync_via_local_image_decision(
         plan_kind,
         attempt_source,
     )
-    .await
+    .await?;
+
+    if let LocalExecutionRequestOutcome::Exhausted(_) = &outcome {
+        set_local_openai_image_execution_exhausted_diagnostic(
+            state,
+            trace_id,
+            decision,
+            plan_kind,
+            body_json,
+            candidate_count,
+        );
+    }
+
+    Ok(outcome)
 }
 
 pub(crate) async fn maybe_execute_stream_via_local_gemini_files_decision(
@@ -517,29 +531,41 @@ pub(crate) async fn maybe_execute_stream_via_local_image_decision(
     decision: &GatewayControlDecision,
     plan_kind: &str,
 ) -> Result<LocalExecutionRequestOutcome, GatewayError> {
-    let Some((attempt_source, _candidate_count)) =
-        build_local_image_stream_attempt_source_for_kind(
-            state,
-            parts,
-            body_json,
-            body_base64,
-            trace_id,
-            decision,
-            plan_kind,
-        )
-        .await?
+    let Some((attempt_source, candidate_count)) = build_local_image_stream_attempt_source_for_kind(
+        state,
+        parts,
+        body_json,
+        body_base64,
+        trace_id,
+        decision,
+        plan_kind,
+    )
+    .await?
     else {
         return Ok(LocalExecutionRequestOutcome::NoPath);
     };
 
-    execute_stream_attempt_source::<AiStreamAttempt, _>(
+    let outcome = execute_stream_attempt_source::<AiStreamAttempt, _>(
         state,
         trace_id,
         decision,
         plan_kind,
         attempt_source,
     )
-    .await
+    .await?;
+
+    if let LocalExecutionRequestOutcome::Exhausted(_) = &outcome {
+        set_local_openai_image_execution_exhausted_diagnostic(
+            state,
+            trace_id,
+            decision,
+            plan_kind,
+            body_json,
+            candidate_count,
+        );
+    }
+
+    Ok(outcome)
 }
 
 pub(crate) async fn maybe_execute_sync_via_local_video_decision(

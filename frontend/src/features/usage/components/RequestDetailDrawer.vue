@@ -751,6 +751,7 @@ import Tabs from '@/components/ui/tabs.vue'
 import TabsContent from '@/components/ui/tabs-content.vue'
 import { Check, Columns2, RefreshCw, X, Monitor, Server, MessageSquareText, Code2, Terminal, Play } from 'lucide-vue-next'
 import { dashboardApi, type RequestDetail, type RequestErrorDomain } from '@/api/dashboard'
+import type { ImageProgress, RequestTrace } from '@/api/requestTrace'
 import { formatApiFormat } from '@/api/endpoints/types/api-format'
 import { formatShortRequestId } from '@/utils/format'
 import { log } from '@/utils/logger'
@@ -792,6 +793,15 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   close: []
+  requestState: [state: {
+    id: string
+    requestId?: string | null
+    status?: 'pending' | 'streaming' | 'completed' | 'failed' | 'cancelled'
+    statusCode?: number | null
+    responseTimeMs?: number | null
+    imageProgress?: ImageProgress | null
+    errorMessage?: string | null
+  }]
 }>()
 
 const loading = ref(false)
@@ -868,9 +878,52 @@ function formatErrorDomainMeta(domain: NormalizedErrorDomain): string {
   return parts.join(' · ')
 }
 
-function handleTraceState(state: { loaded: boolean, hasTrace: boolean }) {
+function mapTraceFinalStatusToRequestStatus(
+  status?: RequestTrace['final_status'] | null
+): 'pending' | 'streaming' | 'completed' | 'failed' | 'cancelled' | undefined {
+  switch (status) {
+    case 'success':
+      return 'completed'
+    case 'failed':
+      return 'failed'
+    case 'cancelled':
+      return 'cancelled'
+    case 'streaming':
+      return 'streaming'
+    case 'pending':
+      return 'pending'
+    default:
+      return undefined
+  }
+}
+
+function handleTraceState(state: {
+  loaded: boolean
+  hasTrace: boolean
+  finalStatus?: RequestTrace['final_status'] | null
+  statusCode?: number | null
+  latencyMs?: number | null
+  imageProgress?: ImageProgress | null
+  errorMessage?: string | null
+}) {
   timelineLoaded.value = state.loaded
   timelineHasTrace.value = state.hasTrace
+  const id = props.requestId
+  if (!id) return
+
+  const status = mapTraceFinalStatusToRequestStatus(state.finalStatus)
+  const imageFailed = state.imageProgress?.phase === 'failed'
+  if (!status && !state.imageProgress && state.statusCode == null && state.latencyMs == null) return
+
+  emit('requestState', {
+    id,
+    requestId: detail.value?.request_id || detail.value?.id || null,
+    status: imageFailed ? 'failed' : status,
+    statusCode: state.statusCode ?? undefined,
+    responseTimeMs: state.latencyMs ?? undefined,
+    imageProgress: state.imageProgress ?? null,
+    errorMessage: state.errorMessage ?? undefined,
+  })
 }
 
 function toNumber(value: unknown): number | null {
