@@ -96,7 +96,9 @@ pub use crate::formats::shared::response::{
 };
 pub use crate::formats::shared::routing::{
     is_matching_stream_http_request, is_matching_stream_request,
-    resolve_execution_runtime_stream_plan_kind, resolve_execution_runtime_sync_plan_kind,
+    request_path_implies_stream_request, resolve_execution_runtime_stream_plan_kind,
+    resolve_execution_runtime_sync_plan_kind, sanitize_request_path,
+    sanitize_request_path_and_query, sanitize_request_query_string,
     supports_stream_execution_decision_kind, supports_sync_execution_decision_kind,
 };
 pub use crate::formats::shared::sse::{encode_done_sse, encode_json_sse, map_claude_stop_reason};
