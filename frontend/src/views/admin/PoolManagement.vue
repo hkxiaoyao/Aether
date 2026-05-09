@@ -549,7 +549,7 @@
                     class="max-w-[208px] space-y-2"
                   >
                     <div
-                      v-for="(item, idx) in quotaProgressMap[key.key_id].slice(0, 2)"
+                      v-for="(item, idx) in quotaProgressMap[key.key_id]"
                       :key="`${key.key_id}-quota-${idx}`"
                       class="flex flex-col gap-1 min-w-[140px] max-w-[208px]"
                     >
@@ -2064,6 +2064,27 @@ function refreshOverviewInBackground(): void {
   void loadOverview()
 }
 
+function applyQuotaRefreshResultToCurrentPage(result: Awaited<ReturnType<typeof refreshProviderQuota>>): void {
+  const successfulResults = Array.isArray(result.results)
+    ? result.results.filter((item) => item.status === 'success' && item.quota_snapshot)
+    : []
+  if (successfulResults.length === 0) return
+
+  const quotaByKeyId = new Map(successfulResults.map((item) => [item.key_id, item.quota_snapshot!]))
+  keyPage.value.keys = keyPage.value.keys.map((key) => {
+    const quotaSnapshot = quotaByKeyId.get(key.key_id)
+    if (!quotaSnapshot) return key
+    return {
+      ...key,
+      quota_updated_at: quotaSnapshot.updated_at ?? quotaSnapshot.observed_at ?? key.quota_updated_at ?? null,
+      status_snapshot: {
+        ...(key.status_snapshot ?? {}),
+        quota: quotaSnapshot,
+      },
+    }
+  })
+}
+
 function normalizeQuotaUpdatedAt(raw: number | null | undefined): number | null {
   const value = Number(raw ?? 0)
   if (!Number.isFinite(value) || value <= 0) return null
@@ -2131,6 +2152,7 @@ async function refreshCurrentPageQuotaInBackground(
   refreshingCurrentPageQuota.value = true
   try {
     const result = await refreshProviderQuota(providerId, quotaStats.eligibleIds)
+    applyQuotaRefreshResultToCurrentPage(result)
     const successCount = Number(result.success || 0)
     const failedCount = Number(result.failed || 0)
     const skippedCount = Math.max(quotaStats.total - quotaStats.eligibleIds.length, 0)
@@ -3118,6 +3140,8 @@ function getAccountAlertTitle(key: PoolKeyDetail): string {
 function normalizeQuotaLabel(label: string): string {
   const normalized = label.trim()
   if (!normalized) return '额度'
+  if (/spark\s*5h/i.test(normalized) || normalized.includes('Spark5H')) return 'Spark5H'
+  if (/spark/i.test(normalized) && normalized.includes('周')) return 'Spark周'
   if (normalized.includes('5H')) return '5H'
   if (normalized.includes('周')) return '周'
   if (normalized.includes('最低剩余')) return '最低'
@@ -3128,13 +3152,15 @@ function normalizeQuotaLabel(label: string): string {
 function getQuotaProgressLabel(label: string): string {
   if (label === '5H') return '5H'
   if (label === '周') return '周'
+  if (label === 'Spark5H') return 'Spark5H'
+  if (label === 'Spark周') return 'Spark周'
   if (label === '最低') return '最低'
   if (label === '剩余') return '剩余'
   return label
 }
 
 function getQuotaProgressCountdown(item: QuotaProgressItem) {
-  if (item.label !== '5H' && item.label !== '周') return null
+  if (!['5H', '周', 'Spark5H', 'Spark周'].includes(item.label)) return null
   if (item.resetAtSeconds == null && item.resetSeconds == null) return null
   return getCodexResetCountdown(
     item.resetAtSeconds,
@@ -3180,9 +3206,11 @@ function getQuotaFallbackText(key: PoolKeyDetail): string | null {
 function getQuotaLabelOrder(label: string): number {
   if (label === '5H') return 0
   if (label === '周') return 1
-  if (label === '剩余') return 2
-  if (label === '最低') return 3
-  if (label === '生图') return 4
+  if (label === 'Spark5H') return 2
+  if (label === 'Spark周') return 3
+  if (label === '剩余') return 4
+  if (label === '最低') return 5
+  if (label === '生图') return 6
   return 10
 }
 
@@ -3296,7 +3324,12 @@ function buildQuotaProgressItemsFromSnapshot(key: PoolKeyDetail): QuotaProgressI
 
   if (providerType === 'codex') {
     const items: QuotaProgressItem[] = []
-    for (const [label, code] of [['5H', '5h'], ['周', 'weekly']] as const) {
+    for (const [label, code] of [
+      ['5H', '5h'],
+      ['周', 'weekly'],
+      ['Spark5H', 'spark_5h'],
+      ['Spark周', 'spark_weekly'],
+    ] as const) {
       const window = getQuotaSnapshotWindow(quota, code)
       const remainingPercent = getQuotaWindowRemainingPercent(window)
       if (remainingPercent == null) continue
@@ -3405,10 +3438,17 @@ function resolveCodexQuotaCountdown(
   key: PoolKeyDetail,
   label: string
 ): Pick<QuotaProgressItem, 'resetAtSeconds' | 'resetSeconds' | 'updatedAtSeconds'> | null {
-  if (label !== '5H' && label !== '周') return null
+  const codexWindowCodeByLabel: Record<string, string> = {
+    '5H': '5h',
+    '周': 'weekly',
+    Spark5H: 'spark_5h',
+    Spark周: 'spark_weekly',
+  }
+  const windowCode = codexWindowCodeByLabel[label]
+  if (!windowCode) return null
 
   const codexSnapshot = getCodexQuotaSnapshot(key)
-  const snapshotWindow = getQuotaSnapshotWindow(codexSnapshot, label === '周' ? 'weekly' : '5h')
+  const snapshotWindow = getQuotaSnapshotWindow(codexSnapshot, windowCode)
   if (!snapshotWindow) return null
 
   const resetAtSeconds = normalizeUnixSeconds(snapshotWindow.reset_at ?? null)
