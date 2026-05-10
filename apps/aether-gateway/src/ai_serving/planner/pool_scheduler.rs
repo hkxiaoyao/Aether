@@ -1,13 +1,15 @@
 use std::collections::{btree_map::Entry, BTreeMap, BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
+use aether_admin::provider::pool as admin_provider_pool_pure;
 use aether_ai_serving::{
-    run_ai_pool_scheduler, AiPoolCandidateFacts, AiPoolCandidateInput,
-    AiPoolCandidateOrchestration, AiPoolCatalogKeyContext, AiPoolRuntimeState,
-    AiPoolSchedulingConfig, AiPoolSchedulingPreset,
+    normalize_enabled_ai_pool_presets, run_ai_pool_scheduler, AiPoolCandidateFacts,
+    AiPoolCandidateInput, AiPoolCandidateOrchestration, AiPoolCatalogKeyContext,
+    AiPoolRuntimeState, AiPoolSchedulingConfig, AiPoolSchedulingPreset,
 };
 use aether_data_contracts::repository::candidate_selection::{
-    StoredMinimalCandidateSelectionRow, StoredPoolKeyCandidateRowsQuery,
+    StoredMinimalCandidateSelectionRow, StoredPoolKeyCandidateOrder,
+    StoredPoolKeyCandidateRowsQuery,
 };
 use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey;
 use serde_json::{Map, Value};
@@ -24,7 +26,7 @@ use crate::clock::current_unix_ms;
 use crate::handlers::shared::provider_pool::admin_provider_pool_config_from_config_value;
 use crate::handlers::shared::provider_pool::read_admin_provider_pool_runtime_state;
 use crate::handlers::shared::provider_pool::{
-    AdminProviderPoolConfig, AdminProviderPoolRuntimeState,
+    try_claim_admin_provider_pool_key, AdminProviderPoolConfig, AdminProviderPoolRuntimeState,
 };
 use crate::handlers::shared::{
     parse_catalog_auth_config_json, provider_key_health_summary,
@@ -167,12 +169,15 @@ pub(crate) struct PoolKeyCursor<'a> {
     sticky_session_token: Option<String>,
     requested_model: Option<String>,
     request_auth_channel: Option<String>,
+    pool_key_order: StoredPoolKeyCandidateOrder,
     next_offset: u32,
     scanned_keys: u32,
     page_size: u32,
     max_scanned_keys: u32,
     skip_reason_counts: BTreeMap<&'static str, u32>,
     next_pool_key_index: u32,
+    sticky_candidate_loaded: bool,
+    seen_key_ids: BTreeSet<String>,
     queued_candidates: VecDeque<EligibleLocalExecutionCandidate>,
     skipped_candidates: Vec<SkippedLocalExecutionCandidate>,
     exhausted_logged: bool,
@@ -186,18 +191,22 @@ impl<'a> PoolKeyCursor<'a> {
         requested_model: Option<&str>,
         request_auth_channel: Option<&str>,
     ) -> Self {
+        let pool_key_order = pool_key_candidate_order_for_group(&group);
         Self {
             state,
             group,
             sticky_session_token: sticky_session_token.map(str::to_string),
             requested_model: requested_model.map(str::to_string),
             request_auth_channel: request_auth_channel.map(str::to_string),
+            pool_key_order,
             next_offset: 0,
             scanned_keys: 0,
             page_size: DEFAULT_POOL_KEY_PAGE_SIZE,
             max_scanned_keys: DEFAULT_POOL_MAX_SCANNED_KEYS,
             skip_reason_counts: BTreeMap::new(),
             next_pool_key_index: 0,
+            sticky_candidate_loaded: false,
+            seen_key_ids: BTreeSet::new(),
             queued_candidates: VecDeque::new(),
             skipped_candidates: Vec::new(),
             exhausted_logged: false,
@@ -206,26 +215,21 @@ impl<'a> PoolKeyCursor<'a> {
 
     pub(crate) async fn next_key(&mut self) -> Option<EligibleLocalExecutionCandidate> {
         loop {
-            if let Some(candidate) = self.queued_candidates.pop_front() {
+            if let Some(candidate) = self.next_queued_candidate().await {
                 return Some(candidate);
             }
 
-            let page_candidates = self.next_page_candidates().await?;
-            let (mut page_scheduled, mut page_skipped) = schedule_pool_page_candidates(
-                self.state,
-                page_candidates,
-                self.sticky_session_token.as_deref(),
-            )
-            .await;
-            for skipped_candidate in &page_skipped {
-                self.record_skip_reason(skipped_candidate.skip_reason);
+            if !self.sticky_candidate_loaded {
+                self.sticky_candidate_loaded = true;
+                if let Some(candidate) = self.sticky_candidate().await {
+                    self.queued_candidates.push_back(candidate);
+                    continue;
+                }
             }
-            for candidate in &mut page_scheduled {
-                candidate.orchestration.pool_key_index = Some(self.next_pool_key_index);
-                self.next_pool_key_index = self.next_pool_key_index.saturating_add(1);
+
+            if !self.refill_queued_candidates().await {
+                return None;
             }
-            self.queued_candidates.extend(page_scheduled);
-            self.skipped_candidates.append(&mut page_skipped);
         }
     }
 
@@ -264,6 +268,7 @@ impl<'a> PoolKeyCursor<'a> {
             endpoint_id: self.group.candidate.endpoint_id.clone(),
             model_id: self.group.candidate.model_id.clone(),
             selected_provider_model_name: self.group.candidate.selected_provider_model_name.clone(),
+            order: self.pool_key_order.clone(),
             offset: self.next_offset,
             limit,
         };
@@ -299,6 +304,162 @@ impl<'a> PoolKeyCursor<'a> {
         Some(self.build_page_eligible_candidates(rows).await)
     }
 
+    async fn sticky_candidate(&mut self) -> Option<EligibleLocalExecutionCandidate> {
+        let pool_config = pool_config_for_candidate(&self.group)?;
+        let runtime = read_admin_provider_pool_runtime_state(
+            self.state.app().runtime_state.as_ref(),
+            self.group.candidate.provider_id.as_str(),
+            &[],
+            &pool_config,
+            self.sticky_session_token.as_deref(),
+        )
+        .await;
+        let sticky_key_id = runtime.sticky_bound_key_id?;
+        if self.seen_key_ids.contains(&sticky_key_id) {
+            return None;
+        }
+
+        let key = match self
+            .state
+            .app()
+            .read_provider_catalog_keys_by_ids(std::slice::from_ref(&sticky_key_id))
+            .await
+        {
+            Ok(mut keys) => keys.pop()?,
+            Err(err) => {
+                warn!(
+                    event_name = "pool_group_sticky_key_load_failed",
+                    log_type = "event",
+                    provider_id = %self.group.candidate.provider_id,
+                    endpoint_id = %self.group.candidate.endpoint_id,
+                    model_id = %self.group.candidate.model_id,
+                    key_id = %sticky_key_id,
+                    error = ?err,
+                    "gateway pool scheduler failed to read sticky pool key"
+                );
+                return None;
+            }
+        };
+        if key.provider_id != self.group.candidate.provider_id {
+            return None;
+        }
+
+        let candidate = pool_candidate_from_catalog_key(&self.group, key);
+        self.build_eligible_candidate(candidate).await
+    }
+
+    async fn refill_queued_candidates(&mut self) -> bool {
+        let mut candidates = Vec::new();
+        let refill_target = self.page_size.max(1) as usize;
+        // Keep pool expansion bounded; the cursor schedules one page-sized window at a time.
+        while candidates.len() < refill_target {
+            let Some(mut page_candidates) = self.next_page_candidates().await else {
+                break;
+            };
+            candidates.append(&mut page_candidates);
+        }
+
+        if candidates.is_empty() {
+            return false;
+        }
+
+        let (mut scheduled, mut skipped) = schedule_pool_page_candidates(
+            self.state,
+            candidates,
+            self.sticky_session_token.as_deref(),
+        )
+        .await;
+        self.record_skipped_candidates(&skipped);
+        self.queued_candidates.extend(scheduled.drain(..));
+        self.skipped_candidates.append(&mut skipped);
+        !self.queued_candidates.is_empty()
+    }
+
+    async fn next_queued_candidate(&mut self) -> Option<EligibleLocalExecutionCandidate> {
+        if self.queued_candidates.len() > 1 {
+            self.reschedule_queued_candidates().await;
+        }
+
+        while let Some(candidate) = self.queued_candidates.pop_front() {
+            let (mut scheduled, mut skipped) = schedule_pool_page_candidates(
+                self.state,
+                vec![candidate],
+                self.sticky_session_token.as_deref(),
+            )
+            .await;
+            self.record_skipped_candidates(&skipped);
+            self.skipped_candidates.append(&mut skipped);
+            let Some(mut candidate) = scheduled.pop() else {
+                continue;
+            };
+            if !self.attach_pool_key_lease(&mut candidate).await {
+                continue;
+            }
+            candidate.orchestration.pool_key_index = Some(self.next_pool_key_index);
+            self.next_pool_key_index = self.next_pool_key_index.saturating_add(1);
+            return Some(candidate);
+        }
+
+        None
+    }
+
+    async fn attach_pool_key_lease(
+        &mut self,
+        candidate: &mut EligibleLocalExecutionCandidate,
+    ) -> bool {
+        if !pool_key_order_requires_exclusive_lease(&self.pool_key_order) {
+            return true;
+        }
+
+        let owner = self.state.app().tunnel.local_instance_id();
+        match try_claim_admin_provider_pool_key(
+            self.state.app().runtime_state.as_ref(),
+            candidate.candidate.provider_id.as_str(),
+            candidate.candidate.key_id.as_str(),
+            owner,
+        )
+        .await
+        {
+            Ok(Some(lease)) => {
+                candidate.orchestration.pool_key_lease = Some(lease);
+                true
+            }
+            Ok(None) => {
+                self.record_skip_reason("pool_key_lease_busy");
+                false
+            }
+            Err(err) => {
+                warn!(
+                    event_name = "pool_key_lease_claim_failed",
+                    log_type = "event",
+                    provider_id = %candidate.candidate.provider_id,
+                    endpoint_id = %candidate.candidate.endpoint_id,
+                    model_id = %candidate.candidate.model_id,
+                    key_id = %candidate.candidate.key_id,
+                    error = ?err,
+                    "gateway pool scheduler failed to claim pool key lease; scheduling key without lease"
+                );
+                true
+            }
+        }
+    }
+
+    async fn reschedule_queued_candidates(&mut self) {
+        let candidates = self.queued_candidates.drain(..).collect::<Vec<_>>();
+        if candidates.is_empty() {
+            return;
+        }
+        let (mut scheduled, mut skipped) = schedule_pool_page_candidates(
+            self.state,
+            candidates,
+            self.sticky_session_token.as_deref(),
+        )
+        .await;
+        self.record_skipped_candidates(&skipped);
+        self.queued_candidates.extend(scheduled.drain(..));
+        self.skipped_candidates.append(&mut skipped);
+    }
+
     async fn build_page_eligible_candidates(
         &mut self,
         rows: Vec<StoredMinimalCandidateSelectionRow>,
@@ -306,40 +467,66 @@ impl<'a> PoolKeyCursor<'a> {
         let mut candidates = Vec::with_capacity(rows.len());
         for row in rows {
             let candidate = pool_candidate_from_row(&self.group, row);
-            let Some(transport) = read_candidate_transport_snapshot(self.state, &candidate).await
-            else {
-                self.record_skip_reason("transport_snapshot_missing");
-                continue;
-            };
-            if let Some(skip_reason) =
-                candidate_auth_channel_skip_reason(&transport, self.request_auth_channel.as_deref())
-            {
-                self.record_skip_reason(skip_reason);
-                continue;
+            if let Some(candidate) = self.build_eligible_candidate(candidate).await {
+                candidates.push(candidate);
             }
-            if let Some(skip_reason) = candidate_common_transport_skip_reason(
-                &transport,
-                pool_candidate_transport_policy_facts(&candidate),
-                self.requested_model.as_deref(),
-            ) {
-                self.record_skip_reason(skip_reason);
-                continue;
-            }
-            candidates.push(EligibleLocalExecutionCandidate {
-                kind: LocalExecutionCandidateKind::SingleKey,
-                candidate,
-                provider_api_format: transport.endpoint.api_format.trim().to_ascii_lowercase(),
-                transport: std::sync::Arc::new(transport),
-                orchestration: LocalExecutionCandidateMetadata::default(),
-                ranking: self.group.ranking.clone(),
-            });
         }
         candidates
+    }
+
+    async fn build_eligible_candidate(
+        &mut self,
+        candidate: aether_scheduler_core::SchedulerMinimalCandidateSelectionCandidate,
+    ) -> Option<EligibleLocalExecutionCandidate> {
+        if !self.seen_key_ids.insert(candidate.key_id.clone()) {
+            return None;
+        }
+
+        let Some(transport) = read_candidate_transport_snapshot(self.state, &candidate).await
+        else {
+            self.record_skip_reason("transport_snapshot_missing");
+            return None;
+        };
+        if let Some(skip_reason) =
+            candidate_auth_channel_skip_reason(&transport, self.request_auth_channel.as_deref())
+        {
+            self.record_skip_reason(skip_reason);
+            return None;
+        }
+        if let Some(skip_reason) = candidate_common_transport_skip_reason(
+            &transport,
+            pool_candidate_transport_policy_facts(&candidate),
+            self.requested_model.as_deref(),
+        ) {
+            self.record_skip_reason(skip_reason);
+            return None;
+        }
+        Some(EligibleLocalExecutionCandidate {
+            kind: LocalExecutionCandidateKind::SingleKey,
+            candidate,
+            provider_api_format: transport.endpoint.api_format.trim().to_ascii_lowercase(),
+            transport: std::sync::Arc::new(transport),
+            orchestration: LocalExecutionCandidateMetadata::default(),
+            ranking: self.group.ranking.clone(),
+        })
     }
 
     fn record_skip_reason(&mut self, reason: &'static str) {
         *self.skip_reason_counts.entry(reason).or_insert(0) += 1;
     }
+
+    fn record_skipped_candidates(&mut self, skipped_candidates: &[SkippedLocalExecutionCandidate]) {
+        for skipped_candidate in skipped_candidates {
+            self.record_skip_reason(skipped_candidate.skip_reason);
+        }
+    }
+}
+
+fn pool_key_order_requires_exclusive_lease(order: &StoredPoolKeyCandidateOrder) -> bool {
+    !matches!(
+        order,
+        StoredPoolKeyCandidateOrder::CacheAffinity | StoredPoolKeyCandidateOrder::SingleAccount
+    )
 }
 
 fn pool_candidate_transport_policy_facts(
@@ -370,6 +557,26 @@ fn pool_candidate_from_row(
         .ok()
         .flatten();
     candidate.key_capabilities = row.key_capabilities;
+    candidate
+}
+
+fn pool_candidate_from_catalog_key(
+    group: &EligibleLocalExecutionCandidate,
+    key: StoredProviderCatalogKey,
+) -> aether_scheduler_core::SchedulerMinimalCandidateSelectionCandidate {
+    let mut candidate = group.candidate.clone();
+    candidate.key_id = key.id;
+    candidate.key_name = key.name;
+    candidate.key_auth_type = key.auth_type;
+    candidate.key_internal_priority = key.internal_priority;
+    candidate.key_global_priority_for_format =
+        aether_scheduler_core::extract_global_priority_for_format(
+            key.global_priority_by_format.as_ref(),
+            group.candidate.endpoint_api_format.as_str(),
+        )
+        .ok()
+        .flatten();
+    candidate.key_capabilities = key.capabilities;
     candidate
 }
 
@@ -473,14 +680,28 @@ fn build_pool_catalog_key_context(
         account_blocked: account_snapshot
             .and_then(|account| account.get("blocked"))
             .and_then(Value::as_bool)
-            .unwrap_or(false),
-        quota_exhausted: quota_snapshot
-            .and_then(|quota| quota.get("exhausted"))
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
+            .unwrap_or(false)
+            || admin_provider_pool_pure::admin_pool_key_is_known_banned(key),
+        quota_exhausted: pool_catalog_key_quota_exhausted(key, provider_type, quota_snapshot),
         health_score,
         latency_avg_ms,
         catalog_lru_score: Some(key.last_used_at_unix_secs.unwrap_or(0) as f64),
+    }
+}
+
+fn pool_catalog_key_quota_exhausted(
+    key: &StoredProviderCatalogKey,
+    provider_type: &str,
+    quota_snapshot: Option<&Map<String, Value>>,
+) -> bool {
+    match provider_type.trim().to_ascii_lowercase().as_str() {
+        "codex" | "kiro" | "chatgpt_web" => {
+            admin_provider_pool_pure::admin_pool_key_account_quota_exhausted(key, provider_type)
+        }
+        _ => quota_snapshot
+            .and_then(|quota| quota.get("exhausted"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
     }
 }
 
@@ -624,6 +845,49 @@ fn pool_config_for_candidate(
     admin_provider_pool_config_from_config_value(candidate.transport.provider.config.as_ref())
 }
 
+fn pool_key_candidate_order_for_group(
+    group: &EligibleLocalExecutionCandidate,
+) -> StoredPoolKeyCandidateOrder {
+    let Some(pool_config) = pool_config_for_candidate(group) else {
+        return StoredPoolKeyCandidateOrder::InternalPriority;
+    };
+    let presets = pool_config
+        .scheduling_presets
+        .iter()
+        .map(|preset| AiPoolSchedulingPreset {
+            preset: preset.preset.clone(),
+            enabled: preset.enabled,
+            mode: preset.mode.clone(),
+        })
+        .collect::<Vec<_>>();
+    let active_presets = normalize_enabled_ai_pool_presets(
+        &presets,
+        group.transport.provider.provider_type.as_str(),
+    );
+    if let Some(distribution_mode) = active_presets
+        .iter()
+        .find(|preset| pool_distribution_mode_preset(preset.as_str()))
+        .map(String::as_str)
+    {
+        return match distribution_mode {
+            "cache_affinity" => StoredPoolKeyCandidateOrder::CacheAffinity,
+            "load_balance" => StoredPoolKeyCandidateOrder::LoadBalance {
+                seed: pool_sort_seed(),
+            },
+            "single_account" => StoredPoolKeyCandidateOrder::SingleAccount,
+            _ => StoredPoolKeyCandidateOrder::InternalPriority,
+        };
+    }
+    if pool_config.lru_enabled {
+        return StoredPoolKeyCandidateOrder::Lru;
+    }
+    StoredPoolKeyCandidateOrder::InternalPriority
+}
+
+fn pool_distribution_mode_preset(preset: &str) -> bool {
+    matches!(preset, "cache_affinity" | "load_balance" | "single_account")
+}
+
 fn pool_sort_seed() -> String {
     let now_ms = current_unix_ms();
     let sequence = LOAD_BALANCE_SEQUENCE.fetch_add(1, AtomicOrdering::Relaxed);
@@ -677,6 +941,7 @@ fn apply_ai_pool_orchestration(
     candidate.orchestration = LocalExecutionCandidateMetadata {
         candidate_group_id: orchestration.candidate_group_id,
         pool_key_index: orchestration.pool_key_index,
+        pool_key_lease: None,
     };
     candidate
 }
@@ -685,26 +950,36 @@ fn apply_ai_pool_orchestration(
 mod tests {
     use super::{
         apply_local_execution_pool_scheduler_with_runtime_map, build_pool_catalog_key_context,
-        PoolCatalogKeyContext,
+        pool_config_for_candidate, pool_key_order_requires_exclusive_lease, PoolCatalogKeyContext,
+        PoolKeyCursor,
     };
     use crate::ai_serving::planner::candidate_resolution::{
         EligibleLocalExecutionCandidate, LocalExecutionCandidateKind,
     };
     use crate::ai_serving::PlannerAppState;
     use crate::data::GatewayDataState;
-    use crate::handlers::shared::provider_pool::AdminProviderPoolRuntimeState;
+    use crate::handlers::shared::provider_pool::{
+        record_admin_provider_pool_error, release_admin_provider_pool_key_lease,
+        try_claim_admin_provider_pool_key, AdminProviderPoolRuntimeState,
+    };
     use crate::orchestration::LocalExecutionCandidateMetadata;
     use crate::AppState;
     use aether_ai_serving::{normalize_enabled_ai_pool_presets, AiPoolSchedulingPreset};
+    use aether_data::repository::candidate_selection::InMemoryMinimalCandidateSelectionReadRepository;
     use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
-    use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey;
+    use aether_data_contracts::repository::candidate_selection::{
+        StoredMinimalCandidateSelectionRow, StoredPoolKeyCandidateOrder,
+    };
+    use aether_data_contracts::repository::provider_catalog::{
+        StoredProviderCatalogEndpoint, StoredProviderCatalogKey, StoredProviderCatalogProvider,
+    };
     use aether_provider_transport::snapshot::{
         GatewayProviderTransportEndpoint, GatewayProviderTransportKey,
         GatewayProviderTransportProvider,
     };
     use aether_scheduler_core::SchedulerMinimalCandidateSelectionCandidate;
     use serde_json::json;
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, VecDeque};
     use std::sync::Arc;
 
     #[test]
@@ -851,6 +1126,7 @@ mod tests {
                         .to_string(),
                 ),
                 pool_key_index: Some(0),
+                pool_key_lease: None,
             }
         );
         assert_eq!(reordered[1].orchestration.pool_key_index, Some(1));
@@ -866,6 +1142,7 @@ mod tests {
                         .to_string(),
                 ),
                 pool_key_index: None,
+                pool_key_lease: None,
             }
         );
     }
@@ -1048,7 +1325,7 @@ mod tests {
     }
 
     #[test]
-    fn pool_scheduler_applies_preset_hard_order_before_lru() {
+    fn pool_scheduler_applies_distribution_mode_before_strategy_presets() {
         let key_a = sample_eligible_candidate(
             "provider-pool",
             "endpoint-1",
@@ -1057,8 +1334,8 @@ mod tests {
             Some(json!({
                 "pool_advanced": {
                     "scheduling_presets": [
-                        {"preset": "priority_first", "enabled": true},
-                        {"preset": "cache_affinity", "enabled": true}
+                        {"preset": "cache_affinity", "enabled": true},
+                        {"preset": "priority_first", "enabled": true}
                     ]
                 }
             })),
@@ -1071,8 +1348,8 @@ mod tests {
             Some(json!({
                 "pool_advanced": {
                     "scheduling_presets": [
-                        {"preset": "priority_first", "enabled": true},
-                        {"preset": "cache_affinity", "enabled": true}
+                        {"preset": "cache_affinity", "enabled": true},
+                        {"preset": "priority_first", "enabled": true}
                     ]
                 }
             })),
@@ -1083,8 +1360,8 @@ mod tests {
             "provider-pool".to_string(),
             AdminProviderPoolRuntimeState {
                 lru_score_by_key: BTreeMap::from([
-                    ("key-a".to_string(), 5.0),
-                    ("key-b".to_string(), 100.0),
+                    ("key-a".to_string(), 100.0),
+                    ("key-b".to_string(), 5.0),
                 ]),
                 ..AdminProviderPoolRuntimeState::default()
             },
@@ -1102,7 +1379,7 @@ mod tests {
                 .iter()
                 .map(|item| item.candidate.key_id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["key-b", "key-a"]
+            vec!["key-a", "key-b"]
         );
     }
 
@@ -1364,7 +1641,7 @@ mod tests {
     }
 
     #[test]
-    fn normalizes_distribution_mutex_group_to_first_enabled_member() {
+    fn normalizes_distribution_mode_before_strategy_presets() {
         let presets = normalize_enabled_ai_pool_presets(
             &[
                 AiPoolSchedulingPreset {
@@ -1392,6 +1669,411 @@ mod tests {
         );
 
         assert_eq!(presets, ["single_account", "priority_first"]);
+    }
+
+    #[test]
+    fn pool_key_cursor_uses_distribution_order_for_page_queries() {
+        let app = AppState::new().expect("state should build");
+        let load_balance_group = sample_eligible_candidate(
+            "provider-pool",
+            "endpoint-1",
+            "pool-group",
+            10,
+            Some(json!({
+                "pool_advanced": {
+                    "scheduling_presets": [
+                        {"preset": "load_balance", "enabled": true},
+                        {"preset": "priority_first", "enabled": true}
+                    ]
+                }
+            })),
+        );
+        let load_balance_cursor = PoolKeyCursor::new(
+            PlannerAppState::new(&app),
+            load_balance_group,
+            None,
+            None,
+            None,
+        );
+        assert!(matches!(
+            load_balance_cursor.pool_key_order,
+            StoredPoolKeyCandidateOrder::LoadBalance { ref seed } if !seed.is_empty()
+        ));
+
+        let lru_group = sample_eligible_candidate(
+            "provider-pool",
+            "endpoint-1",
+            "pool-group",
+            10,
+            Some(json!({ "pool_advanced": { "lru_enabled": true } })),
+        );
+        let lru_cursor =
+            PoolKeyCursor::new(PlannerAppState::new(&app), lru_group, None, None, None);
+        assert_eq!(lru_cursor.pool_key_order, StoredPoolKeyCandidateOrder::Lru);
+    }
+
+    #[test]
+    fn pool_key_lease_exclusivity_follows_distribution_mode() {
+        assert!(!pool_key_order_requires_exclusive_lease(
+            &StoredPoolKeyCandidateOrder::CacheAffinity
+        ));
+        assert!(!pool_key_order_requires_exclusive_lease(
+            &StoredPoolKeyCandidateOrder::SingleAccount
+        ));
+        assert!(pool_key_order_requires_exclusive_lease(
+            &StoredPoolKeyCandidateOrder::Lru
+        ));
+        assert!(pool_key_order_requires_exclusive_lease(
+            &StoredPoolKeyCandidateOrder::LoadBalance {
+                seed: "seed".to_string()
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn pool_key_cursor_revalidates_queued_candidates_before_return() {
+        let app = AppState::new().expect("state should build");
+        let provider_config = Some(json!({
+            "pool_advanced": {
+                "rate_limit_cooldown_seconds": 300
+            }
+        }));
+        let group = sample_eligible_candidate(
+            "provider-pool",
+            "endpoint-1",
+            "pool-group",
+            10,
+            provider_config.clone(),
+        );
+        let mut cursor =
+            PoolKeyCursor::new(PlannerAppState::new(&app), group.clone(), None, None, None);
+        cursor.queued_candidates = VecDeque::from([
+            sample_eligible_candidate(
+                "provider-pool",
+                "endpoint-1",
+                "key-a",
+                10,
+                provider_config.clone(),
+            ),
+            sample_eligible_candidate(
+                "provider-pool",
+                "endpoint-1",
+                "key-b",
+                10,
+                provider_config.clone(),
+            ),
+            sample_eligible_candidate("provider-pool", "endpoint-1", "key-c", 10, provider_config),
+        ]);
+
+        let first = cursor.next_key().await.expect("first key should schedule");
+        assert_eq!(first.candidate.key_id, "key-a");
+
+        let pool_config = pool_config_for_candidate(&group).expect("pool config should parse");
+        record_admin_provider_pool_error(
+            app.runtime_state.as_ref(),
+            "provider-pool",
+            "key-b",
+            &pool_config,
+            429,
+            None,
+            None,
+        )
+        .await;
+
+        let second = cursor
+            .next_key()
+            .await
+            .expect("second schedulable key should skip cooled-down key");
+        assert_eq!(second.candidate.key_id, "key-c");
+        assert_eq!(second.orchestration.pool_key_index, Some(1));
+        assert!(cursor.next_key().await.is_none());
+
+        let skipped = cursor.take_skipped_candidates();
+        assert!(skipped.iter().any(|candidate| {
+            candidate.candidate.key_id == "key-b" && candidate.skip_reason == "pool_cooldown"
+        }));
+    }
+
+    #[tokio::test]
+    async fn pool_key_cursor_skips_busy_lease_and_claims_returned_key() {
+        let app = AppState::new().expect("state should build");
+        let provider_config = Some(json!({ "pool_advanced": { "lru_enabled": true } }));
+        let held_lease = try_claim_admin_provider_pool_key(
+            app.runtime_state.as_ref(),
+            "provider-pool",
+            "key-a",
+            "test-owner",
+        )
+        .await
+        .expect("lease claim should not fail")
+        .expect("first key should be claimed by test");
+        let group = sample_eligible_candidate(
+            "provider-pool",
+            "endpoint-1",
+            "pool-group",
+            10,
+            provider_config.clone(),
+        );
+        let mut cursor = PoolKeyCursor::new(PlannerAppState::new(&app), group, None, None, None);
+        cursor.queued_candidates = VecDeque::from([
+            sample_eligible_candidate(
+                "provider-pool",
+                "endpoint-1",
+                "key-a",
+                10,
+                provider_config.clone(),
+            ),
+            sample_eligible_candidate("provider-pool", "endpoint-1", "key-b", 10, provider_config),
+        ]);
+
+        let candidate = cursor
+            .next_key()
+            .await
+            .expect("cursor should skip busy key and return next key");
+        assert_eq!(candidate.candidate.key_id, "key-b");
+        assert_eq!(candidate.orchestration.pool_key_index, Some(0));
+        assert_eq!(
+            cursor.skip_reason_counts.get("pool_key_lease_busy"),
+            Some(&1)
+        );
+        let returned_lease = candidate
+            .orchestration
+            .pool_key_lease
+            .clone()
+            .expect("returned key should carry its lease");
+        assert!(
+            try_claim_admin_provider_pool_key(
+                app.runtime_state.as_ref(),
+                "provider-pool",
+                "key-b",
+                "other-owner",
+            )
+            .await
+            .expect("second claim should not fail")
+            .is_none(),
+            "returned key should remain leased until execution releases it"
+        );
+
+        release_admin_provider_pool_key_lease(app.runtime_state.as_ref(), &held_lease)
+            .await
+            .expect("held lease release should not fail");
+        release_admin_provider_pool_key_lease(app.runtime_state.as_ref(), &returned_lease)
+            .await
+            .expect("returned lease release should not fail");
+    }
+
+    #[tokio::test]
+    async fn pool_key_cursor_allows_busy_lease_for_cache_affinity_mode() {
+        let app = AppState::new().expect("state should build");
+        let provider_config = Some(json!({
+            "pool_advanced": {
+                "scheduling_presets": [
+                    {"preset": "cache_affinity", "enabled": true}
+                ]
+            }
+        }));
+        let held_lease = try_claim_admin_provider_pool_key(
+            app.runtime_state.as_ref(),
+            "provider-pool",
+            "key-a",
+            "test-owner",
+        )
+        .await
+        .expect("lease claim should not fail")
+        .expect("first key should be claimed by test");
+        let group = sample_eligible_candidate(
+            "provider-pool",
+            "endpoint-1",
+            "pool-group",
+            10,
+            provider_config.clone(),
+        );
+        let mut cursor = PoolKeyCursor::new(PlannerAppState::new(&app), group, None, None, None);
+        cursor.queued_candidates = VecDeque::from([
+            sample_eligible_candidate(
+                "provider-pool",
+                "endpoint-1",
+                "key-a",
+                10,
+                provider_config.clone(),
+            ),
+            sample_eligible_candidate("provider-pool", "endpoint-1", "key-b", 10, provider_config),
+        ]);
+
+        let candidate = cursor
+            .next_key()
+            .await
+            .expect("cache-affinity cursor should allow repeated busy key");
+        assert_eq!(candidate.candidate.key_id, "key-a");
+        assert_eq!(candidate.orchestration.pool_key_index, Some(0));
+        assert!(candidate.orchestration.pool_key_lease.is_none());
+        assert!(!cursor
+            .skip_reason_counts
+            .contains_key("pool_key_lease_busy"));
+
+        release_admin_provider_pool_key_lease(app.runtime_state.as_ref(), &held_lease)
+            .await
+            .expect("held lease release should not fail");
+    }
+
+    #[tokio::test]
+    async fn pool_key_cursor_simulates_large_lru_pool_with_lazy_pages_and_dynamic_skips() {
+        const KEY_COUNT: usize = 2048;
+        let provider_config = Some(json!({
+            "pool_advanced": {
+                "lru_enabled": true,
+                "rate_limit_cooldown_seconds": 300
+            }
+        }));
+        let (provider, endpoint, keys, rows) =
+            large_pool_fixture(KEY_COUNT, provider_config.clone());
+        let data_state =
+            GatewayDataState::with_provider_catalog_and_minimal_candidate_selection_for_tests(
+                Arc::new(InMemoryProviderCatalogReadRepository::seed(
+                    vec![provider],
+                    vec![endpoint],
+                    keys,
+                )),
+                Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(rows)),
+            )
+            .with_encryption_key_for_tests(aether_crypto::DEVELOPMENT_ENCRYPTION_KEY);
+        let app = AppState::new()
+            .expect("state should build")
+            .with_data_state_for_tests(data_state);
+        let group = sample_eligible_candidate(
+            "provider-pool",
+            "endpoint-1",
+            "pool-group",
+            10,
+            provider_config.clone(),
+        );
+        let pool_config = pool_config_for_candidate(&group).expect("pool config should parse");
+        let mut held_leases = Vec::new();
+        for key_id in ["key-00000", "key-00001"] {
+            held_leases.push(
+                try_claim_admin_provider_pool_key(
+                    app.runtime_state.as_ref(),
+                    "provider-pool",
+                    key_id,
+                    "large-pool-test",
+                )
+                .await
+                .expect("lease claim should not fail")
+                .expect("test key should claim"),
+            );
+        }
+        for key_id in ["key-00002", "key-00003"] {
+            record_admin_provider_pool_error(
+                app.runtime_state.as_ref(),
+                "provider-pool",
+                key_id,
+                &pool_config,
+                429,
+                None,
+                None,
+            )
+            .await;
+        }
+
+        let mut cursor = PoolKeyCursor::new(PlannerAppState::new(&app), group, None, None, None);
+        cursor.page_size = 64;
+        cursor.max_scanned_keys = KEY_COUNT as u32;
+
+        let mut returned_ids = Vec::new();
+        let mut returned_leases = Vec::new();
+        for _ in 0..10 {
+            let candidate = cursor
+                .next_key()
+                .await
+                .expect("large pool should return first page candidates");
+            returned_ids.push(candidate.candidate.key_id.clone());
+            returned_leases.push(
+                candidate
+                    .orchestration
+                    .pool_key_lease
+                    .expect("lru pool candidate should carry exclusive lease"),
+            );
+        }
+        assert_eq!(returned_ids.first().map(String::as_str), Some("key-00004"));
+        assert_eq!(returned_ids.last().map(String::as_str), Some("key-00013"));
+        assert_eq!(cursor.scanned_keys, 64);
+        assert!(
+            cursor.queued_candidates.len() <= cursor.page_size as usize,
+            "cursor should only retain the current page window"
+        );
+
+        record_admin_provider_pool_error(
+            app.runtime_state.as_ref(),
+            "provider-pool",
+            "key-00014",
+            &pool_config,
+            429,
+            None,
+            None,
+        )
+        .await;
+        held_leases.push(
+            try_claim_admin_provider_pool_key(
+                app.runtime_state.as_ref(),
+                "provider-pool",
+                "key-00015",
+                "large-pool-test",
+            )
+            .await
+            .expect("dynamic lease claim should not fail")
+            .expect("dynamic busy key should claim"),
+        );
+
+        let candidate = cursor
+            .next_key()
+            .await
+            .expect("cursor should skip dynamically unhealthy and busy keys");
+        assert_eq!(candidate.candidate.key_id, "key-00016");
+        returned_ids.push(candidate.candidate.key_id.clone());
+        returned_leases.push(
+            candidate
+                .orchestration
+                .pool_key_lease
+                .expect("lru pool candidate should carry exclusive lease"),
+        );
+
+        while let Some(candidate) = cursor.next_key().await {
+            returned_ids.push(candidate.candidate.key_id.clone());
+            returned_leases.push(
+                candidate
+                    .orchestration
+                    .pool_key_lease
+                    .expect("lru pool candidate should carry exclusive lease"),
+            );
+        }
+
+        assert_eq!(returned_ids.len(), KEY_COUNT - 6);
+        assert_eq!(returned_ids.last().map(String::as_str), Some("key-02047"));
+        assert_eq!(cursor.scanned_keys, KEY_COUNT as u32);
+        assert_eq!(
+            cursor.skip_reason_counts.get("pool_key_lease_busy"),
+            Some(&3)
+        );
+        assert_eq!(cursor.skip_reason_counts.get("pool_cooldown"), Some(&3));
+        for skipped in [
+            "key-00000",
+            "key-00001",
+            "key-00002",
+            "key-00003",
+            "key-00014",
+            "key-00015",
+        ] {
+            assert!(
+                !returned_ids.iter().any(|key_id| key_id == skipped),
+                "{skipped} should have been skipped"
+            );
+        }
+
+        for lease in held_leases.into_iter().chain(returned_leases) {
+            release_admin_provider_pool_key_lease(app.runtime_state.as_ref(), &lease)
+                .await
+                .expect("lease release should not fail");
+        }
     }
 
     #[test]
@@ -1447,6 +2129,248 @@ mod tests {
         assert_eq!(context.quota_reset_seconds, Some(3600.0));
         assert_eq!(context.latency_avg_ms, Some(50.0));
         assert_eq!(context.catalog_lru_score, Some(1_711_000_123.0));
+    }
+
+    #[test]
+    fn pool_catalog_context_ignores_stale_codex_exhausted_snapshot_when_windows_have_capacity() {
+        let mut key = sample_catalog_oauth_key("key-stale-exhausted");
+        key.upstream_metadata = Some(json!({
+            "codex": {
+                "primary_used_percent": 100.0
+            }
+        }));
+        key.status_snapshot = Some(json!({
+            "quota": {
+                "version": 2,
+                "provider_type": "codex",
+                "code": "exhausted",
+                "exhausted": true,
+                "usage_ratio": 0.0,
+                "windows": [
+                    {
+                        "code": "weekly",
+                        "used_ratio": 0.0,
+                        "remaining_ratio": 1.0
+                    },
+                    {
+                        "code": "5h",
+                        "used_ratio": 0.0,
+                        "remaining_ratio": 1.0
+                    }
+                ]
+            }
+        }));
+
+        let app = app_state_with_catalog_key(key.clone());
+        let context = build_pool_catalog_key_context(PlannerAppState::new(&app), &key, "codex");
+
+        assert!(!context.quota_exhausted);
+    }
+
+    #[test]
+    fn pool_catalog_context_marks_codex_metadata_exhausted() {
+        let mut key = sample_catalog_oauth_key("key-metadata-exhausted");
+        key.upstream_metadata = Some(json!({
+            "codex": {
+                "secondary_used_percent": 100.0
+            }
+        }));
+
+        let app = app_state_with_catalog_key(key.clone());
+        let context = build_pool_catalog_key_context(PlannerAppState::new(&app), &key, "codex");
+
+        assert!(context.quota_exhausted);
+    }
+
+    #[test]
+    fn pool_catalog_context_preserves_snapshot_exhaustion_for_snapshot_only_providers() {
+        let mut key = sample_catalog_oauth_key("key-antigravity-exhausted");
+        key.status_snapshot = Some(json!({
+            "quota": {
+                "version": 2,
+                "provider_type": "antigravity",
+                "code": "exhausted",
+                "exhausted": true,
+                "windows": [
+                    {
+                        "code": "gemini-2.5-pro",
+                        "used_ratio": 1.0,
+                        "remaining_ratio": 0.0
+                    }
+                ]
+            }
+        }));
+
+        let app = app_state_with_catalog_key(key.clone());
+        let context =
+            build_pool_catalog_key_context(PlannerAppState::new(&app), &key, "antigravity");
+
+        assert!(context.quota_exhausted);
+    }
+
+    #[test]
+    fn pool_catalog_context_marks_known_banned_account_from_metadata() {
+        let mut key = sample_catalog_oauth_key("key-account-banned");
+        key.upstream_metadata = Some(json!({
+            "codex": {
+                "account_disabled": true,
+                "reason": "deactivated_workspace"
+            }
+        }));
+
+        let app = app_state_with_catalog_key(key.clone());
+        let context = build_pool_catalog_key_context(PlannerAppState::new(&app), &key, "codex");
+
+        assert!(context.account_blocked);
+    }
+
+    fn sample_catalog_oauth_key(key_id: &str) -> StoredProviderCatalogKey {
+        StoredProviderCatalogKey::new(
+            key_id.to_string(),
+            "provider-1".to_string(),
+            key_id.to_string(),
+            "oauth".to_string(),
+            None,
+            true,
+        )
+        .expect("key should build")
+        .with_transport_fields(
+            None,
+            "secret".to_string(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("transport fields should build")
+    }
+
+    fn app_state_with_catalog_key(key: StoredProviderCatalogKey) -> AppState {
+        AppState::new()
+            .expect("state should build")
+            .with_data_state_for_tests(GatewayDataState::with_provider_catalog_reader_for_tests(
+                Arc::new(InMemoryProviderCatalogReadRepository::seed(
+                    Vec::new(),
+                    Vec::new(),
+                    vec![key],
+                )),
+            ))
+    }
+
+    fn large_pool_fixture(
+        key_count: usize,
+        provider_config: Option<serde_json::Value>,
+    ) -> (
+        StoredProviderCatalogProvider,
+        StoredProviderCatalogEndpoint,
+        Vec<StoredProviderCatalogKey>,
+        Vec<StoredMinimalCandidateSelectionRow>,
+    ) {
+        let provider = StoredProviderCatalogProvider::new(
+            "provider-pool".to_string(),
+            "provider-pool".to_string(),
+            Some("https://example.com".to_string()),
+            "openai".to_string(),
+        )
+        .expect("provider should build")
+        .with_routing_fields(0)
+        .with_transport_fields(
+            true,
+            false,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            provider_config,
+        );
+        let endpoint = StoredProviderCatalogEndpoint::new(
+            "endpoint-1".to_string(),
+            "provider-pool".to_string(),
+            "openai:chat".to_string(),
+            Some("openai".to_string()),
+            Some("chat".to_string()),
+            true,
+        )
+        .expect("endpoint should build")
+        .with_health_score(1.0)
+        .with_transport_fields(
+            "https://example.com/v1/chat/completions".to_string(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("endpoint transport should build");
+
+        let mut keys = Vec::with_capacity(key_count);
+        let mut rows = Vec::with_capacity(key_count);
+        for index in 0..key_count {
+            let key_id = format!("key-{index:05}");
+            let mut key = StoredProviderCatalogKey::new(
+                key_id.clone(),
+                "provider-pool".to_string(),
+                key_id.clone(),
+                "api_key".to_string(),
+                None,
+                true,
+            )
+            .expect("key should build")
+            .with_transport_fields(
+                Some(json!(["openai:chat"])),
+                Some(format!("secret-{index}")),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("key transport should build");
+            key.internal_priority = 10;
+            key.last_used_at_unix_secs = Some(index as u64);
+            keys.push(key);
+            rows.push(StoredMinimalCandidateSelectionRow {
+                provider_id: "provider-pool".to_string(),
+                provider_name: "provider-pool".to_string(),
+                provider_type: "openai".to_string(),
+                provider_priority: 0,
+                provider_is_active: true,
+                endpoint_id: "endpoint-1".to_string(),
+                endpoint_api_format: "openai:chat".to_string(),
+                endpoint_api_family: Some("openai".to_string()),
+                endpoint_kind: Some("chat".to_string()),
+                endpoint_is_active: true,
+                key_id: key_id.clone(),
+                key_name: key_id,
+                key_auth_type: "api_key".to_string(),
+                key_is_active: true,
+                key_api_formats: Some(vec!["openai:chat".to_string()]),
+                key_allowed_models: None,
+                key_capabilities: None,
+                key_internal_priority: 10,
+                key_global_priority_by_format: None,
+                model_id: "model-1".to_string(),
+                global_model_id: "global-model-1".to_string(),
+                global_model_name: "gpt-5".to_string(),
+                global_model_mappings: None,
+                global_model_supports_streaming: Some(true),
+                model_provider_model_name: "gpt-5".to_string(),
+                model_provider_model_mappings: None,
+                model_supports_streaming: Some(true),
+                model_is_active: true,
+                model_is_available: true,
+            });
+        }
+        (provider, endpoint, keys, rows)
     }
 
     fn sample_eligible_candidate(

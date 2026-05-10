@@ -27,8 +27,9 @@ use crate::handlers::shared::provider_pool::admin_provider_pool_config_from_conf
 use crate::handlers::shared::provider_pool::{
     admin_provider_pool_key_circuit_breaker_reason, record_admin_provider_pool_error,
     record_admin_provider_pool_stream_timeout, record_admin_provider_pool_success,
-    AdminProviderPoolConfig,
+    release_admin_provider_pool_key_lease, AdminProviderPoolConfig,
 };
+use crate::orchestration::local_execution_candidate_metadata_from_report_context;
 use crate::scheduler::affinity::SCHEDULER_AFFINITY_TTL;
 use crate::AppState;
 
@@ -129,16 +130,37 @@ pub(crate) async fn apply_local_execution_effect(
         }
         LocalExecutionEffect::PoolSuccessSync { payload } => {
             record_sync_pool_success_effect(state, context, payload).await;
+            release_pool_key_lease_effect(state, context).await;
         }
         LocalExecutionEffect::PoolSuccessStream { payload } => {
             record_stream_pool_success_effect(state, context, payload).await;
+            release_pool_key_lease_effect(state, context).await;
         }
         LocalExecutionEffect::PoolError(effect) => {
             record_pool_error_effect(state, context, effect).await;
+            release_pool_key_lease_effect(state, context).await;
         }
         LocalExecutionEffect::PoolStreamTimeout => {
             record_pool_stream_timeout_effect(state, context).await;
+            release_pool_key_lease_effect(state, context).await;
         }
+    }
+}
+
+async fn release_pool_key_lease_effect(state: &AppState, context: LocalExecutionEffectContext<'_>) {
+    let metadata = local_execution_candidate_metadata_from_report_context(context.report_context);
+    let Some(lease) = metadata.pool_key_lease else {
+        return;
+    };
+    if let Err(err) =
+        release_admin_provider_pool_key_lease(state.runtime_state.as_ref(), &lease).await
+    {
+        warn!(
+            error = ?err,
+            provider_id = %context.plan.provider_id,
+            key_id = %context.plan.key_id,
+            "gateway orchestration effects: failed to release pool key lease"
+        );
     }
 }
 

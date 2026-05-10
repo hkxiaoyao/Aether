@@ -4,7 +4,8 @@ use async_trait::async_trait;
 
 use super::{
     MinimalCandidateSelectionReadRepository, StoredMinimalCandidateSelectionRow,
-    StoredPoolKeyCandidateRowsQuery, StoredRequestedModelCandidateRowsQuery,
+    StoredPoolKeyCandidateOrder, StoredPoolKeyCandidateRowsQuery,
+    StoredRequestedModelCandidateRowsQuery,
 };
 use crate::DataLayerError;
 
@@ -130,17 +131,45 @@ impl MinimalCandidateSelectionReadRepository for InMemoryMinimalCandidateSelecti
                     && row.model_id == query.model_id
             })
             .collect::<Vec<_>>();
-        rows.sort_by(|left, right| {
-            left.key_internal_priority
-                .cmp(&right.key_internal_priority)
-                .then(left.key_id.cmp(&right.key_id))
-        });
+        sort_pool_key_rows(&mut rows, &query.order);
         Ok(rows
             .into_iter()
             .skip(query.offset as usize)
             .take(query.limit as usize)
             .collect())
     }
+}
+
+fn sort_pool_key_rows(
+    rows: &mut [StoredMinimalCandidateSelectionRow],
+    order: &StoredPoolKeyCandidateOrder,
+) {
+    rows.sort_by(|left, right| match order {
+        StoredPoolKeyCandidateOrder::LoadBalance { seed } => {
+            stable_pool_key_hash(seed.as_str(), left.key_id.as_str())
+                .cmp(&stable_pool_key_hash(seed.as_str(), right.key_id.as_str()))
+                .then(left.key_id.cmp(&right.key_id))
+        }
+        _ => left
+            .key_internal_priority
+            .cmp(&right.key_internal_priority)
+            .then(left.key_id.cmp(&right.key_id)),
+    });
+}
+
+fn stable_pool_key_hash(seed: &str, key_id: &str) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in seed
+        .as_bytes()
+        .iter()
+        .copied()
+        .chain(std::iter::once(b':'))
+        .chain(key_id.as_bytes().iter().copied())
+    {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
 }
 
 fn normalize_api_format(value: &str) -> String {
@@ -215,7 +244,8 @@ mod tests {
     use super::InMemoryMinimalCandidateSelectionReadRepository;
     use crate::repository::candidate_selection::{
         MinimalCandidateSelectionReadRepository, StoredMinimalCandidateSelectionRow,
-        StoredPoolKeyCandidateRowsQuery, StoredRequestedModelCandidateRowsQuery,
+        StoredPoolKeyCandidateOrder, StoredPoolKeyCandidateRowsQuery,
+        StoredRequestedModelCandidateRowsQuery,
     };
 
     fn sample_row(
@@ -402,6 +432,7 @@ mod tests {
                 endpoint_id: "endpoint-pool".to_string(),
                 model_id: "model-pool".to_string(),
                 selected_provider_model_name: "gpt-5".to_string(),
+                order: StoredPoolKeyCandidateOrder::InternalPriority,
                 offset: 2,
                 limit: 2,
             })

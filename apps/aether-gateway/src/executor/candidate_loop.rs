@@ -16,6 +16,7 @@ use crate::clock::current_unix_ms;
 use crate::control::GatewayControlDecision;
 use crate::execution_runtime::{execute_execution_runtime_stream, execute_execution_runtime_sync};
 use crate::executor::{build_local_execution_exhaustion, LocalExecutionRequestOutcome};
+use crate::handlers::shared::provider_pool::release_admin_provider_pool_key_lease;
 use crate::log_ids::short_request_id;
 use crate::orchestration::local_execution_candidate_metadata_from_report_context;
 use crate::request_candidate_runtime::{
@@ -403,7 +404,19 @@ where
 {
     for plan_and_report in remaining {
         let report_context = plan_and_report.report_context();
-        if should_skip_unused_persistence(report_context.as_ref()) {
+        let metadata =
+            local_execution_candidate_metadata_from_report_context(report_context.as_ref());
+        if let Some(lease) = metadata.pool_key_lease.as_ref() {
+            if let Err(err) =
+                release_admin_provider_pool_key_lease(state.runtime_state.as_ref(), lease).await
+            {
+                warn!(
+                    error = ?err,
+                    "gateway candidate loop: failed to release unused pool key lease"
+                );
+            }
+        }
+        if should_skip_unused_persistence_from_metadata(&metadata) {
             continue;
         }
         record_local_request_candidate_status(
@@ -426,6 +439,12 @@ where
 
 fn should_skip_unused_persistence(report_context: Option<&serde_json::Value>) -> bool {
     let metadata = local_execution_candidate_metadata_from_report_context(report_context);
+    should_skip_unused_persistence_from_metadata(&metadata)
+}
+
+fn should_skip_unused_persistence_from_metadata(
+    metadata: &crate::orchestration::LocalExecutionCandidateMetadata,
+) -> bool {
     metadata.candidate_group_id.is_some() && metadata.pool_key_index.is_some()
 }
 

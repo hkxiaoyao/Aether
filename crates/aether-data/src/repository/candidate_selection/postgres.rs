@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 
 use super::{
     MinimalCandidateSelectionReadRepository, StoredMinimalCandidateSelectionRow,
-    StoredPoolKeyCandidateRowsQuery, StoredProviderModelMapping,
+    StoredPoolKeyCandidateOrder, StoredPoolKeyCandidateRowsQuery, StoredProviderModelMapping,
     StoredRequestedModelCandidateRowsQuery,
 };
 use crate::{error::SqlxResultExt, DataLayerError};
@@ -505,6 +505,36 @@ LIMIT $7
 OFFSET $8
 "#;
 
+fn pool_key_candidate_order_by_sql(order: &StoredPoolKeyCandidateOrder) -> &'static str {
+    match order {
+        StoredPoolKeyCandidateOrder::InternalPriority => {
+            "ORDER BY\n  pak.internal_priority ASC,\n  pak.id ASC"
+        }
+        StoredPoolKeyCandidateOrder::Lru => {
+            "ORDER BY\n  pak.last_used_at ASC NULLS FIRST,\n  pak.internal_priority ASC,\n  pak.id ASC"
+        }
+        StoredPoolKeyCandidateOrder::CacheAffinity => {
+            "ORDER BY\n  pak.last_used_at DESC NULLS LAST,\n  pak.internal_priority ASC,\n  pak.id ASC"
+        }
+        StoredPoolKeyCandidateOrder::SingleAccount => {
+            "ORDER BY\n  pak.internal_priority ASC,\n  pak.last_used_at DESC NULLS LAST,\n  pak.id ASC"
+        }
+        StoredPoolKeyCandidateOrder::LoadBalance { .. } => {
+            "ORDER BY\n  md5($9 || ':' || pak.id) ASC,\n  pak.id ASC"
+        }
+    }
+}
+
+fn pool_key_candidate_selection_sql(order: &StoredPoolKeyCandidateOrder) -> String {
+    let default_order =
+        "ORDER BY\n  pak.internal_priority ASC,\n  pak.id ASC\nLIMIT $7\nOFFSET $8\n";
+    let replacement = format!(
+        "{}\nLIMIT $7\nOFFSET $8\n",
+        pool_key_candidate_order_by_sql(order)
+    );
+    LIST_POOL_KEYS_FOR_GROUP_SQL.replace(default_order, &replacement)
+}
+
 #[derive(Debug, Clone)]
 pub struct SqlxMinimalCandidateSelectionReadRepository {
     pool: PgPool,
@@ -650,19 +680,23 @@ impl SqlxMinimalCandidateSelectionReadRepository {
         let sql_match_aliases = sql_match_aliases(&storage_aliases);
         let limit = i64::from(query.limit.max(1));
         let offset = i64::from(query.offset);
+        let sql = pool_key_candidate_selection_sql(&query.order);
         for api_format in storage_aliases {
+            let mut query_builder = sqlx::query(sql.as_str())
+                .bind(api_format)
+                .bind(query.provider_id.as_str())
+                .bind(query.endpoint_id.as_str())
+                .bind(query.model_id.as_str())
+                .bind(sql_match_aliases.clone())
+                .bind(canonical_api_format.clone())
+                .bind(limit)
+                .bind(offset);
+            if let StoredPoolKeyCandidateOrder::LoadBalance { seed } = &query.order {
+                query_builder = query_builder.bind(seed.as_str());
+            }
             rows.extend(
                 Self::collect_query_rows(
-                    sqlx::query(LIST_POOL_KEYS_FOR_GROUP_SQL)
-                        .bind(api_format)
-                        .bind(query.provider_id.as_str())
-                        .bind(query.endpoint_id.as_str())
-                        .bind(query.model_id.as_str())
-                        .bind(sql_match_aliases.clone())
-                        .bind(canonical_api_format.clone())
-                        .bind(limit)
-                        .bind(offset)
-                        .fetch(&self.pool),
+                    query_builder.fetch(&self.pool),
                     map_candidate_selection_row,
                 )
                 .await?,
@@ -1039,13 +1073,16 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        parse_provider_model_mappings, parse_string_list, requested_model_selection_page_sql,
-        requested_model_selection_sql, SqlxMinimalCandidateSelectionReadRepository,
+        parse_provider_model_mappings, parse_string_list, pool_key_candidate_selection_sql,
+        requested_model_selection_page_sql, requested_model_selection_sql,
+        SqlxMinimalCandidateSelectionReadRepository,
         LIST_FOR_EXACT_API_FORMAT_AND_GLOBAL_MODEL_SQL, LIST_FOR_EXACT_API_FORMAT_SQL,
         LIST_POOL_KEYS_FOR_GROUP_SQL,
     };
     use crate::driver::postgres::{PostgresPoolConfig, PostgresPoolFactory};
-    use crate::repository::candidate_selection::StoredProviderModelMapping;
+    use crate::repository::candidate_selection::{
+        StoredPoolKeyCandidateOrder, StoredProviderModelMapping,
+    };
 
     #[tokio::test]
     async fn repository_constructs_from_lazy_pool() {
@@ -1098,6 +1135,23 @@ mod tests {
         let sql = requested_model_selection_page_sql();
 
         assert!(sql.ends_with("LIMIT $5\nOFFSET $6"));
+    }
+
+    #[test]
+    fn pool_key_selection_sql_applies_query_order() {
+        let load_balance_sql =
+            pool_key_candidate_selection_sql(&StoredPoolKeyCandidateOrder::LoadBalance {
+                seed: "seed".to_string(),
+            });
+        assert!(load_balance_sql.contains("md5($9 || ':' || pak.id) ASC"));
+        assert!(load_balance_sql.ends_with("LIMIT $7\nOFFSET $8\n"));
+
+        let lru_sql = pool_key_candidate_selection_sql(&StoredPoolKeyCandidateOrder::Lru);
+        assert!(lru_sql.contains("pak.last_used_at ASC NULLS FIRST"));
+
+        let cache_affinity_sql =
+            pool_key_candidate_selection_sql(&StoredPoolKeyCandidateOrder::CacheAffinity);
+        assert!(cache_affinity_sql.contains("pak.last_used_at DESC NULLS LAST"));
     }
 
     #[test]

@@ -42,6 +42,18 @@ pub struct StoredMinimalCandidateSelectionRow {
     pub model_is_available: bool,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum StoredPoolKeyCandidateOrder {
+    #[default]
+    InternalPriority,
+    Lru,
+    CacheAffinity,
+    SingleAccount,
+    LoadBalance {
+        seed: String,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct StoredPoolKeyCandidateRowsQuery {
     pub api_format: String,
@@ -49,6 +61,8 @@ pub struct StoredPoolKeyCandidateRowsQuery {
     pub endpoint_id: String,
     pub model_id: String,
     pub selected_provider_model_name: String,
+    #[serde(default)]
+    pub order: StoredPoolKeyCandidateOrder,
     pub offset: u32,
     pub limit: u32,
 }

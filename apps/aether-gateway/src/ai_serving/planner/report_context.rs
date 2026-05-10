@@ -6,6 +6,7 @@ use aether_ai_serving::{
     provider_stream_event_api_format_for_provider_type as ai_provider_stream_event_api_format_for_provider_type,
     AiExecutionReportContextParts, AiRequestOrigin,
 };
+use aether_runtime_state::RuntimeLockLease;
 use aether_scheduler_core::{ClientSessionAffinity, SchedulerRankingOutcome};
 use serde_json::{Map, Value};
 
@@ -17,7 +18,7 @@ use crate::ai_serving::{
 use crate::client_session_affinity::{
     client_session_affinity_report_context_value, CLIENT_SESSION_AFFINITY_REPORT_CONTEXT_FIELD,
 };
-use crate::orchestration::ExecutionAttemptIdentity;
+use crate::orchestration::{insert_pool_key_lease_report_context_fields, ExecutionAttemptIdentity};
 
 pub(crate) struct LocalExecutionReportContextParts<'a> {
     pub(crate) auth_context: &'a ExecutionRuntimeAuthContext,
@@ -37,6 +38,7 @@ pub(crate) struct LocalExecutionReportContextParts<'a> {
     pub(crate) client_api_format: &'a str,
     pub(crate) mapped_model: Option<&'a str>,
     pub(crate) candidate_group_id: Option<&'a str>,
+    pub(crate) pool_key_lease: Option<&'a RuntimeLockLease>,
     pub(crate) ranking: Option<&'a SchedulerRankingOutcome>,
     pub(crate) upstream_url: Option<&'a str>,
     pub(crate) header_rules: Option<&'a Value>,
@@ -86,6 +88,7 @@ pub(crate) fn build_local_execution_report_context(
     {
         merge_incoming_tls_fingerprint(&mut extra_fields, incoming_tls);
     }
+    insert_pool_key_lease_report_context_fields(&mut extra_fields, parts.pool_key_lease);
     insert_request_path_fields(
         &mut extra_fields,
         parts.request_path,
@@ -258,6 +261,7 @@ mod tests {
                 client_api_format: "openai:chat",
                 mapped_model: None,
                 candidate_group_id: None,
+                pool_key_lease: None,
                 ranking: None,
                 upstream_url: None,
                 header_rules: None,
@@ -337,6 +341,7 @@ mod tests {
                 client_api_format: "gemini:generate_content",
                 mapped_model: None,
                 candidate_group_id: None,
+                pool_key_lease: None,
                 ranking: None,
                 upstream_url: None,
                 header_rules: None,
@@ -405,6 +410,7 @@ mod tests {
                 client_api_format: "openai:chat",
                 mapped_model: None,
                 candidate_group_id: None,
+                pool_key_lease: None,
                 ranking: None,
                 upstream_url: None,
                 header_rules: None,

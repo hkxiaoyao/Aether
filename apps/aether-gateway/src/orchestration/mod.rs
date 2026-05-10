@@ -17,7 +17,8 @@ pub(crate) use self::adaptive::{
     LocalAdaptiveRateLimitProjection, LocalAdaptiveSuccessProjection,
 };
 pub(crate) use self::attempt::{
-    attempt_identity_from_report_context, build_local_attempt_identities, local_attempt_slot_count,
+    attempt_identity_from_report_context, build_local_attempt_identities,
+    insert_pool_key_lease_report_context_fields, local_attempt_slot_count,
     local_execution_candidate_metadata_from_report_context, ExecutionAttemptIdentity,
     LocalExecutionCandidateMetadata,
 };

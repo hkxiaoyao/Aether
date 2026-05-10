@@ -3,7 +3,7 @@ use aether_ai_serving::{
     ai_should_persist_skipped_candidate_for_pool_membership,
     run_ai_available_candidate_persistence, run_ai_candidate_materialization,
     run_ai_skipped_candidate_persistence, AiAvailableCandidatePersistencePort,
-    AiCandidateMaterializationOutcome, AiCandidateMaterializationPort, AiCandidateResolutionMode,
+    AiCandidateMaterializationOutcome, AiCandidateMaterializationPort,
     AiSkippedCandidatePersistencePort,
 };
 use aether_scheduler_core::{ClientSessionAffinity, SchedulerMinimalCandidateSelectionCandidate};
@@ -17,8 +17,6 @@ use uuid::Uuid;
 
 use crate::ai_serving::planner::candidate_affinity_cache::remember_scheduler_affinity_for_candidate;
 use crate::ai_serving::planner::candidate_resolution::{
-    resolve_and_rank_local_execution_candidates,
-    resolve_and_rank_local_execution_candidates_without_transport_pair_gate,
     resolve_and_rank_logical_local_execution_candidates, EligibleLocalExecutionCandidate,
     LocalExecutionCandidateKind, SkippedLocalExecutionCandidate,
 };
@@ -225,37 +223,19 @@ where
         &self,
         candidates: Vec<Self::Candidate>,
     ) -> Result<(Vec<Self::Eligible>, Vec<Self::Skipped>), Self::Error> {
-        let requested_model = self.requested_model.map(str::to_string);
-        let resolved = match self.resolution_mode {
-            AiCandidateResolutionMode::Standard => {
-                resolve_and_rank_local_execution_candidates(
-                    self.state,
-                    candidates,
-                    self.client_api_format,
-                    requested_model.as_deref().unwrap_or_default(),
-                    self.auth_snapshot,
-                    self.client_session_affinity,
-                    self.required_capabilities,
-                    self.sticky_session_token,
-                    self.request_auth_channel,
-                )
-                .await
-            }
-            AiCandidateResolutionMode::WithoutTransportPairGate => {
-                resolve_and_rank_local_execution_candidates_without_transport_pair_gate(
-                    self.state,
-                    candidates,
-                    self.client_api_format,
-                    requested_model.as_deref(),
-                    self.auth_snapshot,
-                    self.client_session_affinity,
-                    self.required_capabilities,
-                    self.sticky_session_token,
-                    self.request_auth_channel,
-                )
-                .await
-            }
-        };
+        let resolved = resolve_and_rank_logical_local_execution_candidates(
+            self.state,
+            candidates,
+            self.client_api_format,
+            self.requested_model,
+            self.auth_snapshot,
+            self.client_session_affinity,
+            self.required_capabilities,
+            self.sticky_session_token,
+            self.request_auth_channel,
+            self.resolution_mode,
+        )
+        .await;
         Ok(resolved)
     }
 
@@ -278,11 +258,14 @@ where
         &self,
         candidates: Vec<Self::Eligible>,
     ) -> Result<Vec<Self::Attempt>, Self::Error> {
-        Ok(persist_available_local_execution_candidates_with_context(
+        Ok(materialize_logical_local_execution_candidate_attempts(
             self.state,
             self.trace_id,
             self.persistence_policy.available,
             candidates,
+            self.sticky_session_token,
+            self.requested_model,
+            self.request_auth_channel,
             &self.build_available_extra_data,
         )
         .await)
@@ -491,6 +474,7 @@ where
     F: Fn(&EligibleLocalExecutionCandidate) -> Option<Value> + Send + Sync,
     G: Fn(SkippedLocalExecutionCandidate) -> SkippedLocalExecutionCandidate + Send + Sync,
 {
+    let _ = build_available_extra_data;
     let (candidates, resolved_skipped) = resolve_and_rank_logical_local_execution_candidates(
         state,
         candidates,
@@ -901,6 +885,64 @@ where
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn materialize_logical_local_execution_candidate_attempts<F>(
+    state: PlannerAppState<'_>,
+    trace_id: &str,
+    context: LocalAvailableCandidatePersistenceContext<'_>,
+    candidates: Vec<EligibleLocalExecutionCandidate>,
+    sticky_session_token: Option<&str>,
+    requested_model: Option<&str>,
+    request_auth_channel: Option<&str>,
+    build_extra_data: &F,
+) -> Vec<LocalExecutionCandidateAttempt>
+where
+    F: Fn(&EligibleLocalExecutionCandidate) -> Option<Value> + Send + Sync,
+{
+    let mut attempts = Vec::new();
+
+    for (candidate_index, candidate) in candidates.into_iter().enumerate() {
+        let candidate_index = u32::try_from(candidate_index).unwrap_or(u32::MAX);
+        match candidate.kind {
+            LocalExecutionCandidateKind::SingleKey => {
+                attempts.extend(
+                    persist_available_local_execution_candidate_at_index(
+                        state,
+                        trace_id,
+                        context,
+                        candidate,
+                        candidate_index,
+                        build_extra_data,
+                    )
+                    .await,
+                );
+            }
+            LocalExecutionCandidateKind::PoolGroup => {
+                let mut cursor = PoolKeyCursor::new(
+                    state,
+                    candidate,
+                    sticky_session_token,
+                    requested_model,
+                    request_auth_channel,
+                );
+                let attempt_count_before_pool = attempts.len();
+                while let Some(candidate) = cursor.next_key().await {
+                    attempts.extend(build_unpersisted_local_execution_candidate_attempts(
+                        candidate,
+                        candidate_index,
+                    ));
+                }
+                let _ = cursor.take_skipped_candidates();
+                if attempts.len() == attempt_count_before_pool {
+                    cursor.log_exhausted();
+                }
+            }
+        }
+    }
+
+    attempts
+}
+
 async fn persist_available_local_execution_candidate_at_index<F>(
     state: PlannerAppState<'_>,
     trace_id: &str,
@@ -1167,7 +1209,10 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::Arc;
 
+    use aether_data::repository::auth::InMemoryAuthApiKeySnapshotRepository;
+    use aether_data::repository::candidate_selection::InMemoryMinimalCandidateSelectionReadRepository;
     use aether_data::repository::candidates::InMemoryRequestCandidateRepository;
+    use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
     use aether_provider_transport::snapshot::{
         GatewayProviderTransportEndpoint, GatewayProviderTransportKey,
         GatewayProviderTransportProvider,
@@ -1278,6 +1323,7 @@ mod tests {
             orchestration: LocalExecutionCandidateMetadata {
                 candidate_group_id: pool_key_index.map(|_| "pool-group".to_string()),
                 pool_key_index,
+                pool_key_lease: None,
             },
             ranking: None,
         }
@@ -1318,6 +1364,61 @@ mod tests {
         assert_eq!(stored.len(), 1);
         assert_eq!(stored[0].key_id.as_deref(), Some("normal-key"));
         assert_eq!(stored[0].candidate_index, 2);
+    }
+
+    #[tokio::test]
+    async fn logical_materialization_does_not_persist_pool_group_representative() {
+        let request_candidate_repository = Arc::new(InMemoryRequestCandidateRepository::default());
+        let app = AppState::new()
+            .expect("state should build")
+            .with_data_state_for_tests(
+                GatewayDataState::with_auth_candidate_selection_provider_catalog_and_request_candidate_repository_for_tests(
+                    Arc::new(InMemoryAuthApiKeySnapshotRepository::default()),
+                    Arc::new(InMemoryMinimalCandidateSelectionReadRepository::default()),
+                    Arc::new(InMemoryProviderCatalogReadRepository::seed(
+                        Vec::new(),
+                        Vec::new(),
+                        Vec::new(),
+                    )),
+                    Arc::clone(&request_candidate_repository),
+                    "test-encryption-key",
+                ),
+            );
+        let mut pool_group = sample_eligible("pool-group", None);
+        pool_group.kind = LocalExecutionCandidateKind::PoolGroup;
+        pool_group.transport = sample_transport(
+            "pool-group",
+            Some(json!({ "pool_advanced": { "scheduling_presets": [] } })),
+        );
+
+        let attempts = materialize_logical_local_execution_candidate_attempts(
+            PlannerAppState::new(&app),
+            "trace-logical-pool",
+            LocalAvailableCandidatePersistenceContext {
+                user_id: "user-1",
+                api_key_id: "api-key-1",
+                required_capabilities: None,
+                error_context: "persist should not fail",
+            },
+            vec![pool_group, sample_eligible("normal-key", None)],
+            None,
+            Some("gpt-5"),
+            None,
+            &|_| None,
+        )
+        .await;
+
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].candidate_index, 1);
+        assert_eq!(attempts[0].eligible.candidate.key_id, "normal-key");
+
+        let stored = app
+            .read_request_candidates_by_request_id("trace-logical-pool")
+            .await
+            .expect("request candidates should read");
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].key_id.as_deref(), Some("normal-key"));
+        assert_eq!(stored[0].candidate_index, 1);
     }
 
     #[test]

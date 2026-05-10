@@ -5,7 +5,7 @@ use sqlx::{mysql::MySqlRow, MySql, QueryBuilder, Row};
 
 use super::{
     MinimalCandidateSelectionReadRepository, StoredMinimalCandidateSelectionRow,
-    StoredPoolKeyCandidateRowsQuery, StoredProviderModelMapping,
+    StoredPoolKeyCandidateOrder, StoredPoolKeyCandidateRowsQuery, StoredProviderModelMapping,
     StoredRequestedModelCandidateRowsQuery,
 };
 use crate::driver::mysql::MysqlPool;
@@ -35,6 +35,7 @@ SELECT
   pak.capabilities AS key_capabilities,
   pak.internal_priority AS key_internal_priority,
   pak.global_priority_by_format AS key_global_priority_by_format,
+  pak.last_used_at AS key_last_used_at_unix_secs,
   m.id AS model_id,
   m.global_model_id AS global_model_id,
   gm.name AS global_model_name,
@@ -67,6 +68,7 @@ struct CandidateSelectionRow {
     row: StoredMinimalCandidateSelectionRow,
     provider_pool_enabled: bool,
     key_auth_config: Option<String>,
+    key_last_used_at_unix_secs: Option<u64>,
 }
 
 impl MysqlMinimalCandidateSelectionReadRepository {
@@ -180,18 +182,18 @@ impl MinimalCandidateSelectionReadRepository for MysqlMinimalCandidateSelectionR
             .load_rows_for_api_format(&query.api_format)
             .await?
             .into_iter()
-            .map(|item| item.row)
             .filter(|row| {
-                row.provider_id == query.provider_id
-                    && row.endpoint_id == query.endpoint_id
-                    && row.model_id == query.model_id
+                row.row.provider_id == query.provider_id
+                    && row.row.endpoint_id == query.endpoint_id
+                    && row.row.model_id == query.model_id
             })
             .collect::<Vec<_>>();
-        let mut rows = sort_pool_key_rows(rows);
+        let mut rows = sort_pool_key_rows(rows, &query.order);
         Ok(rows
             .drain(..)
             .skip(query.offset as usize)
             .take(query.limit as usize)
+            .map(|item| item.row)
             .collect())
     }
 }
@@ -246,14 +248,64 @@ fn sort_rows(
 }
 
 fn sort_pool_key_rows(
-    mut rows: Vec<StoredMinimalCandidateSelectionRow>,
-) -> Vec<StoredMinimalCandidateSelectionRow> {
-    rows.sort_by(|left, right| {
-        left.key_internal_priority
-            .cmp(&right.key_internal_priority)
-            .then(left.key_id.cmp(&right.key_id))
+    mut rows: Vec<CandidateSelectionRow>,
+    order: &StoredPoolKeyCandidateOrder,
+) -> Vec<CandidateSelectionRow> {
+    rows.sort_by(|left, right| match order {
+        StoredPoolKeyCandidateOrder::InternalPriority => compare_pool_key_internal(left, right),
+        StoredPoolKeyCandidateOrder::Lru => left
+            .key_last_used_at_unix_secs
+            .cmp(&right.key_last_used_at_unix_secs)
+            .then_with(|| compare_pool_key_internal(left, right)),
+        StoredPoolKeyCandidateOrder::CacheAffinity => right
+            .key_last_used_at_unix_secs
+            .cmp(&left.key_last_used_at_unix_secs)
+            .then_with(|| compare_pool_key_internal(left, right)),
+        StoredPoolKeyCandidateOrder::SingleAccount => left
+            .row
+            .key_internal_priority
+            .cmp(&right.row.key_internal_priority)
+            .then_with(|| {
+                right
+                    .key_last_used_at_unix_secs
+                    .cmp(&left.key_last_used_at_unix_secs)
+            })
+            .then(left.row.key_id.cmp(&right.row.key_id)),
+        StoredPoolKeyCandidateOrder::LoadBalance { seed } => {
+            stable_pool_key_hash(seed.as_str(), left.row.key_id.as_str())
+                .cmp(&stable_pool_key_hash(
+                    seed.as_str(),
+                    right.row.key_id.as_str(),
+                ))
+                .then(left.row.key_id.cmp(&right.row.key_id))
+        }
     });
     rows
+}
+
+fn compare_pool_key_internal(
+    left: &CandidateSelectionRow,
+    right: &CandidateSelectionRow,
+) -> std::cmp::Ordering {
+    left.row
+        .key_internal_priority
+        .cmp(&right.row.key_internal_priority)
+        .then(left.row.key_id.cmp(&right.row.key_id))
+}
+
+fn stable_pool_key_hash(seed: &str, key_id: &str) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in seed
+        .as_bytes()
+        .iter()
+        .copied()
+        .chain(std::iter::once(b':'))
+        .chain(key_id.as_bytes().iter().copied())
+    {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
 }
 
 fn row_matches_requested_model(
@@ -394,6 +446,10 @@ fn map_candidate_selection_row(row: &MySqlRow) -> Result<CandidateSelectionRow, 
         },
         provider_pool_enabled,
         key_auth_config: row.try_get("key_auth_config").map_sql_err()?,
+        key_last_used_at_unix_secs: row
+            .try_get::<Option<i64>, _>("key_last_used_at_unix_secs")
+            .map_sql_err()?
+            .and_then(|value| u64::try_from(value).ok()),
     })
 }
 

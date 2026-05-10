@@ -87,6 +87,7 @@ pub(super) async fn maybe_build_local_gemini_files_decision_payload_for_candidat
         client_api_format: GEMINI_FILES_CLIENT_API_FORMAT,
         mapped_model: None,
         candidate_group_id: eligible.orchestration.candidate_group_id.as_deref(),
+        pool_key_lease: eligible.orchestration.pool_key_lease.as_ref(),
         ranking: eligible.ranking.as_ref(),
         upstream_url: None,
         header_rules: transport.endpoint.header_rules.as_ref(),
