@@ -294,7 +294,7 @@ fn empty_database_snapshot_covers_current_cutoff_versions() {
             20260507000000,
             20260507120000,
             20260508000000,
-            20260509000000,
+            20260510000000,
         ]
     );
 }
@@ -399,7 +399,7 @@ fn provider_api_keys_api_formats_remains_nullable_in_baselines() {
 fn management_tokens_json_columns_are_normalized_to_jsonb_in_postgres_schema_paths() {
     let normalization_migration = POSTGRES_MIGRATOR
         .iter()
-        .find(|migration| migration.version == 20260509000000)
+        .find(|migration| migration.version == 20260510000000)
         .expect("management token jsonb normalization migration should be embedded");
     assert!(normalization_migration
         .sql
@@ -1061,7 +1061,7 @@ fn pending_migrations_from_applied_skips_versions_already_applied() {
             20260507000000,
             20260507120000,
             20260508000000,
-            20260509000000,
+            20260510000000,
         ]
     );
 }
