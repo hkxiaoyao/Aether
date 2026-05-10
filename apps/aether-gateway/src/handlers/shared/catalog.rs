@@ -770,7 +770,9 @@ fn build_codex_quota_status_snapshot(
             window
                 .get("code")
                 .and_then(Value::as_str)
-                .is_some_and(|code| code.eq_ignore_ascii_case("weekly") || code.eq_ignore_ascii_case("5h"))
+                .is_some_and(|code| {
+                    code.eq_ignore_ascii_case("weekly") || code.eq_ignore_ascii_case("5h")
+                })
         })
         .cloned()
         .collect::<Vec<_>>();

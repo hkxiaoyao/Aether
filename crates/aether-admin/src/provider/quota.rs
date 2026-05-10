@@ -1053,9 +1053,18 @@ mod tests {
         assert_eq!(parsed.get("primary_used_percent"), Some(&json!(10.0)));
         assert_eq!(parsed.get("secondary_used_percent"), Some(&json!(25.0)));
         assert_eq!(parsed.get("spark_primary_used_percent"), Some(&json!(40.0)));
-        assert_eq!(parsed.get("spark_primary_window_minutes"), Some(&json!(300u64)));
-        assert_eq!(parsed.get("spark_secondary_used_percent"), Some(&json!(5.0)));
-        assert_eq!(parsed.get("spark_secondary_window_minutes"), Some(&json!(10_080u64)));
+        assert_eq!(
+            parsed.get("spark_primary_window_minutes"),
+            Some(&json!(300u64))
+        );
+        assert_eq!(
+            parsed.get("spark_secondary_used_percent"),
+            Some(&json!(5.0))
+        );
+        assert_eq!(
+            parsed.get("spark_secondary_window_minutes"),
+            Some(&json!(10_080u64))
+        );
     }
 
     #[test]
