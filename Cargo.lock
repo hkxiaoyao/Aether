@@ -180,6 +180,7 @@ dependencies = [
  "aether-runtime",
  "aether-runtime-state",
  "aether-scheduler-core",
+ "aether-task-runtime",
  "aether-testkit",
  "aether-usage-runtime",
  "aether-video-tasks-core",
@@ -294,7 +295,7 @@ dependencies = [
 
 [[package]]
 name = "aether-proxy"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "aether-contracts",
  "aether-gateway",
@@ -382,6 +383,18 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+]
+
+[[package]]
+name = "aether-task-runtime"
+version = "0.1.0"
+dependencies = [
+ "aether-runtime",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]

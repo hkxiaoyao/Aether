@@ -315,6 +315,16 @@ export interface CodexUpstreamMetadata {
   secondary_reset_after_seconds?: number  // 5H限额重置剩余秒数（兼容字段）
   secondary_reset_at?: number  // 5H限额重置时间（Unix 时间戳）
   secondary_window_minutes?: number  // 5H限额窗口大小（分钟）
+  spark_primary_used_percent?: number  // Spark 5H限额窗口使用百分比
+  spark_primary_reset_seconds?: number  // Spark 5H限额重置剩余秒数
+  spark_primary_reset_after_seconds?: number  // Spark 5H限额重置剩余秒数（兼容字段）
+  spark_primary_reset_at?: number  // Spark 5H限额重置时间（Unix 时间戳）
+  spark_primary_window_minutes?: number  // Spark 5H限额窗口大小（分钟）
+  spark_secondary_used_percent?: number  // Spark 周限额窗口使用百分比
+  spark_secondary_reset_seconds?: number  // Spark 周限额重置剩余秒数
+  spark_secondary_reset_after_seconds?: number  // Spark 周限额重置剩余秒数（兼容字段）
+  spark_secondary_reset_at?: number  // Spark 周限额重置时间（Unix 时间戳）
+  spark_secondary_window_minutes?: number  // Spark 周限额窗口大小（分钟）
   has_credits?: boolean  // 是否有积分
   credits_balance?: number  // 积分余额
 }
