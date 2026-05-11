@@ -626,6 +626,7 @@ async fn gateway_locally_denies_disallowed_gemini_model_without_hitting_control_
     snapshot.api_key_allowed_providers = Some(vec!["gemini".to_string()]);
     snapshot.user_allowed_providers = Some(vec!["gemini".to_string()]);
     snapshot.api_key_allowed_api_formats = Some(vec!["gemini:generate_content".to_string()]);
+    snapshot.user_allowed_api_formats = Some(vec!["gemini:generate_content".to_string()]);
     snapshot.api_key_allowed_models = Some(vec!["gemini-1.5-pro".to_string()]);
     let repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
         Some(hash_api_key("gemini-client-key-123")),
