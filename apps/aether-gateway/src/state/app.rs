@@ -59,6 +59,7 @@ pub struct AppState {
     pub(crate) auth_context_cache: Arc<AuthContextCache>,
     pub(crate) auth_api_key_last_used_cache: Arc<AuthApiKeyLastUsedCache>,
     pub(crate) oauth_refresh: Arc<provider_transport::LocalOAuthRefreshCoordinator>,
+    pub(crate) plugins: Arc<crate::plugins::GatewayPluginRegistry>,
     pub(crate) direct_plan_bypass_cache: Arc<DirectPlanBypassCache>,
     pub(crate) scheduler_affinity_cache: Arc<SchedulerAffinityCache>,
     pub(crate) scheduler_affinity_epoch: Arc<AtomicU64>,

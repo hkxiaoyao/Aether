@@ -1,6 +1,11 @@
 use http::Uri;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
-use crate::control::management_token_required_permission;
+use crate::control::{management_token_required_permission, resolve_control_route};
+use aether_plugin_core::{
+    PluginManifest, PluginRegistry, PluginRuntimeKind, PluginRuntimeManifest, PluginSource,
+};
 
 use super::{classify_control_route, headers};
 
@@ -97,6 +102,100 @@ fn classifies_admin_system_version_as_admin_proxy_route() {
         Some("admin:system")
     );
     assert!(!decision.is_execution_runtime_candidate());
+}
+
+#[test]
+fn classifies_admin_plugins_routes_as_admin_proxy_route() {
+    let headers = headers(&[]);
+    let list_uri: Uri = "/api/admin/plugins".parse().expect("uri should parse");
+    let list = classify_control_route(&http::Method::GET, &list_uri, &headers)
+        .expect("route should classify");
+
+    assert_eq!(list.route_class.as_deref(), Some("admin_proxy"));
+    assert_eq!(list.route_family.as_deref(), Some("plugins_manage"));
+    assert_eq!(list.route_kind.as_deref(), Some("list_plugins"));
+    assert_eq!(
+        list.auth_endpoint_signature.as_deref(),
+        Some("admin:system")
+    );
+    assert!(!list.is_execution_runtime_candidate());
+
+    let detail_uri: Uri = "/api/admin/plugins/builtin.provider.codex"
+        .parse()
+        .expect("uri should parse");
+    let detail = classify_control_route(&http::Method::GET, &detail_uri, &headers)
+        .expect("route should classify");
+
+    assert_eq!(detail.route_class.as_deref(), Some("admin_proxy"));
+    assert_eq!(detail.route_family.as_deref(), Some("plugins_manage"));
+    assert_eq!(detail.route_kind.as_deref(), Some("plugin_detail"));
+    assert_eq!(
+        detail.auth_endpoint_signature.as_deref(),
+        Some("admin:system")
+    );
+    assert!(!detail.is_execution_runtime_candidate());
+}
+
+#[tokio::test]
+async fn provider_plugin_route_alias_precedes_static_control_routes() {
+    let manifest = PluginManifest {
+        id: "local.provider.alias".to_string(),
+        name: "Alias Provider".to_string(),
+        version: "1".to_string(),
+        api_version: aether_plugin_core::PLUGIN_API_VERSION_V1.to_string(),
+        runtime: PluginRuntimeManifest {
+            kind: PluginRuntimeKind::Manifest,
+            entry: None,
+            command: None,
+            endpoint: None,
+            timeout_ms: None,
+        },
+        capabilities: BTreeSet::from([aether_provider_plugin::provider_capability(
+            aether_provider_plugin::CAP_PROVIDER_ROUTE_ALIAS,
+        )]),
+        enabled: true,
+        description: None,
+        domains: BTreeMap::from([(
+            aether_provider_plugin::PROVIDER_DOMAIN.to_string(),
+            serde_json::json!({
+                "provider_types": ["alias"],
+                "api_formats": ["alias:chat"],
+                "route_aliases": [{
+                    "method": "POST",
+                    "path": "/v1/chat/completions",
+                    "route_family": "alias",
+                    "route_kind": "chat",
+                    "auth_endpoint_signature": "alias:chat"
+                }]
+            }),
+        )]),
+    };
+    let mut registry = PluginRegistry::new();
+    registry.register_manifest(
+        manifest.clone(),
+        PluginSource::Local,
+        Some(aether_provider_plugin::manifest_provider_runtime(manifest)),
+        None,
+    );
+    let mut state = crate::AppState::new().expect("state should build");
+    state.plugins = Arc::new(crate::plugins::GatewayPluginRegistry::from_registry(
+        registry,
+    ));
+    let uri: Uri = "/v1/chat/completions".parse().expect("uri should parse");
+
+    let decision = resolve_control_route(&state, &http::Method::POST, &uri, &headers(&[]), "trace")
+        .await
+        .expect("route should resolve")
+        .expect("route should classify");
+
+    assert_eq!(decision.route_class.as_deref(), Some("ai_public"));
+    assert_eq!(decision.route_family.as_deref(), Some("alias"));
+    assert_eq!(decision.route_kind.as_deref(), Some("chat"));
+    assert_eq!(
+        decision.auth_endpoint_signature.as_deref(),
+        Some("alias:chat")
+    );
+    assert!(decision.is_execution_runtime_candidate());
 }
 
 #[test]

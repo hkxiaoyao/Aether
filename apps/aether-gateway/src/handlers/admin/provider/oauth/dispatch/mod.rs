@@ -49,7 +49,7 @@ pub(crate) async fn maybe_build_local_admin_provider_oauth_response(
         && request_context.path() == "/api/admin/provider-oauth/supported-types"
     {
         return Ok(Some(
-            Json(build_admin_provider_oauth_supported_types_payload()).into_response(),
+            Json(build_admin_provider_oauth_supported_types_payload(state)).into_response(),
         ));
     }
 

@@ -1,0 +1,19 @@
+[package]
+name = "aether-provider-plugin"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Provider plugin domain contracts and builtin adapters for Aether"
+
+[dependencies]
+aether-plugin-core.workspace = true
+aether-provider-transport.workspace = true
+async-trait.workspace = true
+base64.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

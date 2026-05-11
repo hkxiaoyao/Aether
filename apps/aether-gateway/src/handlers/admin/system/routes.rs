@@ -1,4 +1,4 @@
-use super::{adaptive, core, proxy_nodes};
+use super::{adaptive, core, plugins, proxy_nodes};
 use crate::handlers::admin::provider::pool_admin;
 use crate::handlers::admin::request::{AdminRouteRequest, AdminRouteResult};
 
@@ -39,6 +39,15 @@ pub(crate) async fn maybe_build_local_admin_system_response(
         &request.state(),
         &request.request_context(),
         request.request_body(),
+    )
+    .await?
+    {
+        return Ok(Some(response));
+    }
+
+    if let Some(response) = plugins::maybe_build_local_admin_plugins_response(
+        &request.state(),
+        &request.request_context(),
     )
     .await?
     {

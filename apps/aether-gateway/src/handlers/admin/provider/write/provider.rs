@@ -9,5 +9,6 @@ pub(crate) use self::template::{
     apply_admin_fixed_provider_endpoint_template_overrides,
     reconcile_admin_fixed_provider_template_endpoints,
     reconcile_admin_fixed_provider_template_keys,
+    reconcile_admin_provider_plugin_template_endpoints,
 };
 pub(crate) use self::update::build_admin_update_provider_record;

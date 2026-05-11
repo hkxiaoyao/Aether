@@ -14,6 +14,7 @@ use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
 const FIXED_PROVIDER_TEMPLATE_METADATA_KEY: &str = "_aether_fixed_provider_template";
+const PROVIDER_PLUGIN_TEMPLATE_METADATA_KEY: &str = "_aether_provider_plugin_template";
 const OVERRIDE_BODY_RULES: &str = "body_rules";
 const OVERRIDE_FORMAT_ACCEPTANCE_CONFIG: &str = "format_acceptance_config";
 const OVERRIDE_HEADER_RULES: &str = "header_rules";
@@ -108,6 +109,99 @@ pub(crate) async fn reconcile_admin_fixed_provider_template_endpoints(
                 ));
             };
         }
+    }
+
+    Ok(())
+}
+
+pub(crate) async fn reconcile_admin_provider_plugin_template_endpoints(
+    state: &AdminAppState<'_>,
+    provider: &StoredProviderCatalogProvider,
+) -> Result<(), GatewayError> {
+    if state
+        .fixed_provider_template(&provider.provider_type)
+        .is_some()
+    {
+        return Ok(());
+    }
+    let Some(config) = state.provider_plugin_config_for_type(&provider.provider_type) else {
+        return Ok(());
+    };
+    if config.endpoints.is_empty() {
+        return Ok(());
+    }
+
+    let existing_endpoints = state
+        .list_provider_catalog_endpoints_by_provider_ids(std::slice::from_ref(&provider.id))
+        .await?;
+    let mut matched_endpoint_ids = BTreeSet::new();
+
+    for endpoint_template in &config.endpoints {
+        let existing_endpoint = existing_endpoints.iter().find(|endpoint| {
+            endpoint_matches_provider_plugin_template(endpoint, endpoint_template)
+        });
+        match existing_endpoint {
+            Some(existing_endpoint) => {
+                matched_endpoint_ids.insert(existing_endpoint.id.clone());
+                let updated = reconcile_provider_plugin_endpoint(
+                    provider,
+                    existing_endpoint,
+                    &config,
+                    endpoint_template,
+                )
+                .map_err(GatewayError::Internal)?;
+                if updated != *existing_endpoint {
+                    let Some(_) = state.update_provider_catalog_endpoint(&updated).await? else {
+                        return Err(GatewayError::Internal(
+                            "provider catalog endpoint writer unavailable".to_string(),
+                        ));
+                    };
+                }
+            }
+            None => {
+                let mut created = build_admin_provider_plugin_endpoint_record(
+                    provider,
+                    &config,
+                    endpoint_template,
+                )
+                .map_err(GatewayError::Internal)?;
+                upsert_provider_plugin_endpoint_metadata(
+                    &mut created,
+                    &ProviderPluginEndpointMetadata {
+                        provider_type: provider.provider_type.clone(),
+                        item_key: endpoint_template.item_key.clone(),
+                        retired: false,
+                    },
+                );
+                let Some(_) = state.create_provider_catalog_endpoint(&created).await? else {
+                    return Err(GatewayError::Internal(
+                        "provider catalog endpoint writer unavailable".to_string(),
+                    ));
+                };
+            }
+        }
+    }
+
+    for existing_endpoint in &existing_endpoints {
+        if matched_endpoint_ids.contains(&existing_endpoint.id) {
+            continue;
+        }
+        let Some(mut metadata) = provider_plugin_endpoint_metadata(existing_endpoint) else {
+            continue;
+        };
+        if metadata.retired && !existing_endpoint.is_active {
+            continue;
+        }
+        let mut retired = existing_endpoint.clone();
+        retired.is_active = false;
+        retired.updated_at_unix_secs = Some(current_unix_secs());
+        metadata.retired = true;
+        upsert_provider_plugin_endpoint_metadata(&mut retired, &metadata);
+        let Some(_) = state.update_provider_catalog_endpoint(&retired).await? else {
+            return Err(GatewayError::Internal(
+                "provider catalog endpoint writer unavailable".to_string(),
+            ));
+        };
     }
 
     Ok(())
@@ -349,6 +443,223 @@ fn endpoint_matches_fixed_provider_template(
         || api_format_matches(&endpoint.api_format, endpoint_template.api_format)
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ProviderPluginEndpointMetadata {
+    provider_type: String,
+    item_key: String,
+    retired: bool,
+}
+
+fn build_admin_provider_plugin_endpoint_record(
+    provider: &StoredProviderCatalogProvider,
+    config: &aether_provider_plugin::ProviderPluginConfig,
+    endpoint_template: &aether_provider_plugin::ProviderPluginEndpointConfig,
+) -> Result<StoredProviderCatalogEndpoint, String> {
+    let defaults =
+        build_admin_provider_plugin_endpoint_defaults(provider, config, endpoint_template)?;
+    let mut endpoint = StoredProviderCatalogEndpoint::new(
+        uuid::Uuid::new_v4().to_string(),
+        provider.id.clone(),
+        defaults.api_format,
+        defaults.api_family,
+        defaults.endpoint_kind,
+        defaults.is_active,
+    )
+    .map_err(|err| err.to_string())?
+    .with_timestamps(Some(current_unix_secs()), Some(current_unix_secs()))
+    .with_transport_fields(
+        defaults.base_url,
+        None,
+        None,
+        Some(provider.max_retries.unwrap_or(2)),
+        defaults.custom_path,
+        defaults.config,
+        None,
+        None,
+    )
+    .map_err(|err| err.to_string())?;
+    upsert_provider_plugin_endpoint_metadata(
+        &mut endpoint,
+        &ProviderPluginEndpointMetadata {
+            provider_type: provider.provider_type.clone(),
+            item_key: endpoint_template.item_key.clone(),
+            retired: false,
+        },
+    );
+    Ok(endpoint)
+}
+
+struct ProviderPluginEndpointDefaults {
+    api_format: String,
+    api_family: Option<String>,
+    endpoint_kind: Option<String>,
+    is_active: bool,
+    base_url: String,
+    custom_path: Option<String>,
+    config: Option<Value>,
+}
+
+fn build_admin_provider_plugin_endpoint_defaults(
+    provider: &StoredProviderCatalogProvider,
+    config: &aether_provider_plugin::ProviderPluginConfig,
+    endpoint_template: &aether_provider_plugin::ProviderPluginEndpointConfig,
+) -> Result<ProviderPluginEndpointDefaults, String> {
+    let normalized_api_format = normalize_api_format_alias(&endpoint_template.api_format);
+    let (api_family, endpoint_kind) =
+        crate::api::ai::admin_endpoint_signature_parts(&normalized_api_format)
+            .map(|(_, api_family, endpoint_kind)| {
+                (
+                    Some(api_family.to_string()),
+                    Some(endpoint_kind.to_string()),
+                )
+            })
+            .unwrap_or((None, None));
+    let base_url = config
+        .base_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "provider plugin endpoint requires provider.base_url".to_string())?;
+    let config_value = (!endpoint_template.config_defaults.is_empty()).then(|| {
+        Value::Object(
+            endpoint_template
+                .config_defaults
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+        )
+    });
+    let _ = provider;
+    Ok(ProviderPluginEndpointDefaults {
+        api_format: normalized_api_format,
+        api_family,
+        endpoint_kind,
+        is_active: true,
+        base_url: crate::handlers::public::normalize_admin_base_url(base_url)?,
+        custom_path: endpoint_template.custom_path.clone(),
+        config: config_value,
+    })
+}
+
+fn reconcile_provider_plugin_endpoint(
+    provider: &StoredProviderCatalogProvider,
+    existing_endpoint: &StoredProviderCatalogEndpoint,
+    config: &aether_provider_plugin::ProviderPluginConfig,
+    endpoint_template: &aether_provider_plugin::ProviderPluginEndpointConfig,
+) -> Result<StoredProviderCatalogEndpoint, String> {
+    let defaults =
+        build_admin_provider_plugin_endpoint_defaults(provider, config, endpoint_template)?;
+    let mut updated = existing_endpoint.clone();
+    updated.api_format = defaults.api_format;
+    updated.api_family = defaults.api_family;
+    updated.endpoint_kind = defaults.endpoint_kind;
+    updated.base_url = defaults.base_url;
+    updated.custom_path = defaults.custom_path;
+    updated.is_active = defaults.is_active;
+    updated.max_retries = Some(provider.max_retries.unwrap_or(2));
+    let metadata = ProviderPluginEndpointMetadata {
+        provider_type: provider.provider_type.clone(),
+        item_key: endpoint_template.item_key.clone(),
+        retired: false,
+    };
+    let mut next_config = defaults
+        .config
+        .as_ref()
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    if let Some(existing_config) =
+        endpoint_config_without_plugin_metadata(existing_endpoint.config.as_ref())
+    {
+        for (key, value) in existing_config {
+            next_config.entry(key).or_insert(value);
+        }
+    }
+    updated.config = Some(Value::Object(next_config));
+    upsert_provider_plugin_endpoint_metadata(&mut updated, &metadata);
+    if updated != *existing_endpoint {
+        updated.updated_at_unix_secs = Some(current_unix_secs());
+    }
+    Ok(updated)
+}
+
+fn endpoint_matches_provider_plugin_template(
+    endpoint: &StoredProviderCatalogEndpoint,
+    endpoint_template: &aether_provider_plugin::ProviderPluginEndpointConfig,
+) -> bool {
+    if let Some(metadata) = provider_plugin_endpoint_metadata(endpoint) {
+        if metadata.item_key == endpoint_template.item_key {
+            return true;
+        }
+    }
+    endpoint
+        .api_format
+        .trim()
+        .eq_ignore_ascii_case(endpoint_template.api_format.trim())
+        || api_format_matches(&endpoint.api_format, &endpoint_template.api_format)
+}
+
+fn provider_plugin_endpoint_metadata(
+    endpoint: &StoredProviderCatalogEndpoint,
+) -> Option<ProviderPluginEndpointMetadata> {
+    let config = endpoint.config.as_ref()?.as_object()?;
+    let metadata = config
+        .get(PROVIDER_PLUGIN_TEMPLATE_METADATA_KEY)?
+        .as_object()?;
+    if !metadata
+        .get("managed")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    let provider_type = metadata
+        .get("provider_type")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let item_key = metadata
+        .get("item_key")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    Some(ProviderPluginEndpointMetadata {
+        provider_type: provider_type.to_string(),
+        item_key: item_key.to_string(),
+        retired: metadata
+            .get("retired")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    })
+}
+
+fn endpoint_config_without_plugin_metadata(config: Option<&Value>) -> Option<Map<String, Value>> {
+    let mut config = config
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    config.remove(PROVIDER_PLUGIN_TEMPLATE_METADATA_KEY);
+    (!config.is_empty()).then_some(config)
+}
+
+fn upsert_provider_plugin_endpoint_metadata(
+    endpoint: &mut StoredProviderCatalogEndpoint,
+    metadata: &ProviderPluginEndpointMetadata,
+) {
+    let mut config =
+        endpoint_config_without_plugin_metadata(endpoint.config.as_ref()).unwrap_or_default();
+    config.insert(
+        PROVIDER_PLUGIN_TEMPLATE_METADATA_KEY.to_string(),
+        json!({
+            "managed": true,
+            "provider_type": metadata.provider_type,
+            "item_key": metadata.item_key,
+            "retired": metadata.retired,
+        }),
+    );
+    endpoint.config = Some(Value::Object(config));
+}
+
 fn normalize_api_format_alias(value: &str) -> String {
     crate::ai_serving::normalize_api_format_alias(value)
 }
@@ -533,4 +844,58 @@ fn sync_override_if_changed<T>(
         return;
     }
     sync_override(overrides, key, actual, desired);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provider_plugin_endpoint_record_uses_manifest_defaults() {
+        let provider = StoredProviderCatalogProvider::new(
+            "provider-plugin".to_string(),
+            "Plugin Provider".to_string(),
+            None,
+            "plugin_provider".to_string(),
+        )
+        .expect("provider should build");
+        let config = aether_provider_plugin::ProviderPluginConfig {
+            provider_types: vec!["plugin_provider".to_string()],
+            api_formats: vec!["openai:chat".to_string()],
+            base_url: Some("https://plugin.example.test/".to_string()),
+            endpoints: Vec::new(),
+            route_aliases: Vec::new(),
+            request_rewrite: None,
+            response_rewrite: None,
+            stream_rewrite: None,
+            runtime_policy: None,
+            auth: None,
+            model_fetch: None,
+            health_check: None,
+        };
+        let endpoint_template = aether_provider_plugin::ProviderPluginEndpointConfig {
+            item_key: "chat".to_string(),
+            api_format: "openai:chat".to_string(),
+            custom_path: Some("/plugin/chat".to_string()),
+            config_defaults: BTreeMap::from([("dialect".to_string(), json!("plugin"))]),
+        };
+
+        let endpoint =
+            build_admin_provider_plugin_endpoint_record(&provider, &config, &endpoint_template)
+                .expect("endpoint should build");
+
+        assert_eq!(endpoint.provider_id, "provider-plugin");
+        assert_eq!(endpoint.api_format, "openai:chat");
+        assert_eq!(endpoint.base_url, "https://plugin.example.test");
+        assert_eq!(endpoint.custom_path.as_deref(), Some("/plugin/chat"));
+        let endpoint_config = endpoint
+            .config
+            .as_ref()
+            .and_then(Value::as_object)
+            .expect("config should be object");
+        assert_eq!(endpoint_config.get("dialect"), Some(&json!("plugin")));
+        assert!(endpoint_config
+            .get(PROVIDER_PLUGIN_TEMPLATE_METADATA_KEY)
+            .is_some());
+    }
 }

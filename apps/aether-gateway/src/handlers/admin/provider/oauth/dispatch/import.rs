@@ -122,7 +122,7 @@ fn apply_single_import_hints(
 
 async fn resolve_admin_provider_oauth_single_import_tokens(
     state: &AdminAppState<'_>,
-    template: AdminProviderOAuthTemplate,
+    template: &AdminProviderOAuthTemplate,
     provider_type: &str,
     refresh_token: Option<&str>,
     access_token: Option<&str>,
@@ -285,7 +285,7 @@ pub(super) async fn handle_admin_provider_oauth_import_refresh_token(
         ));
     };
     let provider_type = provider.provider_type.trim().to_ascii_lowercase();
-    if !is_fixed_provider_type_for_provider_oauth(&provider_type) {
+    if !is_fixed_provider_type_for_provider_oauth(state, &provider_type) {
         return Ok(build_internal_control_error_response(
             http::StatusCode::BAD_REQUEST,
             "该 Provider 不是固定类型，无法使用 provider-oauth",
@@ -297,7 +297,7 @@ pub(super) async fn handle_admin_provider_oauth_import_refresh_token(
             "Kiro 不支持单条 Refresh Token 导入，请使用批量导入或设备授权。",
         ));
     }
-    let Some(template) = admin_provider_oauth_template(&provider_type) else {
+    let Some(template) = admin_provider_oauth_template(state, &provider_type) else {
         return Ok(build_admin_provider_oauth_backend_unavailable_response());
     };
     let endpoints = state
@@ -319,7 +319,7 @@ pub(super) async fn handle_admin_provider_oauth_import_refresh_token(
 
     let resolved_import = match resolve_admin_provider_oauth_single_import_tokens(
         state,
-        template,
+        &template,
         &provider_type,
         refresh_token_input.as_deref(),
         access_token_input.as_deref(),

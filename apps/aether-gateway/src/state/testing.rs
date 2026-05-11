@@ -12,10 +12,18 @@ use aether_data_contracts::repository::video_tasks::{
 use serde_json::json;
 
 use super::{AppState, GatewayDataState};
-use crate::{provider_transport, usage};
+use crate::{plugins::GatewayPluginRegistry, provider_transport, usage};
 
 #[cfg(test)]
 impl AppState {
+    pub(crate) fn with_plugin_registry_for_tests(
+        mut self,
+        registry: GatewayPluginRegistry,
+    ) -> Self {
+        self.plugins = Arc::new(registry);
+        self
+    }
+
     pub(crate) fn with_data_state_for_tests(mut self, data_state: GatewayDataState) -> Self {
         self.replace_data_state(Arc::new(data_state));
         self

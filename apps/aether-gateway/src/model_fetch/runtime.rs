@@ -292,7 +292,8 @@ async fn fetch_and_persist_key_models(
         return Ok(KeyFetchDisposition::Skipped);
     }
 
-    let result = match fetch_models_from_transports(state, &transports).await {
+    let trace_id = format!("model-fetch:{}:{}", target.provider.id, target.key.id);
+    let result = match fetch_models_via_plugins_or_transports(state, &trace_id, &transports).await {
         Ok(result) => result,
         Err(err) => {
             persist_key_fetch_failure(state, &target.key, now_unix_secs, err.clone()).await?;
@@ -344,6 +345,31 @@ async fn fetch_and_persist_key_models(
         .await
         .map_err(GatewayError::Internal)?;
     Ok(KeyFetchDisposition::Succeeded)
+}
+
+pub(crate) async fn fetch_models_via_plugins_or_transports<S>(
+    state: &S,
+    trace_id: &str,
+    transports: &[crate::provider_transport::GatewayProviderTransportSnapshot],
+) -> Result<aether_model_fetch::ModelsFetchOutcome, String>
+where
+    S: ModelFetchRuntimeState + ?Sized,
+{
+    match state
+        .fetch_models_via_provider_plugin(trace_id, transports)
+        .await
+    {
+        Ok(Some(outcome)) => return Ok(outcome),
+        Ok(None) => {}
+        Err(err) => {
+            return Err(match err {
+                GatewayError::UpstreamUnavailable { message, .. }
+                | GatewayError::ControlUnavailable { message, .. }
+                | GatewayError::Internal(message) => message,
+            });
+        }
+    }
+    fetch_models_from_transports(state, transports).await
 }
 
 async fn persist_key_fetch_failure(
@@ -413,7 +439,8 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use crate::provider_transport::LocalResolvedOAuthRequestAuth;
-    use crate::GatewayError;
+    use crate::{plugins::GatewayPluginRegistry, AppState, GatewayError};
+    use aether_plugin_core::{PluginManifest, PluginRegistry, PluginRuntimeKind};
     use aether_provider_transport::snapshot::{
         GatewayProviderTransportEndpoint, GatewayProviderTransportKey,
         GatewayProviderTransportProvider, GatewayProviderTransportSnapshot,
@@ -833,6 +860,124 @@ mod tests {
             .lock()
             .expect("cache mutex")
             .contains_key(&("provider-codex".to_string(), "key-codex".to_string())));
+    }
+
+    #[tokio::test]
+    async fn model_fetch_state_falls_back_to_transport_when_plugin_returns_none() {
+        let provider = sample_provider("provider-openai", "openai");
+        let endpoint = sample_endpoint(
+            "endpoint-openai-responses",
+            "provider-openai",
+            "openai:responses",
+        );
+        let key = sample_key(
+            "key-openai-responses",
+            "provider-openai",
+            "api_key",
+            &["openai:responses"],
+        );
+        let transport = sample_transport(
+            "openai",
+            "provider-openai",
+            "endpoint-openai-responses",
+            "key-openai-responses",
+            "openai:responses",
+            "api_key",
+            None,
+        );
+        let state = TestState::new(
+            vec![provider],
+            vec![endpoint],
+            vec![key],
+            HashMap::from([(
+                (
+                    "provider-openai".to_string(),
+                    "endpoint-openai-responses".to_string(),
+                    "key-openai-responses".to_string(),
+                ),
+                transport,
+            )]),
+            vec![execution_result(json!({
+                "data": [{
+                    "id": "gpt-plugin-fallback",
+                    "object": "model"
+                }]
+            }))],
+        );
+
+        let summary = perform_model_fetch_once_with_state(&state)
+            .await
+            .expect("fetch should succeed");
+
+        assert_eq!(summary.succeeded, 1);
+        let updated = state.key("key-openai-responses");
+        assert_eq!(updated.allowed_models, Some(json!(["gpt-plugin-fallback"])));
+    }
+
+    #[tokio::test]
+    async fn app_state_model_fetch_prefers_provider_plugin() {
+        let manifest = PluginManifest {
+            id: "local.provider.models.gateway".to_string(),
+            name: "Gateway Models Provider".to_string(),
+            version: "1".to_string(),
+            api_version: aether_plugin_core::PLUGIN_API_VERSION_V1.to_string(),
+            runtime: aether_plugin_core::PluginRuntimeManifest {
+                kind: PluginRuntimeKind::Manifest,
+                entry: None,
+                command: None,
+                endpoint: None,
+                timeout_ms: None,
+            },
+            capabilities: std::collections::BTreeSet::from([
+                aether_provider_plugin::provider_capability(
+                    aether_provider_plugin::CAP_PROVIDER_MODEL_FETCH,
+                ),
+            ]),
+            enabled: true,
+            description: None,
+            domains: std::collections::BTreeMap::from([(
+                aether_provider_plugin::PROVIDER_DOMAIN.to_string(),
+                json!({
+                    "provider_types": ["plugin_provider"],
+                    "api_formats": ["plugin:chat"],
+                    "model_fetch": {
+                        "supported": true,
+                        "models": [{
+                            "id": "plugin-model",
+                            "owned_by": "plugin",
+                            "api_format": "plugin:chat"
+                        }]
+                    }
+                }),
+            )]),
+        };
+        let mut registry = PluginRegistry::new();
+        registry.register_manifest(
+            manifest.clone(),
+            aether_plugin_core::PluginSource::Local,
+            Some(aether_provider_plugin::manifest_provider_runtime(manifest)),
+            None,
+        );
+        let state = AppState::new()
+            .expect("state should build")
+            .with_plugin_registry_for_tests(GatewayPluginRegistry::from_registry(registry));
+        let transport = sample_transport(
+            "plugin_provider",
+            "provider-plugin",
+            "endpoint-plugin",
+            "key-plugin",
+            "plugin:chat",
+            "api_key",
+            None,
+        );
+
+        let outcome = super::fetch_models_via_plugins_or_transports(&state, "trace", &[transport])
+            .await
+            .expect("plugin model fetch should succeed");
+
+        assert!(outcome.has_success);
+        assert_eq!(outcome.fetched_model_ids, vec!["plugin-model"]);
+        assert_eq!(outcome.cached_models[0]["owned_by"], "plugin");
     }
 
     #[tokio::test]

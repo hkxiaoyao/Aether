@@ -12,13 +12,13 @@ use aether_scheduler_core::{
     ClientSessionAffinity, SchedulerMinimalCandidateSelectionCandidate, SchedulerRankingOutcome,
 };
 
-use crate::ai_serving::transport::provider_types::provider_runtime_policy;
 use crate::ai_serving::{
     candidate_common_transport_skip_reason, candidate_transport_pair_skip_reason,
     CandidateTransportPolicyFacts, GatewayAuthApiKeySnapshot, GatewayProviderTransportSnapshot,
     PlannerAppState,
 };
 use crate::orchestration::LocalExecutionCandidateMetadata;
+use crate::provider_transport::provider_types::{provider_runtime_policy, ProviderRuntimePolicy};
 
 use super::candidate_ranking::rank_eligible_local_execution_candidates;
 use super::pool_scheduler::apply_local_execution_pool_scheduler;
@@ -102,9 +102,11 @@ impl AiCandidateResolutionPort for GatewayLocalCandidateResolutionPort<'_> {
         if provider_transport_uses_pool(transport) {
             return pool_group_common_transport_skip_reason(candidate, transport);
         }
-        if let Some(skip_reason) =
-            candidate_auth_channel_skip_reason(transport, self.request_auth_channel)
-        {
+        if let Some(skip_reason) = candidate_auth_channel_skip_reason_with_state(
+            self.state,
+            transport,
+            self.request_auth_channel,
+        ) {
             return Some(skip_reason);
         }
         candidate_common_transport_skip_reason(
@@ -398,12 +400,36 @@ fn pool_group_common_transport_skip_reason(
     None
 }
 
+fn candidate_auth_channel_skip_reason_with_state(
+    state: PlannerAppState<'_>,
+    transport: &GatewayProviderTransportSnapshot,
+    request_auth_channel: Option<&str>,
+) -> Option<&'static str> {
+    let provider_policy = aether_provider_plugin::provider_runtime_policy_for_type(
+        state.app().plugins.registry(),
+        &transport.provider.provider_type,
+    );
+    candidate_auth_channel_skip_reason_with_policy(transport, request_auth_channel, provider_policy)
+}
+
 pub(crate) fn candidate_auth_channel_skip_reason(
     transport: &GatewayProviderTransportSnapshot,
     request_auth_channel: Option<&str>,
 ) -> Option<&'static str> {
+    candidate_auth_channel_skip_reason_with_policy(
+        transport,
+        request_auth_channel,
+        provider_runtime_policy(&transport.provider.provider_type),
+    )
+}
+
+fn candidate_auth_channel_skip_reason_with_policy(
+    transport: &GatewayProviderTransportSnapshot,
+    request_auth_channel: Option<&str>,
+    provider_policy: ProviderRuntimePolicy,
+) -> Option<&'static str> {
     let request_auth_channel = normalize_request_auth_channel(request_auth_channel?)?;
-    let upstream_auth_channel = resolve_transport_request_auth_channel(transport)?;
+    let upstream_auth_channel = resolve_transport_request_auth_channel(transport, provider_policy)?;
     if request_auth_channel == upstream_auth_channel {
         return None;
     }
@@ -421,9 +447,9 @@ fn normalize_request_auth_channel(value: &str) -> Option<&'static str> {
 
 fn resolve_transport_request_auth_channel(
     transport: &GatewayProviderTransportSnapshot,
+    provider_policy: ProviderRuntimePolicy,
 ) -> Option<&'static str> {
     let auth_type = resolve_transport_auth_type_for_endpoint_format(transport);
-    let provider_policy = provider_runtime_policy(&transport.provider.provider_type);
     match auth_type.as_str() {
         "api_key" => Some("api_key"),
         "bearer" => Some("bearer_like"),

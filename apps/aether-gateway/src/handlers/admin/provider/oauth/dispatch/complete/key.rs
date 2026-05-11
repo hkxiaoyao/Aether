@@ -104,7 +104,7 @@ pub(super) async fn handle_admin_provider_oauth_complete_key(
             "该 Key 不是 OAuth 管理账号",
         ));
     }
-    if !is_fixed_provider_type_for_provider_oauth(&provider_type) {
+    if !is_fixed_provider_type_for_provider_oauth(state, &provider_type) {
         return Ok(build_internal_control_error_response(
             http::StatusCode::BAD_REQUEST,
             "该 Provider 不是固定类型，无法使用 provider-oauth",
@@ -120,7 +120,7 @@ pub(super) async fn handle_admin_provider_oauth_complete_key(
             "state 无效或已过期",
         ));
     }
-    let Some(template) = admin_provider_oauth_template(&provider_type) else {
+    let Some(template) = admin_provider_oauth_template(state, &provider_type) else {
         return Ok(build_internal_control_error_response(
             http::StatusCode::BAD_REQUEST,
             "该 Provider 不支持 OAuth 授权",
@@ -145,7 +145,7 @@ pub(super) async fn handle_admin_provider_oauth_complete_key(
 
     let token_payload = match state
         .exchange_admin_provider_oauth_code(
-            template,
+            &template,
             &callback.code,
             &callback.state_nonce,
             state_data.pkce_verifier.as_deref(),

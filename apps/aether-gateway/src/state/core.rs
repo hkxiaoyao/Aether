@@ -35,6 +35,7 @@ use super::super::data::{GatewayDataConfig, GatewayDataState};
 use super::super::fallback_metrics;
 use super::super::fallback_metrics::{GatewayFallbackMetricKind, GatewayFallbackReason};
 use super::super::model_fetch::spawn_model_fetch_worker;
+use super::super::plugins::GatewayPluginRegistry;
 use super::super::rate_limit::{FrontdoorUserRpmConfig, FrontdoorUserRpmLimiter};
 use super::super::router::RequestAdmissionError;
 use super::super::{control::GatewayControlDecision, error::GatewayError};
@@ -210,6 +211,7 @@ impl AppState {
             auth_context_cache: Arc::new(AuthContextCache::default()),
             auth_api_key_last_used_cache: Arc::new(AuthApiKeyLastUsedCache::default()),
             oauth_refresh: Arc::new(provider_transport::LocalOAuthRefreshCoordinator::new()),
+            plugins: Arc::new(GatewayPluginRegistry::load_default()),
             direct_plan_bypass_cache: Arc::new(DirectPlanBypassCache::default()),
             scheduler_affinity_cache: Arc::new(SchedulerAffinityCache::default()),
             scheduler_affinity_epoch: Arc::new(AtomicU64::new(0)),

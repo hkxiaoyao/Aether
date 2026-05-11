@@ -176,6 +176,8 @@ dependencies = [
  "aether-http",
  "aether-model-fetch",
  "aether-oauth",
+ "aether-plugin-core",
+ "aether-provider-plugin",
  "aether-provider-transport",
  "aether-runtime",
  "aether-runtime-state",
@@ -265,6 +267,34 @@ dependencies = [
  "tokio",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "aether-plugin-core"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml",
+ "tracing",
+]
+
+[[package]]
+name = "aether-provider-plugin"
+version = "0.1.0"
+dependencies = [
+ "aether-plugin-core",
+ "aether-provider-transport",
+ "async-trait",
+ "base64 0.22.1",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]

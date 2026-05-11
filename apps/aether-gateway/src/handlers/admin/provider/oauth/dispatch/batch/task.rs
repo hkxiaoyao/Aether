@@ -118,13 +118,13 @@ pub(in super::super) async fn handle_admin_provider_oauth_start_batch_import_tas
         ));
     };
     let provider_type = provider.provider_type.trim().to_ascii_lowercase();
-    if !is_fixed_provider_type_for_provider_oauth(&provider_type) {
+    if !is_fixed_provider_type_for_provider_oauth(state, &provider_type) {
         return Ok(build_internal_control_error_response(
             http::StatusCode::BAD_REQUEST,
             "该 Provider 不是固定类型，无法使用 provider-oauth",
         ));
     }
-    if provider_type != "kiro" && admin_provider_oauth_template(&provider_type).is_none() {
+    if provider_type != "kiro" && admin_provider_oauth_template(state, &provider_type).is_none() {
         return Ok(build_admin_provider_oauth_backend_unavailable_response());
     }
 

@@ -69,7 +69,7 @@ pub(super) async fn parse_admin_provider_oauth_refresh_request(
             "该 Key 不是 OAuth 管理账号",
         )));
     }
-    if !is_fixed_provider_type_for_provider_oauth(&provider_type) {
+    if !is_fixed_provider_type_for_provider_oauth(state, &provider_type) {
         return Ok(RefreshDispatch::Respond(response::control_error_response(
             http::StatusCode::BAD_REQUEST,
             "该 Provider 不是固定类型，无法使用 provider-oauth",

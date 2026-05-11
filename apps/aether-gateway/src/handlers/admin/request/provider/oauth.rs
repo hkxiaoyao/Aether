@@ -107,7 +107,7 @@ impl<'a> AdminAppState<'a> {
 
     pub(crate) async fn exchange_admin_provider_oauth_code(
         &self,
-        template: AdminProviderOAuthTemplate,
+        template: &AdminProviderOAuthTemplate,
         code: &str,
         state_nonce: &str,
         pkce_verifier: Option<&str>,
@@ -126,7 +126,7 @@ impl<'a> AdminAppState<'a> {
 
     pub(crate) async fn exchange_admin_provider_oauth_refresh_token(
         &self,
-        template: AdminProviderOAuthTemplate,
+        template: &AdminProviderOAuthTemplate,
         refresh_token: &str,
         proxy: Option<ProxySnapshot>,
     ) -> Result<serde_json::Value, Response<Body>> {

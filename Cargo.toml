@@ -4,6 +4,8 @@ members = [
     "crates/aether-ai-formats",
     "crates/aether-admin",
     "crates/aether-ai-serving",
+    "crates/aether-plugin-core",
+    "crates/aether-provider-plugin",
     "crates/aether-data-contracts",
     "crates/aether-data-schema",
     "crates/aether-cache",
@@ -36,6 +38,8 @@ repository = "https://github.com/fawney19/Aether.git"
 aether-admin = { path = "crates/aether-admin" }
 aether-ai-formats = { path = "crates/aether-ai-formats" }
 aether-ai-serving = { path = "crates/aether-ai-serving" }
+aether-plugin-core = { path = "crates/aether-plugin-core" }
+aether-provider-plugin = { path = "crates/aether-provider-plugin" }
 aether-data-contracts = { path = "crates/aether-data-contracts" }
 aether-data-schema = { path = "crates/aether-data-schema" }
 aether-cache = { path = "crates/aether-cache" }
@@ -81,7 +85,7 @@ serde_path_to_error = "0.1"
 sha2 = "0.10"
 sqlx = { version = "0.8", default-features = false, features = ["postgres", "mysql", "sqlite", "runtime-tokio-rustls", "chrono"] }
 thiserror = "2"
-tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio = { version = "1", features = ["macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["codec", "io-util"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }

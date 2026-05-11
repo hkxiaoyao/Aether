@@ -13,7 +13,7 @@ use super::response::{
 use crate::ai_serving::{maybe_build_sync_finalize_outcome, GatewayControlDecision};
 use crate::execution_runtime;
 use crate::handlers::admin::request::{AdminAppState, AdminGatewayProviderTransportSnapshot};
-use crate::model_fetch::ModelFetchRuntimeState;
+use crate::model_fetch::{fetch_models_via_plugins_or_transports, ModelFetchRuntimeState};
 use crate::provider_key_auth::{
     provider_key_configured_api_formats, provider_key_inherits_provider_api_formats,
 };
@@ -31,8 +31,8 @@ use aether_data_contracts::repository::provider_catalog::{
     StoredProviderCatalogEndpoint, StoredProviderCatalogKey, StoredProviderCatalogProvider,
 };
 use aether_model_fetch::{
-    aggregate_models_for_cache, fetch_models_from_transports, json_string_list,
-    preset_models_for_provider, selected_models_fetch_endpoints,
+    aggregate_models_for_cache, json_string_list, preset_models_for_provider,
+    selected_models_fetch_endpoints,
 };
 use axum::{
     body::{to_bytes, Body},
@@ -1704,21 +1704,23 @@ async fn provider_query_fetch_models_for_key(
         });
     }
 
-    let outcome = match fetch_models_from_transports(state.app(), &transports).await {
-        Ok(outcome) => outcome,
-        Err(err) => {
-            all_errors.push(err);
-            if let Some(fallback) = provider_query_codex_preset_fallback(provider) {
-                return Ok(fallback);
+    let trace_id = format!("provider-query-model-fetch:{}:{}", provider.id, key.id);
+    let outcome =
+        match fetch_models_via_plugins_or_transports(state.app(), &trace_id, &transports).await {
+            Ok(outcome) => outcome,
+            Err(err) => {
+                all_errors.push(err);
+                if let Some(fallback) = provider_query_codex_preset_fallback(provider) {
+                    return Ok(fallback);
+                }
+                return Ok(ProviderQueryKeyFetchResult {
+                    models: Vec::new(),
+                    error: Some(all_errors.join("; ")),
+                    from_cache: false,
+                    has_success: false,
+                });
             }
-            return Ok(ProviderQueryKeyFetchResult {
-                models: Vec::new(),
-                error: Some(all_errors.join("; ")),
-                from_cache: false,
-                has_success: false,
-            });
-        }
-    };
+        };
 
     all_errors.extend(outcome.errors);
     let unique_models = aggregate_models_for_cache(&outcome.cached_models);

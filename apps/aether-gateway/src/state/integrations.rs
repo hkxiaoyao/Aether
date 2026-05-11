@@ -183,6 +183,50 @@ impl ModelFetchRuntimeState for AppState {
             );
         }
     }
+
+    async fn fetch_models_via_provider_plugin(
+        &self,
+        trace_id: &str,
+        transports: &[GatewayProviderTransportSnapshot],
+    ) -> Result<Option<aether_model_fetch::ModelsFetchOutcome>, GatewayError> {
+        let Some(first_transport) = transports.first() else {
+            return Ok(None);
+        };
+        let capability = aether_provider_plugin::provider_capability(
+            aether_provider_plugin::CAP_PROVIDER_MODEL_FETCH,
+        );
+        if self
+            .plugins
+            .registry()
+            .enabled_with_capability(&capability)
+            .next()
+            .is_none()
+        {
+            return Ok(None);
+        }
+        let output = aether_provider_plugin::fetch_provider_models(
+            self.plugins.registry(),
+            aether_provider_plugin::ProviderModelFetchInput {
+                trace_id,
+                provider_id: &first_transport.provider.id,
+                provider_type: &first_transport.provider.provider_type,
+                endpoint_id: Some(&first_transport.endpoint.id),
+                key_id: Some(&first_transport.key.id),
+                api_format: Some(&first_transport.endpoint.api_format),
+                base_url: Some(&first_transport.endpoint.base_url),
+                auth_type: Some(&first_transport.key.auth_type),
+            },
+        )
+        .await
+        .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        Ok(output.map(|output| aether_model_fetch::ModelsFetchOutcome {
+            fetched_model_ids: output.fetched_model_ids,
+            cached_models: output.cached_models,
+            errors: output.errors,
+            has_success: output.has_success,
+            upstream_metadata: output.upstream_metadata,
+        }))
+    }
 }
 
 #[async_trait]

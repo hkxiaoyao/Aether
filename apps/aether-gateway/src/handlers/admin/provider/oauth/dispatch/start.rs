@@ -57,13 +57,13 @@ pub(super) async fn handle_admin_provider_oauth_start_key(
             "该 Key 不是 OAuth 管理账号",
         ));
     }
-    if !is_fixed_provider_type_for_provider_oauth(&provider_type) {
+    if !is_fixed_provider_type_for_provider_oauth(state, &provider_type) {
         return Ok(build_internal_control_error_response(
             http::StatusCode::BAD_REQUEST,
             "该 Provider 不是固定类型，无法使用 provider-oauth",
         ));
     }
-    let Some(template) = admin_provider_oauth_template(&provider_type) else {
+    let Some(template) = admin_provider_oauth_template(state, &provider_type) else {
         return Ok(build_internal_control_error_response(
             http::StatusCode::BAD_REQUEST,
             "该 Provider 不支持 OAuth 授权",
@@ -93,7 +93,7 @@ pub(super) async fn handle_admin_provider_oauth_start_key(
     };
 
     Ok(Json(build_provider_oauth_start_response(
-        template,
+        &template,
         &nonce,
         code_challenge.as_deref(),
     ))
@@ -122,7 +122,7 @@ pub(super) async fn handle_admin_provider_oauth_start_provider(
         ));
     };
     let provider_type = provider.provider_type.trim().to_ascii_lowercase();
-    if !is_fixed_provider_type_for_provider_oauth(&provider_type) {
+    if !is_fixed_provider_type_for_provider_oauth(state, &provider_type) {
         return Ok(build_internal_control_error_response(
             http::StatusCode::BAD_REQUEST,
             "该 Provider 不是固定类型，无法使用 provider-oauth",
@@ -134,7 +134,7 @@ pub(super) async fn handle_admin_provider_oauth_start_provider(
             "Kiro 不支持 OAuth 授权，请使用导入授权。",
         ));
     }
-    let Some(template) = admin_provider_oauth_template(&provider_type) else {
+    let Some(template) = admin_provider_oauth_template(state, &provider_type) else {
         return Ok(build_internal_control_error_response(
             http::StatusCode::BAD_REQUEST,
             "该 Provider 不支持 OAuth 授权",
@@ -159,7 +159,7 @@ pub(super) async fn handle_admin_provider_oauth_start_provider(
     };
 
     Ok(Json(build_provider_oauth_start_response(
-        template,
+        &template,
         &nonce,
         code_challenge.as_deref(),
     ))

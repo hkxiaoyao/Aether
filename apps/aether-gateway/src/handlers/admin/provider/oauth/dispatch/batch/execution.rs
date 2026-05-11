@@ -82,7 +82,7 @@ pub(super) async fn execute_admin_provider_oauth_batch_import_for_provider_type(
 
 async fn resolve_admin_provider_oauth_batch_import_tokens(
     state: &AdminAppState<'_>,
-    template: AdminProviderOAuthTemplate,
+    template: &AdminProviderOAuthTemplate,
     provider_type: &str,
     entry: &AdminProviderOAuthBatchImportEntry,
     request_proxy: Option<ProxySnapshot>,
@@ -204,7 +204,7 @@ pub(super) async fn execute_admin_provider_oauth_batch_import(
         });
     };
 
-    let Some(template) = admin_provider_oauth_template(provider_type) else {
+    let Some(template) = admin_provider_oauth_template(state, provider_type) else {
         return Ok(AdminProviderOAuthBatchImportOutcome {
             total: entries.len(),
             success: 0,
@@ -248,7 +248,7 @@ pub(super) async fn execute_admin_provider_oauth_batch_import(
     for (index, entry) in entries.iter().enumerate() {
         let resolved_import = match resolve_admin_provider_oauth_batch_import_tokens(
             state,
-            template,
+            &template,
             provider_type,
             entry,
             request_proxy.clone(),

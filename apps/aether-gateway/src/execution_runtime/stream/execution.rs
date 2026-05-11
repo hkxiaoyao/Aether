@@ -81,6 +81,7 @@ use crate::execution_runtime::{
     should_retry_next_local_candidate_stream, LocalFailoverDecision,
 };
 use crate::execution_runtime::{MAX_STREAM_PREFETCH_BYTES, MAX_STREAM_PREFETCH_FRAMES};
+use crate::executor::rewrite_provider_stream_chunk_for_local_execution;
 use crate::log_ids::short_request_id;
 use crate::orchestration::{
     apply_local_execution_effect, build_local_error_flow_metadata, trace_upstream_response_body,
@@ -1748,8 +1749,17 @@ async fn execute_stream_from_frame_stream(
                     } else {
                         chunk
                     };
+                    let provider_plugin_chunk = rewrite_provider_stream_chunk_for_local_execution(
+                        state,
+                        &plan,
+                        trace_id,
+                        decision,
+                        &upstream_headers,
+                        Bytes::from(normalized_chunk),
+                    )
+                    .await;
                     let rewritten_chunk = if let Some(rewriter) = local_stream_rewriter.as_mut() {
-                        match rewriter.push_chunk(&normalized_chunk) {
+                        match rewriter.push_chunk(provider_plugin_chunk.as_ref()) {
                             Ok(rewritten_chunk) => rewritten_chunk,
                             Err(err) => {
                                 let failure = build_stream_failure_report(
@@ -1777,7 +1787,7 @@ async fn execute_stream_from_frame_stream(
                             }
                         }
                     } else {
-                        normalized_chunk
+                        provider_plugin_chunk.to_vec()
                     };
                     if !rewritten_chunk.is_empty() {
                         prefetched_body.extend_from_slice(&rewritten_chunk);
@@ -1869,6 +1879,7 @@ async fn execute_stream_from_frame_stream(
     let (tx, mut rx) = mpsc::channel::<Result<Bytes, IoError>>(16);
     let state_for_report = state.clone();
     let trace_id_owned = trace_id.to_string();
+    let decision_for_report = decision.clone();
     let headers_for_report = headers.clone();
     let report_kind_owned = report_kind;
     let report_context_owned = report_context;
@@ -2312,9 +2323,19 @@ async fn execute_stream_from_frame_stream(
                                 &normalized_chunk,
                             );
                         }
+                        let provider_plugin_chunk =
+                            rewrite_provider_stream_chunk_for_local_execution(
+                                &state_for_report,
+                                &plan_for_report,
+                                &trace_id_owned,
+                                &decision_for_report,
+                                &headers_for_report,
+                                Bytes::from(normalized_chunk),
+                            )
+                            .await;
                         let rewritten_chunk = if let Some(rewriter) = local_stream_rewriter.as_mut()
                         {
-                            match rewriter.push_chunk(&normalized_chunk) {
+                            match rewriter.push_chunk(provider_plugin_chunk.as_ref()) {
                                 Ok(rewritten_chunk) => rewritten_chunk,
                                 Err(err) => {
                                     warn!(
@@ -2335,7 +2356,7 @@ async fn execute_stream_from_frame_stream(
                                 }
                             }
                         } else {
-                            normalized_chunk
+                            provider_plugin_chunk.to_vec()
                         };
 
                         if rewritten_chunk.is_empty() {
@@ -2465,9 +2486,19 @@ async fn execute_stream_from_frame_stream(
                                 &normalized_chunk,
                             );
                         }
+                        let provider_plugin_chunk =
+                            rewrite_provider_stream_chunk_for_local_execution(
+                                &state_for_report,
+                                &plan_for_report,
+                                &trace_id_owned,
+                                &decision_for_report,
+                                &headers_for_report,
+                                Bytes::from(normalized_chunk),
+                            )
+                            .await;
                         let rewritten_chunk = if let Some(rewriter) = local_stream_rewriter.as_mut()
                         {
-                            match rewriter.push_chunk(&normalized_chunk) {
+                            match rewriter.push_chunk(provider_plugin_chunk.as_ref()) {
                                 Ok(rewritten_chunk) => rewritten_chunk,
                                 Err(err) => {
                                     warn!(
@@ -2490,7 +2521,7 @@ async fn execute_stream_from_frame_stream(
                                 }
                             }
                         } else {
-                            normalized_chunk
+                            provider_plugin_chunk.to_vec()
                         };
                         if !rewritten_chunk.is_empty() {
                             append_stream_capture_bytes(

@@ -219,6 +219,30 @@ pub(super) fn classify_admin_system_family_route(
             "admin:system",
             false,
         ))
+    } else if method == http::Method::GET
+        && matches!(
+            normalized_path,
+            "/api/admin/plugins" | "/api/admin/plugins/"
+        )
+    {
+        Some(classified(
+            "admin_proxy",
+            "plugins_manage",
+            "list_plugins",
+            "admin:system",
+            false,
+        ))
+    } else if method == http::Method::GET
+        && normalized_path.starts_with("/api/admin/plugins/")
+        && normalized_path.trim_end_matches('/').matches('/').count() == 4
+    {
+        Some(classified(
+            "admin_proxy",
+            "plugins_manage",
+            "plugin_detail",
+            "admin:system",
+            false,
+        ))
     } else if method == http::Method::GET && normalized_path == "/api/admin/system/api-formats" {
         Some(classified(
             "admin_proxy",

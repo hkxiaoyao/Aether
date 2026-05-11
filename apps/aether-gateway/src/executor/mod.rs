@@ -3,6 +3,7 @@ mod orchestration;
 mod outcome;
 mod plan_fallback;
 mod policy;
+mod provider_hooks;
 mod remote;
 mod stream_path;
 mod sync_path;
@@ -28,6 +29,10 @@ pub(crate) use policy::{
     build_direct_plan_bypass_cache_key, mark_direct_plan_bypass,
     should_bypass_execution_runtime_decision, should_bypass_execution_runtime_plan,
     should_skip_direct_plan,
+};
+pub(crate) use provider_hooks::{
+    rewrite_provider_request_for_local_execution, rewrite_provider_response_for_local_execution,
+    rewrite_provider_stream_chunk_for_local_execution,
 };
 pub(crate) use remote::{
     maybe_execute_stream_via_remote_decision, maybe_execute_sync_via_remote_decision,

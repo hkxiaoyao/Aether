@@ -142,7 +142,8 @@ pub(crate) async fn resolve_control_route(
     headers: &http::HeaderMap,
     trace_id: &str,
 ) -> Result<Option<GatewayControlDecision>, GatewayError> {
-    let Some(mut decision) = classify_control_route(method, uri, headers) else {
+    let Some(mut decision) = classify_control_route_with_plugins(state, method, uri, headers)
+    else {
         return Ok(None);
     };
     decision.public_query_string = uri.query().map(ToOwned::to_owned);
@@ -150,6 +151,49 @@ pub(crate) async fn resolve_control_route(
     match resolve_control_decision_auth(state, headers, uri, trace_id, decision).await? {
         ControlDecisionAuthResolution::Resolved(decision) => Ok(Some(decision)),
     }
+}
+
+fn classify_control_route_with_plugins(
+    state: &AppState,
+    method: &http::Method,
+    uri: &Uri,
+    headers: &http::HeaderMap,
+) -> Option<GatewayControlDecision> {
+    classify_provider_plugin_route_alias(state, method, uri)
+        .or_else(|| classify_control_route(method, uri, headers))
+}
+
+fn classify_provider_plugin_route_alias(
+    state: &AppState,
+    method: &http::Method,
+    uri: &Uri,
+) -> Option<GatewayControlDecision> {
+    let path = uri.path();
+    let normalized_path = if path.starts_with('/') {
+        path.to_string()
+    } else {
+        format!("/{path}")
+    };
+    let alias = aether_provider_plugin::resolve_provider_route_alias(
+        state.plugins.registry(),
+        method.as_str(),
+        &normalized_path,
+    )?;
+    let mut decision = GatewayControlDecision {
+        public_path: normalized_path,
+        public_query_string: None,
+        route_class: Some("ai_public".to_string()),
+        route_family: Some(alias.route_family),
+        route_kind: Some(alias.route_kind),
+        request_auth_channel: alias.request_auth_channel,
+        auth_endpoint_signature: Some(alias.auth_endpoint_signature),
+        execution_runtime_candidate: alias.execution_runtime_candidate,
+        auth_context: None,
+        admin_principal: None,
+        local_auth_rejection: None,
+    };
+    decision.public_query_string = uri.query().map(ToOwned::to_owned);
+    Some(decision)
 }
 
 pub(crate) fn classify_control_route(

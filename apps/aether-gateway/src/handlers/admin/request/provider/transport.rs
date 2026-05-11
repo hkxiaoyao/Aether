@@ -117,9 +117,16 @@ impl<'a> AdminAppState<'a> {
         &self,
         provider_type: &str,
     ) -> bool {
-        crate::provider_transport::provider_types::provider_type_enables_format_conversion_by_default(
-            provider_type,
-        )
+        self.app
+            .plugins
+            .provider_type_enables_format_conversion_by_default(provider_type)
+    }
+
+    pub(crate) fn provider_plugin_config_for_type(
+        &self,
+        provider_type: &str,
+    ) -> Option<aether_provider_plugin::ProviderPluginConfig> {
+        self.app.plugins.provider_config_for_type(provider_type)
     }
 
     pub(crate) async fn resolve_admin_connector_proxy_snapshot(

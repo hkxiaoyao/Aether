@@ -4,7 +4,7 @@ use serde_json::json;
 use url::form_urlencoded;
 
 pub(crate) fn build_provider_oauth_start_response(
-    template: AdminProviderOAuthTemplate,
+    template: &AdminProviderOAuthTemplate,
     nonce: &str,
     code_challenge: Option<&str>,
 ) -> serde_json::Value {
@@ -22,13 +22,13 @@ pub(crate) fn build_provider_oauth_start_response(
 }
 
 fn build_provider_oauth_authorization_url(
-    template: AdminProviderOAuthTemplate,
+    template: &AdminProviderOAuthTemplate,
     nonce: &str,
     code_challenge: Option<&str>,
 ) -> Option<String> {
     let ctx = ProviderOAuthTransportContext {
         provider_id: String::new(),
-        provider_type: template.provider_type.to_string(),
+        provider_type: template.provider_type.clone(),
         endpoint_id: None,
         key_id: None,
         auth_type: Some("oauth".to_string()),
@@ -46,14 +46,14 @@ fn build_provider_oauth_authorization_url(
 }
 
 fn build_provider_oauth_authorization_url_legacy(
-    template: AdminProviderOAuthTemplate,
+    template: &AdminProviderOAuthTemplate,
     nonce: &str,
     code_challenge: Option<&str>,
 ) -> String {
     let mut serializer = form_urlencoded::Serializer::new(String::new());
-    serializer.append_pair("client_id", template.client_id);
+    serializer.append_pair("client_id", &template.client_id);
     serializer.append_pair("response_type", "code");
-    serializer.append_pair("redirect_uri", template.redirect_uri);
+    serializer.append_pair("redirect_uri", &template.redirect_uri);
     serializer.append_pair("scope", &template.scopes.join(" "));
     serializer.append_pair("state", nonce);
     if template.provider_type == "codex" {

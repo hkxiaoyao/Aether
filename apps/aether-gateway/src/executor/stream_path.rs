@@ -22,7 +22,8 @@ use super::{
     maybe_execute_stream_via_local_openai_responses_decision,
     maybe_execute_stream_via_local_same_format_provider_decision,
     maybe_execute_stream_via_local_standard_decision, maybe_execute_stream_via_plan_fallback,
-    maybe_execute_stream_via_remote_decision, parse_local_request_body, should_skip_direct_plan,
+    maybe_execute_stream_via_remote_decision, parse_local_request_body,
+    rewrite_provider_request_for_local_execution, should_skip_direct_plan,
     LocalExecutionRequestOutcome,
 };
 
@@ -44,6 +45,21 @@ pub(crate) async fn maybe_execute_via_stream_decision_path(
     if !is_matching_stream_request(plan_kind, parts, &body_json, body_base64.as_deref()) {
         return Ok(LocalExecutionRequestOutcome::NoPath);
     }
+
+    let rewritten = rewrite_provider_request_for_local_execution(
+        state,
+        parts,
+        body_bytes,
+        &body_json,
+        body_base64.as_deref(),
+        trace_id,
+        decision,
+    )
+    .await?;
+    let parts = &rewritten.parts;
+    let body_bytes = &rewritten.body_bytes;
+    let body_json = rewritten.body_json;
+    let body_base64 = rewritten.body_base64;
 
     let bypass_cache_key =
         build_direct_plan_bypass_cache_key(plan_kind, parts, body_bytes, decision);
