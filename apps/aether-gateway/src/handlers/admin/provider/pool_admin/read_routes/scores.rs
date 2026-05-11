@@ -50,7 +50,7 @@ pub(super) async fn build_admin_pool_scores_response(
     };
     let offset = page.saturating_sub(1).saturating_mul(page_size);
     let api_format = query_param_value(query, "api_format")
-        .map(|value| aether_ai_formats::normalize_api_format_alias(value.as_str()));
+        .map(|value| crate::ai_serving::normalize_api_format_alias(value.as_str()));
     let model_id = query_param_value(query, "model_id");
     let hard_states = match parse_hard_state_filter(query) {
         Ok(value) => value,

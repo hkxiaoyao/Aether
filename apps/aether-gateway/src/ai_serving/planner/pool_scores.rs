@@ -172,8 +172,8 @@ fn json_f64(value: &Value) -> Option<f64> {
 }
 
 fn api_format_lookup_keys(api_format: &str) -> Vec<String> {
-    let normalized = aether_ai_formats::normalize_api_format_alias(api_format);
-    let mut keys = aether_ai_formats::api_format_storage_aliases(&normalized);
+    let normalized = crate::ai_serving::normalize_api_format_alias(api_format);
+    let mut keys = crate::ai_serving::api_format_storage_aliases(&normalized);
     if !keys.iter().any(|value| value == &normalized) {
         keys.push(normalized);
     }
