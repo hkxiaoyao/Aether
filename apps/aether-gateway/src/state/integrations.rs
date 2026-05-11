@@ -236,16 +236,6 @@ impl ModelFetchAssociationStore for AppState {
             .await
             .map_err(|err| format!("{err:?}"))
     }
-
-    async fn delete_admin_provider_model(
-        &self,
-        provider_id: &str,
-        model_id: &str,
-    ) -> Result<bool, Self::Error> {
-        AppState::delete_admin_provider_model(self, provider_id, model_id)
-            .await
-            .map_err(|err| format!("{err:?}"))
-    }
 }
 
 #[async_trait]
