@@ -22,6 +22,7 @@ use crate::data::candidate_selection::MinimalCandidateSelectionRowSource;
 use crate::data::GatewayDataState;
 use crate::{AppState, GatewayError};
 
+use super::super::affinity::build_scheduler_affinity_cache_key;
 use super::super::runtime::should_skip_provider_quota;
 use super::super::selection::{
     collect_selectable_candidates as collect_selectable_candidates_impl,
@@ -603,6 +604,46 @@ async fn cache_affinity_promotes_cached_scheduler_affinity_candidate_when_enable
 
     assert_eq!(selected.provider_id, "provider-b");
     assert_eq!(selected.key_id, "key-b");
+}
+
+#[tokio::test]
+async fn load_balance_selection_does_not_remember_scheduler_affinity() {
+    let row = sample_row();
+    let candidates = Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
+        row,
+    ]));
+    let quotas = Arc::new(InMemoryProviderQuotaRepository::seed(vec![]));
+    let state = AppState::new()
+        .expect("state should build")
+        .with_data_state_for_tests(
+            GatewayDataState::with_candidate_selection_and_quota_for_tests(candidates, quotas)
+                .with_system_config_values_for_tests(vec![(
+                    "scheduling_mode".to_string(),
+                    json!("load_balance"),
+                )]),
+        );
+    let auth_snapshot = sample_auth_snapshot("affinity-key-1");
+    let cache_key =
+        build_scheduler_affinity_cache_key(Some(&auth_snapshot), "openai:chat", "gpt-4.1", None)
+            .expect("scheduler affinity cache key should build");
+
+    let selected = select_candidate(
+        state.data.as_ref(),
+        &state,
+        "openai:chat",
+        "gpt-4.1",
+        false,
+        Some(&auth_snapshot),
+        100,
+    )
+    .await
+    .expect("selection should succeed")
+    .expect("candidate should exist");
+
+    assert_eq!(selected.key_id, "key-1");
+    assert!(state
+        .read_scheduler_affinity_target(cache_key.as_str(), Duration::from_secs(300))
+        .is_none());
 }
 
 #[tokio::test]

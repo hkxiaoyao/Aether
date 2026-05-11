@@ -31,6 +31,7 @@ use crate::handlers::shared::provider_pool::{
 };
 use crate::orchestration::local_execution_candidate_metadata_from_report_context;
 use crate::scheduler::affinity::SCHEDULER_AFFINITY_TTL;
+use crate::scheduler::config::{read_scheduler_ordering_config, SchedulerSchedulingMode};
 use crate::AppState;
 
 #[derive(Debug, Clone, Copy)]
@@ -238,10 +239,28 @@ fn local_scheduler_affinity_target(plan: &ExecutionPlan) -> Option<SchedulerAffi
     })
 }
 
-fn remember_successful_local_scheduler_affinity(
+async fn scheduler_cache_affinity_enabled(state: &AppState) -> bool {
+    match read_scheduler_ordering_config(state).await {
+        Ok(config) => config.scheduling_mode == SchedulerSchedulingMode::CacheAffinity,
+        Err(error) => {
+            warn!(
+                event_name = "orchestration_scheduler_affinity_config_load_failed",
+                log_type = "event",
+                error = ?error,
+                "failed to load scheduler config while checking cache affinity mode"
+            );
+            SchedulerSchedulingMode::default() == SchedulerSchedulingMode::CacheAffinity
+        }
+    }
+}
+
+async fn remember_successful_local_scheduler_affinity(
     state: &AppState,
     context: LocalExecutionEffectContext<'_>,
 ) {
+    if !scheduler_cache_affinity_enabled(state).await {
+        return;
+    }
     let Some(cache_key) = local_scheduler_affinity_cache_key(context.report_context) else {
         return;
     };
@@ -516,7 +535,7 @@ async fn record_health_success_effect(
     context: LocalExecutionEffectContext<'_>,
     _effect: LocalHealthSuccessEffect,
 ) {
-    remember_successful_local_scheduler_affinity(state, context);
+    remember_successful_local_scheduler_affinity(state, context).await;
 
     let api_format = context.plan.provider_api_format.trim();
     if api_format.is_empty() {
@@ -1360,6 +1379,41 @@ mod tests {
                 key_id: "key-1".to_string(),
             })
         );
+    }
+
+    #[tokio::test]
+    async fn load_balance_success_does_not_remember_scheduler_affinity_cache() {
+        let state = AppState::new()
+            .expect("gateway state should build")
+            .with_data_state_for_tests(
+                GatewayDataState::disabled().with_system_config_values_for_tests(vec![(
+                    "scheduling_mode".to_string(),
+                    json!("load_balance"),
+                )]),
+            );
+        let plan = sample_plan();
+        let report_context = json!({
+            "api_key_id": "api-key-1",
+            "client_api_format": "openai:chat",
+            "model": "gpt-5",
+        });
+        let cache_key =
+            build_scheduler_affinity_cache_key_for_api_key_id("api-key-1", "openai:chat", "gpt-5")
+                .expect("scheduler affinity cache key should build");
+
+        apply_local_execution_effect(
+            &state,
+            LocalExecutionEffectContext {
+                plan: &plan,
+                report_context: Some(&report_context),
+            },
+            LocalExecutionEffect::HealthSuccess(LocalHealthSuccessEffect),
+        )
+        .await;
+
+        assert!(state
+            .read_scheduler_affinity_target(cache_key.as_str(), SCHEDULER_AFFINITY_TTL)
+            .is_none());
     }
 
     #[tokio::test]

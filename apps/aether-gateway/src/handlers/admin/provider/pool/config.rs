@@ -215,6 +215,28 @@ fn admin_provider_pool_lru_enabled(
         .any(|item| item.enabled && item.preset.eq_ignore_ascii_case("lru"))
 }
 
+pub(crate) fn admin_provider_pool_cache_affinity_enabled(
+    pool_config: &AdminProviderPoolConfig,
+) -> bool {
+    let mut seen = std::collections::BTreeSet::new();
+    for item in &pool_config.scheduling_presets {
+        let preset = item.preset.trim().to_ascii_lowercase();
+        if preset.is_empty() || !seen.insert(preset.clone()) {
+            continue;
+        }
+        if !item.enabled {
+            continue;
+        }
+        if matches!(
+            preset.as_str(),
+            "lru" | "cache_affinity" | "load_balance" | "single_account"
+        ) {
+            return preset == "cache_affinity";
+        }
+    }
+    false
+}
+
 pub(crate) fn admin_provider_pool_config(
     provider: &aether_data_contracts::repository::provider_catalog::StoredProviderCatalogProvider,
 ) -> Option<AdminProviderPoolConfig> {
@@ -331,7 +353,10 @@ pub(crate) fn admin_provider_pool_config_from_config_value(
 
 #[cfg(test)]
 mod tests {
-    use super::{admin_provider_pool_config, admin_provider_pool_config_from_config_value};
+    use super::{
+        admin_provider_pool_cache_affinity_enabled, admin_provider_pool_config,
+        admin_provider_pool_config_from_config_value,
+    };
     use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogProvider;
     use serde_json::json;
 
@@ -550,5 +575,30 @@ mod tests {
         assert_eq!(config.unschedulable_rules[0].duration_minutes, 15);
         assert_eq!(config.unschedulable_rules[1].keyword, "review_required");
         assert_eq!(config.unschedulable_rules[1].duration_minutes, 5);
+    }
+
+    #[test]
+    fn cache_affinity_enabled_only_when_it_is_distribution_mode() {
+        let cache_affinity = admin_provider_pool_config_from_config_value(Some(&json!({
+            "pool_advanced": {
+                "scheduling_presets": [
+                    {"preset": "cache_affinity", "enabled": true},
+                    {"preset": "priority_first", "enabled": true}
+                ]
+            }
+        })))
+        .expect("pool config should parse");
+        assert!(admin_provider_pool_cache_affinity_enabled(&cache_affinity));
+
+        let load_balance = admin_provider_pool_config_from_config_value(Some(&json!({
+            "pool_advanced": {
+                "scheduling_presets": [
+                    {"preset": "load_balance", "enabled": true},
+                    {"preset": "cache_affinity", "enabled": true}
+                ]
+            }
+        })))
+        .expect("pool config should parse");
+        assert!(!admin_provider_pool_cache_affinity_enabled(&load_balance));
     }
 }

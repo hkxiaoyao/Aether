@@ -23,8 +23,10 @@ use crate::ai_serving::{
     candidate_common_transport_skip_reason, CandidateTransportPolicyFacts, PlannerAppState,
 };
 use crate::clock::current_unix_ms;
-use crate::handlers::shared::provider_pool::admin_provider_pool_config_from_config_value;
 use crate::handlers::shared::provider_pool::read_admin_provider_pool_runtime_state;
+use crate::handlers::shared::provider_pool::{
+    admin_provider_pool_cache_affinity_enabled, admin_provider_pool_config_from_config_value,
+};
 use crate::handlers::shared::provider_pool::{
     try_claim_admin_provider_pool_key, AdminProviderPoolConfig, AdminProviderPoolRuntimeState,
 };
@@ -306,6 +308,9 @@ impl<'a> PoolKeyCursor<'a> {
 
     async fn sticky_candidate(&mut self) -> Option<EligibleLocalExecutionCandidate> {
         let pool_config = pool_config_for_candidate(&self.group)?;
+        if !admin_provider_pool_cache_affinity_enabled(&pool_config) {
+            return None;
+        }
         let runtime = read_admin_provider_pool_runtime_state(
             self.state.app().runtime_state.as_ref(),
             self.group.candidate.provider_id.as_str(),
@@ -1206,7 +1211,7 @@ mod tests {
     }
 
     #[test]
-    fn pool_scheduler_promotes_sticky_hit_regardless_distribution_mode() {
+    fn pool_scheduler_ignores_sticky_hit_without_cache_affinity() {
         let key_a = sample_eligible_candidate(
             "provider-pool",
             "endpoint-1",
@@ -1250,7 +1255,7 @@ mod tests {
                 .iter()
                 .map(|item| item.candidate.key_id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["key-a", "key-b"]
+            vec!["key-b", "key-a"]
         );
     }
 

@@ -54,6 +54,7 @@ use crate::headers::{
     should_skip_request_header,
 };
 use crate::router::RequestAdmissionError;
+use crate::scheduler::config::{read_scheduler_ordering_config, SchedulerSchedulingMode};
 use crate::{
     AppState, FrontdoorUserRpmOutcome, GatewayError, GatewayFallbackMetricKind,
     GatewayFallbackReason, LocalExecutionRuntimeMissDiagnostic,
@@ -297,6 +298,20 @@ async fn maybe_forward_public_request_to_tunnel_owner(
     }) else {
         return Ok(None);
     };
+    let cache_affinity_enabled = match read_scheduler_ordering_config(state).await {
+        Ok(config) => config.scheduling_mode == SchedulerSchedulingMode::CacheAffinity,
+        Err(err) => {
+            warn!(
+                trace_id = %request_context.trace_id,
+                error = ?err,
+                "gateway failed to load scheduler config while checking tunnel affinity forwarding mode"
+            );
+            SchedulerSchedulingMode::default() == SchedulerSchedulingMode::CacheAffinity
+        }
+    };
+    if !cache_affinity_enabled {
+        return Ok(None);
+    }
     let Some(api_format) = decision
         .auth_endpoint_signature
         .as_deref()

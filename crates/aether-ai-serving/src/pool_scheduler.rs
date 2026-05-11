@@ -275,15 +275,19 @@ fn schedule_pool_group<Candidate>(
         };
     }
 
-    let sticky_candidate = runtime
-        .sticky_bound_key_id
-        .as_ref()
-        .and_then(|sticky_key_id| {
-            available
-                .iter()
-                .position(|item| item.item.facts.key_id == *sticky_key_id)
-        })
-        .map(|index| available.remove(index));
+    let sticky_candidate = if pool_sticky_enabled(&active_presets) {
+        runtime
+            .sticky_bound_key_id
+            .as_ref()
+            .and_then(|sticky_key_id| {
+                available
+                    .iter()
+                    .position(|item| item.item.facts.key_id == *sticky_key_id)
+            })
+            .map(|index| available.remove(index))
+    } else {
+        None
+    };
 
     if !active_presets.is_empty() {
         let sort_vectors = build_pool_sort_vectors(
@@ -400,6 +404,12 @@ fn build_pool_sort_vectors<Candidate>(
     }
 
     vectors
+}
+
+fn pool_sticky_enabled(presets: &[NormalizedPoolPreset]) -> bool {
+    presets
+        .iter()
+        .any(|preset| preset.preset == "cache_affinity")
 }
 
 fn lru_rank_indices<Candidate>(
@@ -916,8 +926,18 @@ mod tests {
 
     #[test]
     fn pool_scheduler_promotes_sticky_hit_before_other_sorted_keys() {
-        let key_a = sample_candidate("provider-pool", "endpoint-1", "key-a", 10, true);
-        let key_b = sample_candidate("provider-pool", "endpoint-1", "key-b", 10, true);
+        let key_a = sample_candidate("provider-pool", "endpoint-1", "key-a", 10, true)
+            .with_presets(vec![AiPoolSchedulingPreset {
+                preset: "cache_affinity".to_string(),
+                enabled: true,
+                mode: None,
+            }]);
+        let key_b = sample_candidate("provider-pool", "endpoint-1", "key-b", 10, true)
+            .with_presets(vec![AiPoolSchedulingPreset {
+                preset: "cache_affinity".to_string(),
+                enabled: true,
+                mode: None,
+            }]);
 
         let runtime_by_provider = BTreeMap::from([(
             "provider-pool".to_string(),
@@ -941,6 +961,49 @@ mod tests {
                 .map(|item| item.candidate.as_str())
                 .collect::<Vec<_>>(),
             vec!["key-a", "key-b"]
+        );
+    }
+
+    #[test]
+    fn load_balance_distribution_ignores_sticky_hit() {
+        let key_a = sample_candidate("provider-pool", "endpoint-1", "key-a", 10, true)
+            .with_presets(vec![AiPoolSchedulingPreset {
+                preset: "load_balance".to_string(),
+                enabled: true,
+                mode: None,
+            }]);
+        let key_b = sample_candidate("provider-pool", "endpoint-1", "key-b", 10, true)
+            .with_presets(vec![AiPoolSchedulingPreset {
+                preset: "load_balance".to_string(),
+                enabled: true,
+                mode: None,
+            }]);
+        let nonce = (0..1000)
+            .map(|index| format!("seed-{index}"))
+            .find(|nonce| {
+                let group_seed = format!("codex:provider-pool:endpoint-1:model-1:gpt-5:{nonce}");
+                stable_hash_score(format!("{group_seed}:key-b").as_str())
+                    < stable_hash_score(format!("{group_seed}:key-a").as_str())
+            })
+            .expect("test seed should exist");
+        let runtime_by_provider = BTreeMap::from([(
+            "provider-pool".to_string(),
+            AiPoolRuntimeState {
+                sticky_bound_key_id: Some("key-a".to_string()),
+                ..AiPoolRuntimeState::default()
+            },
+        )]);
+
+        let outcome = run_ai_pool_scheduler(vec![key_a, key_b], &runtime_by_provider, &nonce);
+
+        assert!(outcome.skipped_candidates.is_empty());
+        assert_eq!(
+            outcome
+                .candidates
+                .iter()
+                .map(|item| item.candidate.as_str())
+                .collect::<Vec<_>>(),
+            vec!["key-b", "key-a"]
         );
     }
 

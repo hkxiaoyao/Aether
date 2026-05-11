@@ -31,6 +31,7 @@ use crate::ai_serving::{GatewayAuthApiKeySnapshot, PlannerAppState};
 use crate::clock::current_unix_ms;
 use crate::handlers::shared::provider_pool::admin_provider_pool_config_from_config_value;
 use crate::orchestration::{local_attempt_slot_count, ExecutionAttemptIdentity};
+use crate::scheduler::config::{read_scheduler_ordering_config, SchedulerSchedulingMode};
 use crate::{AppState, GatewayError};
 
 const POOL_KEY_RETRY_INDEX_STRIDE: u32 = 100;
@@ -182,6 +183,7 @@ struct GatewayLocalCandidateMaterializationPort<'a, F, G> {
     request_auth_channel: Option<&'a str>,
     persistence_policy: LocalCandidatePersistencePolicy<'a>,
     resolution_mode: LocalCandidateResolutionMode,
+    scheduler_cache_affinity_enabled: bool,
     build_available_extra_data: F,
     decorate_skipped_candidate: G,
 }
@@ -244,6 +246,9 @@ where
     }
 
     fn remember_first_candidate_affinity(&self, candidates: &[Self::Eligible]) {
+        if !self.scheduler_cache_affinity_enabled {
+            return;
+        }
         remember_first_local_candidate_affinity(
             self.state,
             self.auth_snapshot,
@@ -430,6 +435,7 @@ where
     F: Fn(&EligibleLocalExecutionCandidate) -> Option<Value> + Send + Sync,
     G: Fn(SkippedLocalExecutionCandidate) -> SkippedLocalExecutionCandidate + Send + Sync,
 {
+    let scheduler_cache_affinity_enabled = scheduler_cache_affinity_enabled(state).await;
     let port = GatewayLocalCandidateMaterializationPort {
         state,
         trace_id,
@@ -442,6 +448,7 @@ where
         request_auth_channel,
         persistence_policy,
         resolution_mode,
+        scheduler_cache_affinity_enabled,
         build_available_extra_data,
         decorate_skipped_candidate,
     };
@@ -474,6 +481,7 @@ where
     F: Fn(&EligibleLocalExecutionCandidate) -> Option<Value> + Send + Sync,
     G: Fn(SkippedLocalExecutionCandidate) -> SkippedLocalExecutionCandidate + Send + Sync,
 {
+    let scheduler_cache_affinity_enabled = scheduler_cache_affinity_enabled(state).await;
     let _ = build_available_extra_data;
     let (candidates, resolved_skipped) = resolve_and_rank_logical_local_execution_candidates(
         state,
@@ -505,14 +513,16 @@ where
         }
     }
 
-    remember_first_local_candidate_affinity(
-        state,
-        auth_snapshot,
-        client_session_affinity,
-        client_api_format,
-        requested_model,
-        &candidates,
-    );
+    if scheduler_cache_affinity_enabled {
+        remember_first_local_candidate_affinity(
+            state,
+            auth_snapshot,
+            client_session_affinity,
+            client_api_format,
+            requested_model,
+            &candidates,
+        );
+    }
 
     let (items, _) = build_logical_candidate_items(
         state,
@@ -597,6 +607,7 @@ where
     F: Fn(&EligibleLocalExecutionCandidate) -> Option<Value> + Send + Sync + 'a,
     G: Fn(SkippedLocalExecutionCandidate) -> SkippedLocalExecutionCandidate + Send + Sync + 'a,
 {
+    let scheduler_cache_affinity_enabled = scheduler_cache_affinity_enabled(state).await;
     let _ = build_available_extra_data;
     let decorate_skipped_candidate = Arc::new(decorate_skipped_candidate);
     let record_runtime_miss_diagnostic = persistence_policy.skipped.record_runtime_miss_diagnostic;
@@ -630,6 +641,7 @@ where
         candidate_count: 0,
         next_candidate_index: 0,
         remembered_affinity: false,
+        scheduler_cache_affinity_enabled,
     };
     cursor.load_next_page().await;
     let candidate_count = cursor.candidate_count;
@@ -665,6 +677,7 @@ struct RequestedModelAttemptPageCursor<'a> {
     candidate_count: usize,
     next_candidate_index: u32,
     remembered_affinity: bool,
+    scheduler_cache_affinity_enabled: bool,
 }
 
 impl<'a> RequestedModelAttemptPageCursor<'a> {
@@ -726,7 +739,10 @@ impl<'a> RequestedModelAttemptPageCursor<'a> {
                     );
                 }
             }
-            if !self.remembered_affinity && !candidates.is_empty() {
+            if self.scheduler_cache_affinity_enabled
+                && !self.remembered_affinity
+                && !candidates.is_empty()
+            {
                 remember_first_local_candidate_affinity(
                     self.state,
                     Some(&self.auth_snapshot),
@@ -791,6 +807,21 @@ async fn pop_attempt_from_items(
             LocalExecutionCandidateAttemptSourceItem::RequestedModelPage { .. } => {
                 items.pop_front();
             }
+        }
+    }
+}
+
+async fn scheduler_cache_affinity_enabled(state: PlannerAppState<'_>) -> bool {
+    match read_scheduler_ordering_config(state.app()).await {
+        Ok(config) => config.scheduling_mode == SchedulerSchedulingMode::CacheAffinity,
+        Err(error) => {
+            warn!(
+                event_name = "planner_scheduler_affinity_config_load_failed",
+                log_type = "event",
+                error = ?error,
+                "failed to load scheduler config while checking cache affinity mode"
+            );
+            SchedulerSchedulingMode::default() == SchedulerSchedulingMode::CacheAffinity
         }
     }
 }
@@ -1211,6 +1242,7 @@ mod tests {
     use std::sync::Arc;
 
     use aether_data::repository::auth::InMemoryAuthApiKeySnapshotRepository;
+    use aether_data::repository::auth::StoredAuthApiKeySnapshot;
     use aether_data::repository::candidate_selection::InMemoryMinimalCandidateSelectionReadRepository;
     use aether_data::repository::candidates::InMemoryRequestCandidateRepository;
     use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
@@ -1219,6 +1251,7 @@ mod tests {
         GatewayProviderTransportProvider,
     };
     use aether_scheduler_core::{
+        build_scheduler_affinity_cache_key_for_api_key_id,
         SchedulerMinimalCandidateSelectionCandidate, SchedulerPriorityMode, SchedulerRankingMode,
         SchedulerRankingOutcome,
     };
@@ -1227,6 +1260,7 @@ mod tests {
     use super::*;
     use crate::data::GatewayDataState;
     use crate::orchestration::LocalExecutionCandidateMetadata;
+    use crate::scheduler::affinity::SCHEDULER_AFFINITY_TTL;
 
     fn sample_candidate(key_id: &str) -> SchedulerMinimalCandidateSelectionCandidate {
         SchedulerMinimalCandidateSelectionCandidate {
@@ -1331,6 +1365,46 @@ mod tests {
         }
     }
 
+    fn sample_auth_snapshot() -> GatewayAuthApiKeySnapshot {
+        GatewayAuthApiKeySnapshot::from_stored(
+            StoredAuthApiKeySnapshot::new(
+                "user-1".to_string(),
+                "alice".to_string(),
+                Some("alice@example.com".to_string()),
+                "user".to_string(),
+                "local".to_string(),
+                true,
+                false,
+                None,
+                None,
+                None,
+                "api-key-1".to_string(),
+                Some("default".to_string()),
+                true,
+                false,
+                false,
+                Some(60),
+                Some(5),
+                Some(4_102_444_800),
+                None,
+                None,
+                None,
+            )
+            .expect("stored auth snapshot should build"),
+            0,
+        )
+    }
+
+    fn no_extra_data(_: &EligibleLocalExecutionCandidate) -> Option<Value> {
+        None
+    }
+
+    fn identity_skipped_candidate(
+        candidate: SkippedLocalExecutionCandidate,
+    ) -> SkippedLocalExecutionCandidate {
+        candidate
+    }
+
     #[tokio::test]
     async fn pool_group_keys_are_not_persisted_as_available_before_attempt() {
         let repository = Arc::new(InMemoryRequestCandidateRepository::default());
@@ -1366,6 +1440,55 @@ mod tests {
         assert_eq!(stored.len(), 1);
         assert_eq!(stored[0].key_id.as_deref(), Some("normal-key"));
         assert_eq!(stored[0].candidate_index, 2);
+    }
+
+    #[test]
+    fn materialization_port_ignores_scheduler_affinity_when_cache_affinity_disabled() {
+        let app = AppState::new().expect("state should build");
+        let auth_snapshot = sample_auth_snapshot();
+        let port = GatewayLocalCandidateMaterializationPort {
+            state: PlannerAppState::new(&app),
+            trace_id: "trace-affinity-disabled",
+            client_api_format: "openai:chat",
+            requested_model: Some("gpt-5"),
+            auth_snapshot: Some(&auth_snapshot),
+            client_session_affinity: None,
+            required_capabilities: None,
+            sticky_session_token: None,
+            request_auth_channel: None,
+            persistence_policy: LocalCandidatePersistencePolicy {
+                available: LocalAvailableCandidatePersistenceContext {
+                    user_id: "user-1",
+                    api_key_id: "api-key-1",
+                    required_capabilities: None,
+                    error_context: "test available",
+                },
+                skipped: LocalSkippedCandidatePersistenceContext {
+                    user_id: "user-1",
+                    api_key_id: "api-key-1",
+                    required_capabilities: None,
+                    error_context: "test skipped",
+                    record_runtime_miss_diagnostic: false,
+                },
+            },
+            resolution_mode: LocalCandidateResolutionMode::Standard,
+            scheduler_cache_affinity_enabled: false,
+            build_available_extra_data: no_extra_data,
+            decorate_skipped_candidate: identity_skipped_candidate,
+        };
+        let candidate = sample_eligible("key-a", None);
+        let cache_key =
+            build_scheduler_affinity_cache_key_for_api_key_id("api-key-1", "openai:chat", "gpt-5")
+                .expect("scheduler affinity cache key should build");
+
+        aether_ai_serving::AiCandidateMaterializationPort::remember_first_candidate_affinity(
+            &port,
+            &[candidate],
+        );
+
+        assert!(app
+            .read_scheduler_affinity_target(cache_key.as_str(), SCHEDULER_AFFINITY_TTL)
+            .is_none());
     }
 
     #[tokio::test]
