@@ -339,9 +339,12 @@ pub(crate) fn validate_management_token_admin_route_permission(
         .and_then(|value| value.rsplit_once(':').map(|(scope, _)| scope))
         .unwrap_or_default();
     let admin_permission = format!("admin:{scope}:admin");
+    let has_full_assignable_access =
+        management_token_permissions_cover_all_assignable_permissions(token_permissions);
     if token_permissions
         .iter()
         .any(|permission| permission == &required_permission || permission == &admin_permission)
+        || (scope == "management_tokens" && has_full_assignable_access)
     {
         Ok(())
     } else {
@@ -468,6 +471,18 @@ fn is_assignable_management_token_permission(key: &str) -> bool {
         .any(|item| item.key == key)
 }
 
+pub(crate) fn management_token_permissions_cover_all_assignable_permissions(
+    token_permissions: &[String],
+) -> bool {
+    let permission_set = token_permissions
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    all_assignable_management_token_permissions()
+        .iter()
+        .all(|permission| permission_set.contains(permission.as_str()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -579,6 +594,25 @@ mod tests {
             !route_scopes.is_empty(),
             "admin route scope scanner did not find any route signatures"
         );
+    }
+
+    #[test]
+    fn full_assignable_token_permissions_can_cover_management_tokens_scope() {
+        let decision = GatewayControlDecision::synthetic(
+            "/api/admin/management-tokens".to_string(),
+            Some("admin_proxy".to_string()),
+            Some("management_tokens_manage".to_string()),
+            Some("list_tokens".to_string()),
+            Some("admin:management_tokens".to_string()),
+        );
+        let permissions = all_assignable_management_token_permissions();
+
+        assert!(validate_management_token_admin_route_permission(
+            &http::Method::GET,
+            &decision,
+            Some(&permissions),
+        )
+        .is_ok());
     }
 
     fn extract_admin_route_scopes(source: &'static str) -> BTreeSet<&'static str> {
