@@ -578,10 +578,15 @@ fn admin_provider_query_and_strategy_use_specific_local_owners() {
         "handlers/admin/provider/query/mod.rs should not retain a generic shared module"
     );
 
-    for path in [
-        "apps/aether-gateway/src/handlers/admin/provider/query/models.rs",
-        "apps/aether-gateway/src/handlers/admin/provider/query/routes.rs",
-    ] {
+    let query_model_owners = read_workspace_module_tree(
+        "apps/aether-gateway/src/handlers/admin/provider/query/models/mod.rs",
+    );
+    assert!(
+        !query_model_owners.contains("super::shared::{"),
+        "handlers/admin/provider/query/models should not depend on a generic query::shared hub"
+    );
+
+    for path in ["apps/aether-gateway/src/handlers/admin/provider/query/routes.rs"] {
         let contents = read_workspace_file(path);
         assert!(
             !contents.contains("super::shared::{"),

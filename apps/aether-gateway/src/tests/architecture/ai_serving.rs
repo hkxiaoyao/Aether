@@ -4762,6 +4762,7 @@ fn retired_api_format_occurrences_are_whitelisted() {
 
     let allowed_paths = [
         "apps/aether-gateway/src/handlers/admin/provider/write/normalize.rs",
+        "apps/aether-gateway/src/handlers/admin/request/system/import.rs",
         "crates/aether-ai-formats/src/formats/id.rs",
         "crates/aether-ai-formats/src/formats/matrix.rs",
         "crates/aether-ai-formats/src/formats/registry.rs",
