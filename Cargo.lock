@@ -162,6 +162,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-dispatch-core"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "aether-gateway"
 version = "0.1.0"
 dependencies = [
@@ -174,6 +185,7 @@ dependencies = [
  "aether-crypto",
  "aether-data",
  "aether-data-contracts",
+ "aether-dispatch-core",
  "aether-http",
  "aether-model-fetch",
  "aether-oauth",

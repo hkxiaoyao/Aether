@@ -323,6 +323,16 @@ impl<'a> LocalCandidatePreselectionPageCursor<'a> {
         Ok(None)
     }
 
+    pub(crate) fn restart_scan(&mut self) {
+        self.format_index = 0;
+        self.requested_name_indexes.clear();
+        self.requested_name_offsets.clear();
+        self.scanned_rows_by_format.clear();
+        self.resolved_global_model_names.clear();
+        self.fallback_scanned_api_formats.clear();
+        self.seen_candidate_keys.clear();
+    }
+
     async fn next_page_for_api_format(
         &mut self,
         candidate_api_format: &str,

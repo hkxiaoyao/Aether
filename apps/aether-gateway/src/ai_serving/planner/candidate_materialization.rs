@@ -4,14 +4,17 @@ use aether_ai_serving::{
     run_ai_available_candidate_persistence, run_ai_candidate_materialization,
     run_ai_skipped_candidate_persistence, AiAvailableCandidatePersistencePort,
     AiCandidateMaterializationOutcome, AiCandidateMaterializationPort,
-    AiSkippedCandidatePersistencePort,
+    AiCandidatePreselectionOutcome, AiSkippedCandidatePersistencePort,
 };
+use aether_dispatch_core::{DispatchSequence, DispatchSequenceItem};
 use aether_scheduler_core::{ClientSessionAffinity, SchedulerMinimalCandidateSelectionCandidate};
 use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::VecDeque;
 use std::convert::Infallible;
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::time::Instant;
 use tracing::warn;
 use uuid::Uuid;
 
@@ -29,12 +32,16 @@ use crate::ai_serving::planner::runtime_miss::record_local_runtime_candidate_ski
 use crate::ai_serving::planner::CandidateFailureDiagnostic;
 use crate::ai_serving::{GatewayAuthApiKeySnapshot, PlannerAppState};
 use crate::clock::current_unix_ms;
+use crate::dispatch::refs::dispatch_ref_for_local_candidate;
 use crate::handlers::shared::provider_pool::admin_provider_pool_config_from_config_value;
 use crate::orchestration::{local_attempt_slot_count, ExecutionAttemptIdentity};
+use crate::scheduler::candidate::API_KEY_CONCURRENCY_LIMIT_SKIP_REASON;
 use crate::scheduler::config::{read_scheduler_ordering_config, SchedulerSchedulingMode};
 use crate::{AppState, GatewayError};
 
 const POOL_KEY_RETRY_INDEX_STRIDE: u32 = 100;
+const AUTH_API_KEY_CONCURRENCY_WAIT_BUDGET: Duration = Duration::from_millis(100);
+const AUTH_API_KEY_CONCURRENCY_RETRY_DELAY: Duration = Duration::from_millis(10);
 
 #[derive(Debug, Clone)]
 pub(crate) struct LocalExecutionCandidateAttempt {
@@ -61,12 +68,12 @@ pub(crate) trait LocalExecutionAttemptSource<T>: Send {
 
 enum LocalExecutionCandidateAttemptSourceItem<'a> {
     Static {
-        attempts: VecDeque<LocalExecutionCandidateAttempt>,
+        attempts: DispatchSequence<LocalExecutionCandidateAttempt>,
     },
     Pool {
         cursor: PoolKeyCursor<'a>,
         candidate_index: u32,
-        pending_attempts: VecDeque<LocalExecutionCandidateAttempt>,
+        pending_attempts: DispatchSequence<LocalExecutionCandidateAttempt>,
     },
     RequestedModelPage {
         cursor: Box<RequestedModelAttemptPageCursor<'a>>,
@@ -80,7 +87,7 @@ impl<'a> LocalExecutionCandidateAttemptSource<'a> {
         let mut items = VecDeque::new();
         if !attempts.is_empty() {
             items.push_back(LocalExecutionCandidateAttemptSourceItem::Static {
-                attempts: VecDeque::from(attempts),
+                attempts: dispatch_sequence_from_attempts(attempts),
             });
         }
         Self { items }
@@ -91,8 +98,8 @@ impl<'a> LocalExecutionCandidateAttemptSource<'a> {
             let front = self.items.front_mut()?;
             match front {
                 LocalExecutionCandidateAttemptSourceItem::Static { attempts } => {
-                    if let Some(attempt) = attempts.pop_front() {
-                        if attempts.is_empty() {
+                    if let Some(attempt) = next_attempt_from_dispatch_sequence(attempts) {
+                        if dispatch_sequence_exhausted(attempts) {
                             self.items.pop_front();
                         }
                         return Some(attempt);
@@ -104,7 +111,7 @@ impl<'a> LocalExecutionCandidateAttemptSource<'a> {
                     candidate_index,
                     pending_attempts,
                 } => {
-                    if let Some(attempt) = pending_attempts.pop_front() {
+                    if let Some(attempt) = next_attempt_from_dispatch_sequence(pending_attempts) {
                         return Some(attempt);
                     }
                     let Some(candidate) = cursor.next_key().await else {
@@ -113,9 +120,12 @@ impl<'a> LocalExecutionCandidateAttemptSource<'a> {
                         self.items.pop_front();
                         continue;
                     };
-                    *pending_attempts = build_unpersisted_local_execution_candidate_attempts(
-                        candidate,
-                        *candidate_index,
+                    *pending_attempts = dispatch_sequence_from_attempts(
+                        build_unpersisted_local_execution_candidate_attempts(
+                            candidate,
+                            *candidate_index,
+                        )
+                        .into(),
                     );
                 }
                 LocalExecutionCandidateAttemptSourceItem::RequestedModelPage { cursor } => {
@@ -311,10 +321,7 @@ where
     }
 
     fn build_extra_data(&self, candidate: &Self::Candidate) -> Option<Self::ExtraData> {
-        ai_candidate_extra_data_with_ranking(
-            (self.build_extra_data)(candidate),
-            candidate.ranking.as_ref(),
-        )
+        available_candidate_extra_data_with_dispatch_ref(candidate, &self.build_extra_data)
     }
 
     fn generate_candidate_id(&self) -> String {
@@ -506,15 +513,6 @@ where
         .map(decorate_skipped_candidate)
         .collect::<Vec<_>>();
     let candidate_count = candidates.len() + skipped_candidate_count;
-    if persistence_policy.skipped.record_runtime_miss_diagnostic {
-        for skipped_candidate in &skipped_candidates {
-            record_local_runtime_candidate_skip_reason(
-                state.app(),
-                trace_id,
-                skipped_candidate.skip_reason,
-            );
-        }
-    }
 
     if scheduler_cache_affinity_enabled {
         remember_first_local_candidate_affinity(
@@ -526,6 +524,14 @@ where
             &candidates,
         );
     }
+    persist_skipped_local_execution_candidates_with_context(
+        state.app(),
+        trace_id,
+        persistence_policy.skipped,
+        u32::try_from(candidates.len()).unwrap_or(u32::MAX),
+        skipped_candidates,
+    )
+    .await;
 
     let (items, _) = build_logical_candidate_items(
         state,
@@ -566,7 +572,9 @@ fn build_logical_candidate_items<'a>(
                     candidate_index,
                 );
                 if !attempts.is_empty() {
-                    items.push_back(LocalExecutionCandidateAttemptSourceItem::Static { attempts });
+                    items.push_back(LocalExecutionCandidateAttemptSourceItem::Static {
+                        attempts: dispatch_sequence_from_attempts(attempts.into()),
+                    });
                 }
             }
             LocalExecutionCandidateKind::PoolGroup => {
@@ -585,7 +593,7 @@ fn build_logical_candidate_items<'a>(
                 items.push_back(LocalExecutionCandidateAttemptSourceItem::Pool {
                     cursor,
                     candidate_index,
-                    pending_attempts: VecDeque::new(),
+                    pending_attempts: DispatchSequence::new(Vec::new()),
                 });
             }
         }
@@ -646,6 +654,10 @@ where
         required_capabilities: required_capabilities.cloned(),
         sticky_session_token: sticky_session_token.map(str::to_string),
         request_auth_channel: request_auth_channel.map(str::to_string),
+        skipped_user_id: persistence_policy.skipped.user_id.to_string(),
+        skipped_api_key_id: persistence_policy.skipped.api_key_id.to_string(),
+        skipped_required_capabilities: persistence_policy.skipped.required_capabilities.cloned(),
+        skipped_error_context: persistence_policy.skipped.error_context,
         record_runtime_miss_diagnostic,
         resolution_mode,
         decorate_skipped_candidate,
@@ -655,6 +667,7 @@ where
         next_candidate_index: 0,
         remembered_affinity: false,
         scheduler_cache_affinity_enabled,
+        auth_api_key_concurrency_wait_deadline: None,
     };
     cursor.load_next_page().await;
     let candidate_count = cursor.candidate_count;
@@ -682,6 +695,10 @@ struct RequestedModelAttemptPageCursor<'a> {
     required_capabilities: Option<Value>,
     sticky_session_token: Option<String>,
     request_auth_channel: Option<String>,
+    skipped_user_id: String,
+    skipped_api_key_id: String,
+    skipped_required_capabilities: Option<Value>,
+    skipped_error_context: &'static str,
     record_runtime_miss_diagnostic: bool,
     resolution_mode: LocalCandidateResolutionMode,
     decorate_skipped_candidate: DecorateSkippedCandidateFn<'a>,
@@ -691,6 +708,7 @@ struct RequestedModelAttemptPageCursor<'a> {
     next_candidate_index: u32,
     remembered_affinity: bool,
     scheduler_cache_affinity_enabled: bool,
+    auth_api_key_concurrency_wait_deadline: Option<Instant>,
 }
 
 impl<'a> RequestedModelAttemptPageCursor<'a> {
@@ -720,6 +738,15 @@ impl<'a> RequestedModelAttemptPageCursor<'a> {
                 }
             };
 
+            if page_is_exact_auth_api_key_concurrency_limited(&page) {
+                if self.wait_for_auth_api_key_concurrency_retry().await {
+                    continue;
+                }
+                self.persist_final_auth_api_key_concurrency_skips(page.skipped_candidates)
+                    .await;
+                return false;
+            }
+
             let (candidates, resolved_skipped) =
                 resolve_and_rank_logical_local_execution_candidates(
                     self.state,
@@ -740,18 +767,10 @@ impl<'a> RequestedModelAttemptPageCursor<'a> {
                 .chain(resolved_skipped)
                 .map(|skipped| (self.decorate_skipped_candidate)(skipped))
                 .collect::<Vec<_>>();
+            let skipped_candidate_count = skipped_candidates.len();
             self.candidate_count = self
                 .candidate_count
-                .saturating_add(candidates.len() + skipped_candidates.len());
-            if self.record_runtime_miss_diagnostic {
-                for skipped_candidate in &skipped_candidates {
-                    record_local_runtime_candidate_skip_reason(
-                        self.state.app(),
-                        &self.trace_id,
-                        skipped_candidate.skip_reason,
-                    );
-                }
-            }
+                .saturating_add(candidates.len() + skipped_candidate_count);
             if self.scheduler_cache_affinity_enabled
                 && !self.remembered_affinity
                 && !candidates.is_empty()
@@ -776,13 +795,90 @@ impl<'a> RequestedModelAttemptPageCursor<'a> {
                 Some(&self.requested_model),
                 self.request_auth_channel.as_deref(),
             );
-            self.next_candidate_index = next_candidate_index;
+            self.next_candidate_index = next_candidate_index
+                .saturating_add(u32::try_from(skipped_candidate_count).unwrap_or(u32::MAX));
             if !items.is_empty() {
                 self.pending_items = items;
                 return true;
             }
+            let skipped_starting_candidate_index = next_candidate_index;
+            let skipped_persistence = LocalSkippedCandidatePersistenceContext {
+                user_id: self.skipped_user_id.as_str(),
+                api_key_id: self.skipped_api_key_id.as_str(),
+                required_capabilities: self.skipped_required_capabilities.as_ref(),
+                error_context: self.skipped_error_context,
+                record_runtime_miss_diagnostic: self.record_runtime_miss_diagnostic,
+            };
+            persist_skipped_local_execution_candidates_with_context(
+                self.state.app(),
+                &self.trace_id,
+                skipped_persistence,
+                skipped_starting_candidate_index,
+                skipped_candidates,
+            )
+            .await;
         }
     }
+
+    async fn wait_for_auth_api_key_concurrency_retry(&mut self) -> bool {
+        let now = Instant::now();
+        let deadline = *self
+            .auth_api_key_concurrency_wait_deadline
+            .get_or_insert(now + AUTH_API_KEY_CONCURRENCY_WAIT_BUDGET);
+        if now >= deadline {
+            return false;
+        }
+
+        let sleep_duration =
+            AUTH_API_KEY_CONCURRENCY_RETRY_DELAY.min(deadline.saturating_duration_since(now));
+        tokio::time::sleep(sleep_duration).await;
+        self.page_cursor.restart_scan();
+        true
+    }
+
+    async fn persist_final_auth_api_key_concurrency_skips(
+        &mut self,
+        skipped_candidates: Vec<SkippedLocalExecutionCandidate>,
+    ) {
+        let skipped_candidates = skipped_candidates
+            .into_iter()
+            .map(|skipped| (self.decorate_skipped_candidate)(skipped))
+            .collect::<Vec<_>>();
+        let skipped_candidate_count = skipped_candidates.len();
+        self.candidate_count = self.candidate_count.saturating_add(skipped_candidate_count);
+        let skipped_persistence = LocalSkippedCandidatePersistenceContext {
+            user_id: self.skipped_user_id.as_str(),
+            api_key_id: self.skipped_api_key_id.as_str(),
+            required_capabilities: self.skipped_required_capabilities.as_ref(),
+            error_context: self.skipped_error_context,
+            record_runtime_miss_diagnostic: self.record_runtime_miss_diagnostic,
+        };
+        persist_skipped_local_execution_candidates_with_context(
+            self.state.app(),
+            &self.trace_id,
+            skipped_persistence,
+            self.next_candidate_index,
+            skipped_candidates,
+        )
+        .await;
+        self.next_candidate_index = self
+            .next_candidate_index
+            .saturating_add(u32::try_from(skipped_candidate_count).unwrap_or(u32::MAX));
+    }
+}
+
+fn page_is_exact_auth_api_key_concurrency_limited(
+    page: &AiCandidatePreselectionOutcome<
+        SchedulerMinimalCandidateSelectionCandidate,
+        SkippedLocalExecutionCandidate,
+    >,
+) -> bool {
+    page.candidates.is_empty()
+        && !page.skipped_candidates.is_empty()
+        && page
+            .skipped_candidates
+            .iter()
+            .all(|skipped| skipped.skip_reason == API_KEY_CONCURRENCY_LIMIT_SKIP_REASON)
 }
 
 async fn pop_attempt_from_items(
@@ -792,8 +888,8 @@ async fn pop_attempt_from_items(
         let front = items.front_mut()?;
         match front {
             LocalExecutionCandidateAttemptSourceItem::Static { attempts } => {
-                if let Some(attempt) = attempts.pop_front() {
-                    if attempts.is_empty() {
+                if let Some(attempt) = next_attempt_from_dispatch_sequence(attempts) {
+                    if dispatch_sequence_exhausted(attempts) {
                         items.pop_front();
                     }
                     return Some(attempt);
@@ -805,7 +901,7 @@ async fn pop_attempt_from_items(
                 candidate_index,
                 pending_attempts,
             } => {
-                if let Some(attempt) = pending_attempts.pop_front() {
+                if let Some(attempt) = next_attempt_from_dispatch_sequence(pending_attempts) {
                     return Some(attempt);
                 }
                 let Some(candidate) = cursor.next_key().await else {
@@ -814,9 +910,12 @@ async fn pop_attempt_from_items(
                     items.pop_front();
                     continue;
                 };
-                *pending_attempts = build_unpersisted_local_execution_candidate_attempts(
-                    candidate,
-                    *candidate_index,
+                *pending_attempts = dispatch_sequence_from_attempts(
+                    build_unpersisted_local_execution_candidate_attempts(
+                        candidate,
+                        *candidate_index,
+                    )
+                    .into(),
                 );
             }
             LocalExecutionCandidateAttemptSourceItem::RequestedModelPage { .. } => {
@@ -1005,7 +1104,7 @@ where
 {
     let attempt_slots = local_attempt_slot_count(&candidate.transport).max(1);
     let extra_data = ai_candidate_extra_data_with_ranking(
-        build_extra_data(&candidate),
+        available_candidate_base_extra_data_with_dispatch_ref(&candidate, build_extra_data),
         candidate.ranking.as_ref(),
     );
     let should_persist = should_persist_available_local_candidate(&candidate);
@@ -1055,6 +1154,70 @@ where
     }
 
     attempts
+}
+
+fn available_candidate_extra_data_with_dispatch_ref<F>(
+    candidate: &EligibleLocalExecutionCandidate,
+    build_extra_data: &F,
+) -> Option<Value>
+where
+    F: Fn(&EligibleLocalExecutionCandidate) -> Option<Value> + Send + Sync,
+{
+    ai_candidate_extra_data_with_ranking(
+        available_candidate_base_extra_data_with_dispatch_ref(candidate, build_extra_data),
+        candidate.ranking.as_ref(),
+    )
+}
+
+fn available_candidate_base_extra_data_with_dispatch_ref<F>(
+    candidate: &EligibleLocalExecutionCandidate,
+    build_extra_data: &F,
+) -> Option<Value>
+where
+    F: Fn(&EligibleLocalExecutionCandidate) -> Option<Value> + Send + Sync,
+{
+    let dispatch_ref = serde_json::to_value(dispatch_ref_for_local_candidate(candidate)).ok()?;
+    let mut object = match build_extra_data(candidate) {
+        Some(Value::Object(object)) => object,
+        Some(value) => {
+            let mut object = serde_json::Map::new();
+            object.insert("extra".to_string(), value);
+            object
+        }
+        None => serde_json::Map::new(),
+    };
+    object.insert("dispatch_ref".to_string(), dispatch_ref);
+    Some(Value::Object(object))
+}
+
+fn dispatch_sequence_from_attempts(
+    attempts: Vec<LocalExecutionCandidateAttempt>,
+) -> DispatchSequence<LocalExecutionCandidateAttempt> {
+    DispatchSequence::new(
+        attempts
+            .into_iter()
+            .map(|attempt| DispatchSequenceItem {
+                candidate_index: attempt.candidate_index,
+                retry_index: attempt.retry_index,
+                candidate: attempt,
+                mark: aether_dispatch_core::DispatchSequenceMark::Pending,
+            })
+            .collect(),
+    )
+}
+
+fn next_attempt_from_dispatch_sequence(
+    sequence: &mut DispatchSequence<LocalExecutionCandidateAttempt>,
+) -> Option<LocalExecutionCandidateAttempt> {
+    let attempt = sequence.next()?.candidate.clone();
+    let _ = sequence.mark_succeeded();
+    Some(attempt)
+}
+
+fn dispatch_sequence_exhausted(
+    sequence: &mut DispatchSequence<LocalExecutionCandidateAttempt>,
+) -> bool {
+    sequence.next().is_none()
 }
 
 fn build_unpersisted_local_execution_candidate_attempts(
@@ -1457,6 +1620,16 @@ mod tests {
         assert_eq!(stored.len(), 1);
         assert_eq!(stored[0].key_id.as_deref(), Some("normal-key"));
         assert_eq!(stored[0].candidate_index, 2);
+        assert_eq!(
+            stored[0]
+                .extra_data
+                .as_ref()
+                .and_then(|value| value.get("dispatch_ref"))
+                .and_then(|value| value.get("SingleKey"))
+                .and_then(|value| value.get("key"))
+                .and_then(|value| value.get("key_id")),
+            Some(&json!("normal-key"))
+        );
     }
 
     #[test]
@@ -1562,6 +1735,16 @@ mod tests {
         assert_eq!(stored.len(), 1);
         assert_eq!(stored[0].key_id.as_deref(), Some("normal-key"));
         assert_eq!(stored[0].candidate_index, 1);
+        assert_eq!(
+            stored[0]
+                .extra_data
+                .as_ref()
+                .and_then(|value| value.get("dispatch_ref"))
+                .and_then(|value| value.get("SingleKey"))
+                .and_then(|value| value.get("key"))
+                .and_then(|value| value.get("key_id")),
+            Some(&json!("normal-key"))
+        );
     }
 
     #[test]
@@ -1643,15 +1826,26 @@ mod tests {
             Some(&json!("cached_affinity"))
         );
         assert_eq!(extra_data.get("demoted_by"), Some(&json!("cross_format")));
+        assert_eq!(
+            extra_data
+                .get("dispatch_ref")
+                .and_then(|value| value.get("SingleKey"))
+                .and_then(|value| value.get("key"))
+                .and_then(|value| value.get("key_id")),
+            Some(&json!("ranked-key"))
+        );
     }
 
     #[tokio::test]
     async fn dynamic_attempt_source_does_not_drain_unexecuted_single_keys() {
         let mut source = LocalExecutionCandidateAttemptSource {
             items: VecDeque::from([LocalExecutionCandidateAttemptSourceItem::Static {
-                attempts: build_unpersisted_local_execution_candidate_attempts(
-                    sample_eligible("normal-key", None),
-                    0,
+                attempts: dispatch_sequence_from_attempts(
+                    build_unpersisted_local_execution_candidate_attempts(
+                        sample_eligible("normal-key", None),
+                        0,
+                    )
+                    .into(),
                 ),
             }]),
         };

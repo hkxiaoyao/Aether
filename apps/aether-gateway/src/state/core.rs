@@ -59,6 +59,30 @@ use crate::maintenance::spawn_usage_cleanup_worker;
 use crate::maintenance::spawn_wallet_daily_usage_aggregation_worker;
 
 const SYSTEM_CONFIG_CACHE_TTL: Duration = Duration::from_secs(3);
+const SCHEDULER_AFFECTING_SYSTEM_CONFIG_KEYS: &[&str] = &[
+    "enable_format_conversion",
+    "keep_priority_on_conversion",
+    "provider_priority_mode",
+    "scheduling_mode",
+];
+const AUTH_AFFECTING_SYSTEM_CONFIG_KEYS: &[&str] =
+    &[crate::constants::DEFAULT_USER_GROUP_CONFIG_KEY];
+const FRONTDOOR_RPM_AFFECTING_SYSTEM_CONFIG_KEYS: &[&str] = &["rate_limit_per_minute"];
+
+fn system_config_key_affects_scheduler(key: &str) -> bool {
+    let key = key.trim();
+    SCHEDULER_AFFECTING_SYSTEM_CONFIG_KEYS.contains(&key)
+}
+
+fn system_config_key_affects_auth(key: &str) -> bool {
+    let key = key.trim();
+    AUTH_AFFECTING_SYSTEM_CONFIG_KEYS.contains(&key)
+}
+
+fn system_config_key_affects_frontdoor_rpm(key: &str) -> bool {
+    let key = key.trim();
+    FRONTDOOR_RPM_AFFECTING_SYSTEM_CONFIG_KEYS.contains(&key)
+}
 
 impl AppState {
     fn usage_worker_queue_for(
@@ -143,7 +167,10 @@ impl AppState {
 
     pub(crate) fn replace_data_state(&mut self, data: Arc<GatewayDataState>) {
         self.clear_provider_transport_snapshot_cache();
+        self.invalidate_scheduler_affinity_cache();
+        self.invalidate_auth_context_cache();
         self.system_config_cache.clear();
+        self.frontdoor_user_rpm.clear_system_default_cache();
         let data = Arc::new(
             (*data)
                 .clone()
@@ -492,11 +519,7 @@ impl AppState {
             .upsert_system_config_value(key, value, description)
             .await
             .map_err(|err| GatewayError::Internal(err.to_string()))?;
-        self.system_config_cache.insert(
-            key.to_string(),
-            Some(value.clone()),
-            SYSTEM_CONFIG_CACHE_TTL,
-        );
+        self.remember_system_config_write(key, Some(value.clone()));
         Ok(value)
     }
 
@@ -515,10 +538,13 @@ impl AppState {
         value: &serde_json::Value,
         description: Option<&str>,
     ) -> Result<crate::data::state::StoredSystemConfigEntry, GatewayError> {
-        self.data
+        let entry = self
+            .data
             .upsert_system_config_entry(key, value, description)
             .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        self.remember_system_config_write(entry.key.as_str(), Some(entry.value.clone()));
+        Ok(entry)
     }
 
     pub(crate) async fn delete_system_config_value(&self, key: &str) -> Result<bool, GatewayError> {
@@ -529,7 +555,39 @@ impl AppState {
             .map_err(|err| GatewayError::Internal(err.to_string()))?;
         self.system_config_cache
             .insert(key.to_string(), None, SYSTEM_CONFIG_CACHE_TTL);
+        if deleted && system_config_key_affects_scheduler(key) {
+            self.invalidate_scheduler_affinity_cache();
+        }
+        if deleted && system_config_key_affects_auth(key) {
+            self.invalidate_auth_context_cache();
+        }
+        if deleted && system_config_key_affects_frontdoor_rpm(key) {
+            self.frontdoor_user_rpm.clear_system_default_cache();
+        }
         Ok(deleted)
+    }
+
+    pub(crate) fn invalidate_provider_routing_caches(&self) {
+        self.clear_provider_transport_snapshot_cache();
+        self.invalidate_scheduler_affinity_cache();
+    }
+
+    pub(crate) fn invalidate_auth_context_cache(&self) {
+        self.auth_context_cache.clear();
+    }
+
+    fn remember_system_config_write(&self, key: &str, value: Option<serde_json::Value>) {
+        self.system_config_cache
+            .insert(key.to_string(), value, SYSTEM_CONFIG_CACHE_TTL);
+        if system_config_key_affects_scheduler(key) {
+            self.invalidate_scheduler_affinity_cache();
+        }
+        if system_config_key_affects_auth(key) {
+            self.invalidate_auth_context_cache();
+        }
+        if system_config_key_affects_frontdoor_rpm(key) {
+            self.frontdoor_user_rpm.clear_system_default_cache();
+        }
     }
 
     pub(crate) async fn read_admin_system_stats(
@@ -558,7 +616,7 @@ impl AppState {
                 | aether_data::repository::system::AdminSystemPurgeTarget::Stats
         ) {
             self.system_config_cache.clear();
-            self.clear_provider_transport_snapshot_cache();
+            self.invalidate_provider_routing_caches();
         }
         Ok(summary)
     }
@@ -1190,6 +1248,7 @@ mod tests {
     use serde_json::json;
 
     use super::AppState;
+    use crate::cache::SchedulerAffinityTarget;
     use crate::data::GatewayDataState;
 
     #[tokio::test]
@@ -1234,6 +1293,91 @@ mod tests {
                 .await
                 .expect("refreshed system config read should succeed"),
             Some(json!("fresh"))
+        );
+    }
+
+    #[tokio::test]
+    async fn system_config_entry_write_refreshes_cache_and_scheduler_affinity_for_routing_keys() {
+        let state = AppState::new()
+            .expect("app state should build")
+            .with_data_state_for_tests(
+                GatewayDataState::disabled().with_system_config_values_for_tests([(
+                    "keep_priority_on_conversion".to_string(),
+                    json!(false),
+                )]),
+            );
+        let cache_key = "scheduler_affinity:api-key-1:openai:chat:gpt-5";
+        let ttl = std::time::Duration::from_secs(300);
+
+        assert_eq!(
+            state
+                .read_system_config_json_value("keep_priority_on_conversion")
+                .await
+                .expect("system config read should succeed"),
+            Some(json!(false))
+        );
+        state.remember_scheduler_affinity_target(
+            cache_key,
+            SchedulerAffinityTarget {
+                provider_id: "provider-old".to_string(),
+                endpoint_id: "endpoint-old".to_string(),
+                key_id: "key-old".to_string(),
+            },
+            ttl,
+            128,
+        );
+        assert!(state
+            .read_scheduler_affinity_target(cache_key, ttl)
+            .is_some());
+
+        let initial_epoch = state.scheduler_affinity_epoch();
+        state
+            .upsert_system_config_entry("keep_priority_on_conversion", &json!(true), None)
+            .await
+            .expect("admin config write should succeed");
+
+        assert_eq!(
+            state
+                .read_system_config_json_value("keep_priority_on_conversion")
+                .await
+                .expect("system config read should use refreshed cache"),
+            Some(json!(true))
+        );
+        assert!(state.scheduler_affinity_epoch() > initial_epoch);
+        assert_eq!(state.read_scheduler_affinity_target(cache_key, ttl), None);
+    }
+
+    #[tokio::test]
+    async fn system_config_write_refreshes_frontdoor_rpm_default_cache() {
+        let state = AppState::new()
+            .expect("app state should build")
+            .with_data_state_for_tests(
+                GatewayDataState::disabled().with_system_config_values_for_tests([(
+                    "rate_limit_per_minute".to_string(),
+                    json!(1),
+                )]),
+            );
+
+        assert_eq!(
+            state
+                .frontdoor_user_rpm()
+                .current_system_default_limit(&state)
+                .await
+                .expect("default rpm limit should read"),
+            1
+        );
+        state
+            .upsert_system_config_entry("rate_limit_per_minute", &json!(0), None)
+            .await
+            .expect("rpm system config should update");
+
+        assert_eq!(
+            state
+                .frontdoor_user_rpm()
+                .current_system_default_limit(&state)
+                .await
+                .expect("default rpm limit should use refreshed value"),
+            0
         );
     }
 

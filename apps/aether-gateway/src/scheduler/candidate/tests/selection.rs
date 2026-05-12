@@ -459,8 +459,8 @@ async fn fixed_order_ignores_cached_scheduler_affinity_promotion() {
         );
 
     let auth_snapshot = sample_auth_snapshot("affinity-key-1");
-    state.scheduler_affinity_cache.insert(
-        "scheduler_affinity:affinity-key-1:openai:chat:gpt-4.1".to_string(),
+    state.remember_scheduler_affinity_target(
+        "scheduler_affinity:affinity-key-1:openai:chat:gpt-4.1",
         SchedulerAffinityTarget {
             provider_id: "provider-b".to_string(),
             endpoint_id: "endpoint-b".to_string(),
@@ -578,8 +578,8 @@ async fn cache_affinity_promotes_cached_scheduler_affinity_candidate_when_enable
         );
 
     let auth_snapshot = sample_auth_snapshot("affinity-key-1");
-    state.scheduler_affinity_cache.insert(
-        "scheduler_affinity:affinity-key-1:openai:chat:gpt-4.1".to_string(),
+    state.remember_scheduler_affinity_target(
+        "scheduler_affinity:affinity-key-1:openai:chat:gpt-4.1",
         SchedulerAffinityTarget {
             provider_id: "provider-b".to_string(),
             endpoint_id: "endpoint-b".to_string(),
@@ -683,8 +683,8 @@ async fn load_balance_ignores_provider_priority_and_cached_affinity() {
         );
 
     let auth_snapshot = sample_auth_snapshot("affinity-key-1");
-    state.scheduler_affinity_cache.insert(
-        "scheduler_affinity:affinity-key-1:openai:chat:gpt-4.1".to_string(),
+    state.remember_scheduler_affinity_target(
+        "scheduler_affinity:affinity-key-1:openai:chat:gpt-4.1",
         SchedulerAffinityTarget {
             provider_id: "provider-b".to_string(),
             endpoint_id: "endpoint-b".to_string(),

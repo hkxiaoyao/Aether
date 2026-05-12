@@ -1333,8 +1333,8 @@ mod tests {
             build_scheduler_affinity_cache_key_for_api_key_id("api-key-1", "openai:chat", "gpt-5")
                 .expect("scheduler affinity cache key should build");
 
-        state.scheduler_affinity_cache.insert(
-            cache_key.clone(),
+        state.remember_scheduler_affinity_target(
+            &cache_key,
             SchedulerAffinityTarget {
                 provider_id: "prov-1".to_string(),
                 endpoint_id: "ep-1".to_string(),
@@ -1376,8 +1376,8 @@ mod tests {
                 .expect("legacy scheduler affinity cache key should build");
 
         for cache_key in [&session_cache_key, &legacy_cache_key] {
-            state.scheduler_affinity_cache.insert(
-                cache_key.to_string(),
+            state.remember_scheduler_affinity_target(
+                cache_key.as_str(),
                 SchedulerAffinityTarget {
                     provider_id: "prov-1".to_string(),
                     endpoint_id: "ep-1".to_string(),
@@ -1422,8 +1422,8 @@ mod tests {
             build_scheduler_affinity_cache_key_for_api_key_id("api-key-1", "openai:chat", "gpt-5")
                 .expect("scheduler affinity cache key should build");
 
-        state.scheduler_affinity_cache.insert(
-            cache_key.clone(),
+        state.remember_scheduler_affinity_target(
+            &cache_key,
             SchedulerAffinityTarget {
                 provider_id: "prov-1".to_string(),
                 endpoint_id: "ep-1".to_string(),
@@ -1464,8 +1464,8 @@ mod tests {
             build_scheduler_affinity_cache_key_for_api_key_id("api-key-1", "openai:chat", "gpt-5")
                 .expect("scheduler affinity cache key should build");
 
-        state.scheduler_affinity_cache.insert(
-            cache_key.clone(),
+        state.remember_scheduler_affinity_target(
+            &cache_key,
             SchedulerAffinityTarget {
                 provider_id: "prov-1".to_string(),
                 endpoint_id: "ep-1".to_string(),
@@ -1612,8 +1612,8 @@ mod tests {
             build_scheduler_affinity_cache_key_for_api_key_id("api-key-1", "openai:chat", "gpt-5")
                 .expect("scheduler affinity cache key should build");
 
-        state.scheduler_affinity_cache.insert(
-            cache_key.clone(),
+        state.remember_scheduler_affinity_target(
+            &cache_key,
             SchedulerAffinityTarget {
                 provider_id: "prov-1".to_string(),
                 endpoint_id: "ep-1".to_string(),
