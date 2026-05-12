@@ -40,6 +40,30 @@ use crate::constants::{
 use crate::control::resolve_public_request_context;
 use crate::data::GatewayDataState;
 
+const MANUAL_KIRO_OAUTH_REFRESH_TEST_STACK_BYTES: usize = 16 * 1024 * 1024;
+
+fn run_manual_kiro_oauth_refresh_test<F, Fut>(test_name: &'static str, make_future: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + 'static,
+{
+    let handle = std::thread::Builder::new()
+        .name(test_name.to_string())
+        .stack_size(MANUAL_KIRO_OAUTH_REFRESH_TEST_STACK_BYTES)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime should build");
+            runtime.block_on(make_future());
+        })
+        .expect("manual kiro oauth refresh test thread should spawn");
+
+    if let Err(payload) = handle.join() {
+        std::panic::resume_unwind(payload);
+    }
+}
+
 fn trusted_admin_headers() -> HeaderMap {
     let mut headers = HeaderMap::new();
     headers.insert(GATEWAY_HEADER, HeaderValue::from_static("rust-phase3b"));
@@ -5180,8 +5204,15 @@ async fn gateway_manual_codex_oauth_refresh_reconciles_missing_fixed_endpoint() 
     token_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_manual_kiro_oauth_refresh_reconciles_missing_fixed_endpoint() {
+#[test]
+fn gateway_manual_kiro_oauth_refresh_reconciles_missing_fixed_endpoint() {
+    run_manual_kiro_oauth_refresh_test(
+        "gateway_manual_kiro_oauth_refresh_reconciles_missing_fixed_endpoint",
+        gateway_manual_kiro_oauth_refresh_reconciles_missing_fixed_endpoint_impl,
+    );
+}
+
+async fn gateway_manual_kiro_oauth_refresh_reconciles_missing_fixed_endpoint_impl() {
     let refreshed_access_token = sample_kiro_device_access_token("kiro-refresh@example.com");
     let expected_access_token = refreshed_access_token.clone();
     let refreshed_refresh_token = "s".repeat(120);
