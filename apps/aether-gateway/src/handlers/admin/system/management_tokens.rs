@@ -328,10 +328,7 @@ pub(crate) async fn maybe_build_local_admin_management_tokens_response(
         .admin_principal
         .as_ref()
         .and_then(|principal| principal.management_token_permissions.as_deref())
-        .map_or(
-            true,
-            management_token_permissions_cover_all_assignable_permissions,
-        );
+        .is_none_or(management_token_permissions_cover_all_assignable_permissions);
     if is_management_token && !management_token_is_full {
         return Ok(Some(
             (

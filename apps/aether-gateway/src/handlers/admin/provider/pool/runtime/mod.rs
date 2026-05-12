@@ -5,16 +5,14 @@ mod reads;
 mod status;
 mod writes;
 
-pub(crate) use self::leases::{
-    release_admin_provider_pool_key_lease, try_claim_admin_provider_pool_key,
-    ADMIN_PROVIDER_POOL_KEY_LEASE_TTL_MS,
-};
+pub(crate) use self::leases::release_admin_provider_pool_key_lease;
 pub(crate) use self::mutations::{
     clear_admin_provider_pool_cooldown, reset_admin_provider_pool_cost,
 };
 pub(crate) use self::reads::{
     read_admin_provider_pool_cooldown_count, read_admin_provider_pool_cooldown_counts,
-    read_admin_provider_pool_cooldown_key_ids, read_admin_provider_pool_runtime_state,
+    read_admin_provider_pool_cooldown_key_ids, read_admin_provider_pool_key_cooldown_reason,
+    read_admin_provider_pool_runtime_state,
 };
 pub(crate) use self::status::build_admin_provider_pool_status_payload;
 pub(crate) use self::writes::{

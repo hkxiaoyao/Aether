@@ -32,7 +32,8 @@ use crate::handlers::shared::provider_pool::{
     admin_provider_pool_cache_affinity_enabled, admin_provider_pool_config_from_config_value,
 };
 use crate::handlers::shared::provider_pool::{
-    try_claim_admin_provider_pool_key, AdminProviderPoolConfig, AdminProviderPoolRuntimeState,
+    read_admin_provider_pool_key_cooldown_reason, AdminProviderPoolConfig,
+    AdminProviderPoolRuntimeState,
 };
 use crate::handlers::shared::{
     parse_catalog_auth_config_json, provider_key_health_summary,
@@ -537,7 +538,7 @@ impl<'a> PoolKeyCursor<'a> {
     async fn next_queued_candidate(&mut self) -> Option<EligibleLocalExecutionCandidate> {
         while let Some(candidate) = self.queued_candidates.pop_front() {
             let mut candidate = candidate;
-            if !self.attach_pool_key_lease(&mut candidate).await {
+            if self.skip_candidate_if_runtime_cooldown(&candidate).await {
                 continue;
             }
             candidate.orchestration.pool_key_index = Some(self.next_pool_key_index);
@@ -548,43 +549,42 @@ impl<'a> PoolKeyCursor<'a> {
         None
     }
 
-    async fn attach_pool_key_lease(
+    async fn skip_candidate_if_runtime_cooldown(
         &mut self,
-        candidate: &mut EligibleLocalExecutionCandidate,
+        candidate: &EligibleLocalExecutionCandidate,
     ) -> bool {
-        if !pool_key_order_requires_exclusive_lease(&self.pool_key_order) {
-            return true;
-        }
-
-        let owner = self.state.app().tunnel.local_instance_id();
-        match try_claim_admin_provider_pool_key(
+        match read_admin_provider_pool_key_cooldown_reason(
             self.state.app().runtime_state.as_ref(),
             candidate.candidate.provider_id.as_str(),
             candidate.candidate.key_id.as_str(),
-            owner,
         )
         .await
         {
-            Ok(Some(lease)) => {
-                candidate.orchestration.pool_key_lease = Some(lease);
+            Ok(Some(_)) => {
+                self.record_skip_reason("pool_cooldown");
+                self.skipped_candidates
+                    .push(SkippedLocalExecutionCandidate {
+                        candidate: candidate.candidate.clone(),
+                        skip_reason: "pool_cooldown",
+                        transport: Some(candidate.transport.clone()),
+                        ranking: candidate.ranking.clone(),
+                        extra_data: None,
+                    });
                 true
             }
-            Ok(None) => {
-                self.record_skip_reason("pool_key_lease_busy");
-                false
-            }
+            Ok(None) => false,
             Err(err) => {
                 warn!(
-                    event_name = "pool_key_lease_claim_failed",
+                    event_name = "pool_key_cooldown_check_failed",
                     log_type = "event",
                     provider_id = %candidate.candidate.provider_id,
                     endpoint_id = %candidate.candidate.endpoint_id,
                     model_id = %candidate.candidate.model_id,
                     key_id = %candidate.candidate.key_id,
                     error = ?err,
-                    "gateway pool scheduler failed to claim pool key lease; scheduling key without lease"
+                    "gateway pool scheduler failed to read pool key cooldown; scheduling key"
                 );
-                true
+                false
             }
         }
     }
@@ -705,13 +705,6 @@ impl<'a> PoolKeyCursor<'a> {
             self.record_skip_reason(skipped_candidate.skip_reason);
         }
     }
-}
-
-fn pool_key_order_requires_exclusive_lease(order: &StoredPoolKeyCandidateOrder) -> bool {
-    !matches!(
-        order,
-        StoredPoolKeyCandidateOrder::CacheAffinity | StoredPoolKeyCandidateOrder::SingleAccount
-    )
 }
 
 fn pool_candidate_transport_policy_facts(
@@ -1137,8 +1130,7 @@ fn apply_ai_pool_orchestration(
 mod tests {
     use super::{
         apply_local_execution_pool_scheduler_with_runtime_map, build_pool_catalog_key_context,
-        pool_config_for_candidate, pool_key_order_requires_exclusive_lease, PoolCatalogKeyContext,
-        PoolKeyCursor,
+        pool_config_for_candidate, PoolCatalogKeyContext, PoolKeyCursor,
     };
     use crate::ai_serving::{
         apply_local_runtime_candidate_terminal_reason, EligibleLocalExecutionCandidate,
@@ -1146,8 +1138,7 @@ mod tests {
     };
     use crate::data::GatewayDataState;
     use crate::handlers::shared::provider_pool::{
-        record_admin_provider_pool_error, release_admin_provider_pool_key_lease,
-        try_claim_admin_provider_pool_key, AdminProviderPoolRuntimeState,
+        record_admin_provider_pool_error, AdminProviderPoolRuntimeState,
     };
     use crate::orchestration::LocalExecutionCandidateMetadata;
     use crate::{AppState, LocalExecutionRuntimeMissDiagnostic};
@@ -1902,24 +1893,6 @@ mod tests {
     }
 
     #[test]
-    fn pool_key_lease_exclusivity_follows_distribution_mode() {
-        assert!(!pool_key_order_requires_exclusive_lease(
-            &StoredPoolKeyCandidateOrder::CacheAffinity
-        ));
-        assert!(!pool_key_order_requires_exclusive_lease(
-            &StoredPoolKeyCandidateOrder::SingleAccount
-        ));
-        assert!(pool_key_order_requires_exclusive_lease(
-            &StoredPoolKeyCandidateOrder::Lru
-        ));
-        assert!(pool_key_order_requires_exclusive_lease(
-            &StoredPoolKeyCandidateOrder::LoadBalance {
-                seed: "seed".to_string()
-            }
-        ));
-    }
-
-    #[test]
     fn pool_key_cursor_records_runtime_miss_when_exhausted_without_returning_key() {
         let app = AppState::new().expect("state should build");
         let trace_id = "trace-pool-exhausted-runtime-miss";
@@ -1941,8 +1914,8 @@ mod tests {
         );
         let mut cursor = PoolKeyCursor::new(PlannerAppState::new(&app), group, None, None, None)
             .with_runtime_miss_diagnostic(trace_id, true);
-        cursor.record_skip_reason("pool_key_lease_busy");
-        cursor.record_skip_reason("pool_key_lease_busy");
+        cursor.record_skip_reason("pool_cooldown");
+        cursor.record_skip_reason("pool_cooldown");
         cursor.record_skip_reason("transport_snapshot_missing");
 
         cursor.log_exhausted();
@@ -1953,11 +1926,11 @@ mod tests {
             .expect("runtime miss diagnostic should exist");
         assert_eq!(diagnostic.reason, "all_candidates_skipped");
         assert_eq!(diagnostic.skipped_candidate_count, Some(1));
-        assert_eq!(diagnostic.skip_reasons.get("pool_key_lease_busy"), Some(&1));
+        assert_eq!(diagnostic.skip_reasons.get("pool_cooldown"), Some(&1));
     }
 
     #[tokio::test]
-    async fn pool_key_cursor_freezes_queued_candidates_after_window_refill() {
+    async fn pool_key_cursor_rechecks_cooldown_for_frozen_window_candidates() {
         let app = AppState::new().expect("state should build");
         let provider_config = Some(json!({
             "pool_advanced": {
@@ -2009,33 +1982,24 @@ mod tests {
         let second = cursor
             .next_key()
             .await
-            .expect("second key should keep the frozen queue order");
-        assert_eq!(second.candidate.key_id, "key-b");
+            .expect("second key should skip the cooled-down frozen key");
+        assert_eq!(second.candidate.key_id, "key-c");
         assert_eq!(second.orchestration.pool_key_index, Some(1));
-        let third = cursor
-            .next_key()
-            .await
-            .expect("third key should keep the frozen queue order");
-        assert_eq!(third.candidate.key_id, "key-c");
-        assert_eq!(third.orchestration.pool_key_index, Some(2));
 
         let skipped = cursor.take_skipped_candidates();
-        assert!(skipped.is_empty());
+        assert_eq!(
+            skipped
+                .iter()
+                .map(|item| (item.candidate.key_id.as_str(), item.skip_reason))
+                .collect::<Vec<_>>(),
+            vec![("key-b", "pool_cooldown")]
+        );
     }
 
     #[tokio::test]
-    async fn pool_key_cursor_skips_busy_lease_and_claims_returned_key() {
+    async fn pool_key_cursor_allows_parallel_requests_to_use_same_healthy_key() {
         let app = AppState::new().expect("state should build");
         let provider_config = Some(json!({ "pool_advanced": { "lru_enabled": true } }));
-        let held_lease = try_claim_admin_provider_pool_key(
-            app.runtime_state.as_ref(),
-            "provider-pool",
-            "key-a",
-            "test-owner",
-        )
-        .await
-        .expect("lease claim should not fail")
-        .expect("first key should be claimed by test");
         let group = sample_eligible_candidate(
             "provider-pool",
             "endpoint-1",
@@ -2052,87 +2016,19 @@ mod tests {
                 10,
                 provider_config.clone(),
             ),
-            sample_eligible_candidate("provider-pool", "endpoint-1", "key-b", 10, provider_config),
-        ]);
-
-        let candidate = cursor
-            .next_key()
-            .await
-            .expect("cursor should skip busy key and return next key");
-        assert_eq!(candidate.candidate.key_id, "key-b");
-        assert_eq!(candidate.orchestration.pool_key_index, Some(0));
-        assert_eq!(
-            cursor.skip_reason_counts.get("pool_key_lease_busy"),
-            Some(&1)
-        );
-        let returned_lease = candidate
-            .orchestration
-            .pool_key_lease
-            .clone()
-            .expect("returned key should carry its lease");
-        assert!(
-            try_claim_admin_provider_pool_key(
-                app.runtime_state.as_ref(),
+            sample_eligible_candidate(
                 "provider-pool",
+                "endpoint-1",
                 "key-b",
-                "other-owner",
-            )
-            .await
-            .expect("second claim should not fail")
-            .is_none(),
-            "returned key should remain leased until execution releases it"
-        );
-
-        release_admin_provider_pool_key_lease(app.runtime_state.as_ref(), &held_lease)
-            .await
-            .expect("held lease release should not fail");
-        release_admin_provider_pool_key_lease(app.runtime_state.as_ref(), &returned_lease)
-            .await
-            .expect("returned lease release should not fail");
-    }
-
-    #[tokio::test]
-    async fn pool_key_cursor_allows_busy_lease_for_cache_affinity_mode() {
-        let app = AppState::new().expect("state should build");
-        let provider_config = Some(json!({
-            "pool_advanced": {
-                "scheduling_presets": [
-                    {"preset": "cache_affinity", "enabled": true}
-                ]
-            }
-        }));
-        let held_lease = try_claim_admin_provider_pool_key(
-            app.runtime_state.as_ref(),
-            "provider-pool",
-            "key-a",
-            "test-owner",
-        )
-        .await
-        .expect("lease claim should not fail")
-        .expect("first key should be claimed by test");
-        let group = sample_eligible_candidate(
-            "provider-pool",
-            "endpoint-1",
-            "pool-group",
-            10,
-            provider_config.clone(),
-        );
-        let mut cursor = PoolKeyCursor::new(PlannerAppState::new(&app), group, None, None, None);
-        cursor.queued_candidates = VecDeque::from([
-            sample_eligible_candidate(
-                "provider-pool",
-                "endpoint-1",
-                "key-a",
                 10,
                 provider_config.clone(),
             ),
-            sample_eligible_candidate("provider-pool", "endpoint-1", "key-b", 10, provider_config),
         ]);
 
         let candidate = cursor
             .next_key()
             .await
-            .expect("cache-affinity cursor should allow repeated busy key");
+            .expect("cursor should return the first healthy key");
         assert_eq!(candidate.candidate.key_id, "key-a");
         assert_eq!(candidate.orchestration.pool_key_index, Some(0));
         assert!(candidate.orchestration.pool_key_lease.is_none());
@@ -2140,9 +2036,82 @@ mod tests {
             .skip_reason_counts
             .contains_key("pool_key_lease_busy"));
 
-        release_admin_provider_pool_key_lease(app.runtime_state.as_ref(), &held_lease)
+        let group = sample_eligible_candidate(
+            "provider-pool",
+            "endpoint-1",
+            "pool-group",
+            10,
+            provider_config,
+        );
+        let mut second_cursor =
+            PoolKeyCursor::new(PlannerAppState::new(&app), group, None, None, None);
+        second_cursor.queued_candidates = VecDeque::from([
+            sample_eligible_candidate(
+                "provider-pool",
+                "endpoint-1",
+                "key-a",
+                10,
+                Some(json!({ "pool_advanced": { "lru_enabled": true } })),
+            ),
+            sample_eligible_candidate(
+                "provider-pool",
+                "endpoint-1",
+                "key-b",
+                10,
+                Some(json!({ "pool_advanced": { "lru_enabled": true } })),
+            ),
+        ]);
+        let second_candidate = second_cursor
+            .next_key()
             .await
-            .expect("held lease release should not fail");
+            .expect("second request should also be allowed to pick the same healthy key");
+        assert_eq!(second_candidate.candidate.key_id, "key-a");
+        assert!(second_candidate.orchestration.pool_key_lease.is_none());
+    }
+
+    #[tokio::test]
+    async fn pool_key_cursor_skips_key_after_account_cooldown_is_recorded() {
+        let app = AppState::new().expect("state should build");
+        let provider_config = Some(json!({ "pool_advanced": { "lru_enabled": true } }));
+        let group = sample_eligible_candidate(
+            "provider-pool",
+            "endpoint-1",
+            "pool-group",
+            10,
+            provider_config.clone(),
+        );
+        let pool_config = pool_config_for_candidate(&group).expect("pool config should parse");
+        let mut cursor = PoolKeyCursor::new(PlannerAppState::new(&app), group, None, None, None);
+        cursor.queued_candidates = VecDeque::from([
+            sample_eligible_candidate(
+                "provider-pool",
+                "endpoint-1",
+                "key-a",
+                10,
+                provider_config.clone(),
+            ),
+            sample_eligible_candidate("provider-pool", "endpoint-1", "key-b", 10, provider_config),
+        ]);
+
+        record_admin_provider_pool_error(
+            app.runtime_state.as_ref(),
+            "provider-pool",
+            "key-a",
+            &pool_config,
+            429,
+            None,
+            None,
+        )
+        .await;
+
+        let candidate = cursor
+            .next_key()
+            .await
+            .expect("cursor should skip cooled-down key and return next key");
+        assert_eq!(candidate.candidate.key_id, "key-b");
+        assert_eq!(candidate.orchestration.pool_key_index, Some(0));
+        assert!(candidate.orchestration.pool_key_lease.is_none());
+        assert_eq!(cursor.skip_reason_counts.get("pool_cooldown"), Some(&1));
     }
 
     #[tokio::test]
@@ -2177,21 +2146,7 @@ mod tests {
             provider_config.clone(),
         );
         let pool_config = pool_config_for_candidate(&group).expect("pool config should parse");
-        let mut held_leases = Vec::new();
         for key_id in ["key-00000", "key-00001"] {
-            held_leases.push(
-                try_claim_admin_provider_pool_key(
-                    app.runtime_state.as_ref(),
-                    "provider-pool",
-                    key_id,
-                    "large-pool-test",
-                )
-                .await
-                .expect("lease claim should not fail")
-                .expect("test key should claim"),
-            );
-        }
-        for key_id in ["key-00002", "key-00003"] {
             record_admin_provider_pool_error(
                 app.runtime_state.as_ref(),
                 "provider-pool",
@@ -2219,22 +2174,16 @@ mod tests {
         );
 
         let mut returned_ids = Vec::new();
-        let mut returned_leases = Vec::new();
         for _ in 0..10 {
             let candidate = cursor
                 .next_key()
                 .await
                 .expect("large pool should return first page candidates");
             returned_ids.push(candidate.candidate.key_id.clone());
-            returned_leases.push(
-                candidate
-                    .orchestration
-                    .pool_key_lease
-                    .expect("lru pool candidate should carry exclusive lease"),
-            );
+            assert!(candidate.orchestration.pool_key_lease.is_none());
         }
-        assert_eq!(returned_ids.first().map(String::as_str), Some("key-00004"));
-        assert_eq!(returned_ids.last().map(String::as_str), Some("key-00013"));
+        assert_eq!(returned_ids.first().map(String::as_str), Some("key-00002"));
+        assert_eq!(returned_ids.last().map(String::as_str), Some("key-00011"));
         assert_eq!(cursor.scanned_keys, 64);
         assert!(
             cursor.queued_candidates.len() <= cursor.window_size as usize,
@@ -2251,39 +2200,18 @@ mod tests {
             None,
         )
         .await;
-        held_leases.push(
-            try_claim_admin_provider_pool_key(
-                app.runtime_state.as_ref(),
-                "provider-pool",
-                "key-00015",
-                "large-pool-test",
-            )
-            .await
-            .expect("dynamic lease claim should not fail")
-            .expect("dynamic busy key should claim"),
-        );
 
         let candidate = cursor
             .next_key()
             .await
             .expect("cursor should keep the frozen window despite later runtime changes");
-        assert_eq!(candidate.candidate.key_id, "key-00014");
+        assert_eq!(candidate.candidate.key_id, "key-00012");
         returned_ids.push(candidate.candidate.key_id.clone());
-        returned_leases.push(
-            candidate
-                .orchestration
-                .pool_key_lease
-                .expect("lru pool candidate should carry exclusive lease"),
-        );
+        assert!(candidate.orchestration.pool_key_lease.is_none());
 
         while let Some(candidate) = cursor.next_key().await {
             returned_ids.push(candidate.candidate.key_id.clone());
-            returned_leases.push(
-                candidate
-                    .orchestration
-                    .pool_key_lease
-                    .expect("lru pool candidate should carry exclusive lease"),
-            );
+            assert!(candidate.orchestration.pool_key_lease.is_none());
         }
 
         let max_returned_windows = aether_dispatch_core::DEFAULT_POOL_MAX_SCAN
@@ -2293,34 +2221,23 @@ mod tests {
                 <= (max_returned_windows * aether_dispatch_core::DEFAULT_POOL_WINDOW_SIZE) as usize,
             "cursor should only return bounded frozen windows per request"
         );
-        assert_eq!(returned_ids.len(), 125);
+        assert_eq!(returned_ids.len(), 127);
         assert_eq!(returned_ids.last().map(String::as_str), Some("key-00463"));
         assert_eq!(cursor.scanned_keys, 512);
-        assert_eq!(
-            cursor.skip_reason_counts.get("pool_key_lease_busy"),
-            Some(&3)
-        );
-        assert_eq!(cursor.skip_reason_counts.get("pool_cooldown"), Some(&2));
-        for skipped in ["key-00000", "key-00001", "key-00002", "key-00003"] {
+        assert_eq!(cursor.skip_reason_counts.get("pool_cooldown"), Some(&3));
+        assert!(!cursor
+            .skip_reason_counts
+            .contains_key("pool_key_lease_busy"));
+        for skipped in ["key-00000", "key-00001", "key-00014"] {
             assert!(
                 !returned_ids.iter().any(|key_id| key_id == skipped),
                 "{skipped} should have been skipped"
             );
         }
         assert!(
-            returned_ids.iter().any(|key_id| key_id == "key-00014"),
-            "key-00014 was already frozen in the current window"
+            returned_ids.iter().any(|key_id| key_id == "key-00015"),
+            "key-00015 should not be blocked by request-scoped leases"
         );
-        assert!(
-            !returned_ids.iter().any(|key_id| key_id == "key-00015"),
-            "key-00015 should still be skipped because exclusive lease is checked at dispatch time"
-        );
-
-        for lease in held_leases.into_iter().chain(returned_leases) {
-            release_admin_provider_pool_key_lease(app.runtime_state.as_ref(), &lease)
-                .await
-                .expect("lease release should not fail");
-        }
     }
 
     #[test]

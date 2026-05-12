@@ -180,7 +180,7 @@ describe('HorizontalRequestTimeline', () => {
     ])
   })
 
-  it('orders visible candidates by scheduling index and hides unstarted lazy candidates', async () => {
+  it('orders visible candidates by scheduling index and includes unattempted candidates', async () => {
     const trace = buildTrace([
       buildCandidate({
         id: 'cand-success',
@@ -244,7 +244,17 @@ describe('HorizontalRequestTimeline', () => {
 
     const labels = [...root.querySelectorAll<HTMLElement>('.node-label')]
       .map(label => label.textContent?.trim())
-    expect(labels).toEqual(['Provider Skipped', 'Provider Failed', 'Provider Success'])
+    expect(labels).toEqual([
+      'Provider Available',
+      'Provider Skipped',
+      'Provider Pending',
+      'Provider Failed',
+      'Provider Success',
+    ])
+
+    const nodeDots = [...root.querySelectorAll<HTMLElement>('.node-dot')]
+    expect(nodeDots[0].classList.contains('status-available')).toBe(true)
+    expect(nodeDots[2].classList.contains('status-pending')).toBe(true)
   })
 
   it('uses candidate terminal status for node colors instead of overriding with HTTP code', async () => {

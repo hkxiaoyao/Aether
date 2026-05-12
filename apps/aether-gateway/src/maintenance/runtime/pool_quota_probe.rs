@@ -16,6 +16,7 @@ use tracing::{debug, info, warn};
 
 use crate::admin_api::{
     admin_provider_pool_config, provider_oauth_runtime_endpoint_for_provider,
+    provider_type_supports_quota_refresh, reconcile_admin_fixed_provider_template_endpoints,
     refresh_antigravity_provider_quota_locally, refresh_chatgpt_web_provider_quota_locally,
     refresh_codex_provider_quota_locally, refresh_kiro_provider_quota_locally, AdminAppState,
 };
@@ -108,10 +109,7 @@ fn now_unix_secs() -> u64 {
 }
 
 fn provider_supports_quota_probe(provider_type: &str) -> bool {
-    matches!(
-        provider_type.trim().to_ascii_lowercase().as_str(),
-        "codex" | "kiro" | "antigravity" | "chatgpt_web"
-    )
+    provider_type_supports_quota_refresh(provider_type)
 }
 
 fn json_number(value: Option<&Value>) -> Option<f64> {
@@ -426,6 +424,37 @@ fn endpoint_for_probe(
     provider_oauth_runtime_endpoint_for_provider(provider_type, endpoints)
 }
 
+async fn endpoint_for_probe_with_reconcile(
+    state: &AppState,
+    admin_state: &AdminAppState<'_>,
+    provider: &StoredProviderCatalogProvider,
+    provider_type: &str,
+    endpoints_by_provider: &mut BTreeMap<String, Vec<StoredProviderCatalogEndpoint>>,
+) -> Result<Option<StoredProviderCatalogEndpoint>, GatewayError> {
+    let endpoints = endpoints_by_provider
+        .get(&provider.id)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    if let Some(endpoint) = endpoint_for_probe(provider_type, endpoints) {
+        return Ok(Some(endpoint));
+    }
+
+    if admin_state
+        .fixed_provider_template(&provider.provider_type)
+        .is_none()
+    {
+        return Ok(None);
+    }
+
+    reconcile_admin_fixed_provider_template_endpoints(admin_state, provider).await?;
+    let refreshed = state
+        .list_provider_catalog_endpoints_by_provider_ids(std::slice::from_ref(&provider.id))
+        .await?;
+    let endpoint = endpoint_for_probe(provider_type, &refreshed);
+    endpoints_by_provider.insert(provider.id.clone(), refreshed);
+    Ok(endpoint)
+}
+
 async fn refresh_provider_probe_keys(
     admin_state: &AdminAppState<'_>,
     provider: &StoredProviderCatalogProvider,
@@ -688,10 +717,15 @@ pub(crate) async fn perform_pool_quota_probe_once_with_config(
     };
 
     for (provider, provider_type, pool_config) in providers {
-        let endpoints = endpoints_by_provider
-            .remove(&provider.id)
-            .unwrap_or_default();
-        let Some(endpoint) = endpoint_for_probe(&provider_type, &endpoints) else {
+        let Some(endpoint) = endpoint_for_probe_with_reconcile(
+            state,
+            &admin_state,
+            &provider,
+            &provider_type,
+            &mut endpoints_by_provider,
+        )
+        .await?
+        else {
             summary.providers_skipped += 1;
             debug!(
                 provider_id = %provider.id,
@@ -700,6 +734,9 @@ pub(crate) async fn perform_pool_quota_probe_once_with_config(
             );
             continue;
         };
+        let endpoints = endpoints_by_provider
+            .remove(&provider.id)
+            .unwrap_or_else(|| vec![endpoint.clone()]);
 
         let interval_minutes = pool_config.probing_interval_minutes;
         let interval_seconds = interval_minutes.clamp(1, 1440).saturating_mul(60);
