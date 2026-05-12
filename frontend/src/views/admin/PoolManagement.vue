@@ -405,6 +405,12 @@
                 >
                   最后使用
                 </SortableTableHead>
+                <TableHead
+                  class="font-semibold text-center whitespace-nowrap"
+                  :style="{ width: desktopColumnWidths.score }"
+                >
+                  分数
+                </TableHead>
                 <SortableTableHead
                   class="font-semibold text-center whitespace-nowrap"
                   column-key="status"
@@ -664,6 +670,67 @@
                   <span class="text-[10px] text-muted-foreground whitespace-nowrap">
                     {{ keyUiStateMap[key.key_id]?.lastUsedRelative || '-' }}
                   </span>
+                </TableCell>
+                <TableCell class="py-3 text-center align-middle">
+                  <div class="inline-flex items-center justify-center gap-1">
+                    <span class="font-mono text-xs tabular-nums text-foreground/90">
+                      {{ formatPoolScore(key.pool_score?.score) }}
+                    </span>
+                    <Popover
+                      v-if="key.pool_score"
+                      :open="scoreDesktopPopoverOpenKeyId === key.key_id"
+                      @update:open="(open: boolean) => handleScoreDesktopPopoverToggle(key.key_id, open)"
+                    >
+                      <PopoverTrigger as-child>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          class="h-5 w-5 rounded-full border border-transparent text-muted-foreground/80 hover:border-border/60 hover:bg-muted/60 hover:text-foreground"
+                          title="查看评分计算结果"
+                          aria-label="查看评分计算结果"
+                          @click.stop
+                        >
+                          <CircleHelp class="h-3.5 w-3.5" />
+                        </Button>
+                      </PopoverTrigger>
+                      <PopoverContent
+                        v-if="scoreDesktopPopoverOpenKeyId === key.key_id"
+                        class="w-[22rem] max-w-[calc(100vw-1rem)] overflow-hidden rounded-xl border-border/60 bg-card/95 p-0 text-card-foreground shadow-xl shadow-black/5 backdrop-blur supports-[backdrop-filter]:bg-card/90"
+                        side="bottom"
+                        align="end"
+                        :side-offset="8"
+                      >
+                        <div class="text-left">
+                          <div class="flex items-center justify-between gap-3 border-b border-border/60 bg-muted/30 px-3 py-2.5">
+                            <span class="text-xs font-semibold text-foreground">评分计算结果</span>
+                            <span class="font-mono text-xs tabular-nums text-foreground/90">
+                              {{ formatPoolScore(key.pool_score?.score) }}
+                            </span>
+                          </div>
+                          <div class="space-y-2 px-3 py-2.5">
+                            <div class="flex flex-wrap items-center gap-1.5">
+                              <Badge
+                                variant="outline"
+                                class="h-5 rounded-md border-border/60 bg-background/60 px-2 text-[10px] font-normal"
+                              >
+                                {{ getPoolScoreHardStateLabel(key.pool_score?.hard_state) }}
+                              </Badge>
+                              <Badge
+                                variant="secondary"
+                                class="h-5 rounded-md px-2 text-[10px] font-normal"
+                              >
+                                {{ getPoolScoreProbeStatusLabel(key.pool_score?.probe_status) }}
+                              </Badge>
+                              <span class="text-[10px] text-muted-foreground">
+                                更新 {{ formatUnixSeconds(key.pool_score?.updated_at) }}
+                              </span>
+                            </div>
+                            <pre class="max-h-56 overflow-auto rounded-md border border-border/50 bg-muted/30 px-3 py-2 font-mono text-[11px] leading-5 text-muted-foreground whitespace-pre-wrap break-words">{{ formatPoolScoreReason(key.pool_score?.score_reason) }}</pre>
+                          </div>
+                        </div>
+                      </PopoverContent>
+                    </Popover>
+                  </div>
                 </TableCell>
                 <TableCell class="py-3 text-center">
                   <Badge
@@ -927,6 +994,68 @@
                   <div class="flex items-center justify-between gap-2">
                     <span class="text-muted-foreground">最后使用</span>
                     <span class="font-medium text-foreground/90">{{ keyUiStateMap[key.key_id]?.lastUsedRelative || '-' }}</span>
+                  </div>
+                  <div class="flex items-center justify-between gap-2">
+                    <span class="text-muted-foreground">分数</span>
+                    <div class="flex items-center gap-1">
+                      <span class="font-mono font-medium text-foreground/90 tabular-nums">
+                        {{ formatPoolScore(key.pool_score?.score) }}
+                      </span>
+                      <Popover
+                        v-if="key.pool_score"
+                        :open="scoreMobilePopoverOpenKeyId === key.key_id"
+                        @update:open="(open: boolean) => handleScoreMobilePopoverToggle(key.key_id, open)"
+                      >
+                        <PopoverTrigger as-child>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            class="h-5 w-5 rounded-full border border-transparent text-muted-foreground/80 hover:border-border/60 hover:bg-muted/60 hover:text-foreground"
+                            title="查看评分计算结果"
+                            aria-label="查看评分计算结果"
+                            @click.stop
+                          >
+                            <CircleHelp class="h-3.5 w-3.5" />
+                          </Button>
+                        </PopoverTrigger>
+                        <PopoverContent
+                          v-if="scoreMobilePopoverOpenKeyId === key.key_id"
+                          class="w-[22rem] max-w-[calc(100vw-1rem)] overflow-hidden rounded-xl border-border/60 bg-card/95 p-0 text-card-foreground shadow-xl shadow-black/5 backdrop-blur supports-[backdrop-filter]:bg-card/90"
+                          side="bottom"
+                          align="end"
+                          :side-offset="8"
+                        >
+                          <div class="text-left">
+                            <div class="flex items-center justify-between gap-3 border-b border-border/60 bg-muted/30 px-3 py-2.5">
+                              <span class="text-xs font-semibold text-foreground">评分计算结果</span>
+                              <span class="font-mono text-xs tabular-nums text-foreground/90">
+                                {{ formatPoolScore(key.pool_score?.score) }}
+                              </span>
+                            </div>
+                            <div class="space-y-2 px-3 py-2.5">
+                              <div class="flex flex-wrap items-center gap-1.5">
+                                <Badge
+                                  variant="outline"
+                                  class="h-5 rounded-md border-border/60 bg-background/60 px-2 text-[10px] font-normal"
+                                >
+                                  {{ getPoolScoreHardStateLabel(key.pool_score?.hard_state) }}
+                                </Badge>
+                                <Badge
+                                  variant="secondary"
+                                  class="h-5 rounded-md px-2 text-[10px] font-normal"
+                                >
+                                  {{ getPoolScoreProbeStatusLabel(key.pool_score?.probe_status) }}
+                                </Badge>
+                                <span class="text-[10px] text-muted-foreground">
+                                  更新 {{ formatUnixSeconds(key.pool_score?.updated_at) }}
+                                </span>
+                              </div>
+                              <pre class="max-h-56 overflow-auto rounded-md border border-border/50 bg-muted/30 px-3 py-2 font-mono text-[11px] leading-5 text-muted-foreground whitespace-pre-wrap break-words">{{ formatPoolScoreReason(key.pool_score?.score_reason) }}</pre>
+                            </div>
+                          </div>
+                        </PopoverContent>
+                      </Popover>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -1273,6 +1402,7 @@ import {
   Users,
   Settings2,
   SlidersHorizontal,
+  CircleHelp,
 } from 'lucide-vue-next'
 
 import {
@@ -1391,6 +1521,8 @@ import {
   getQuotaDisplayText,
 } from '@/utils/providerKeyQuota'
 
+type PoolKeyScore = NonNullable<PoolKeyDetail['pool_score']>
+
 const { success, error: showError, warning: showWarning } = useToast()
 const { confirm } = useConfirm()
 const { copyToClipboard } = useClipboard()
@@ -1431,6 +1563,24 @@ const poolKeyStatusFilterOptions: Array<{ value: PoolManagementViewState['status
   { value: 'active', label: '可调度' },
   { value: 'cooldown', label: '冷却中' },
   { value: 'inactive', label: '禁用' },
+]
+const poolScoreHardStateOptions = [
+  { value: 'all', label: '全部状态' },
+  { value: 'available', label: '可用' },
+  { value: 'unknown', label: '未知' },
+  { value: 'cooldown', label: '冷却' },
+  { value: 'quota_exhausted', label: '额度耗尽' },
+  { value: 'auth_invalid', label: '授权无效' },
+  { value: 'banned', label: '封禁' },
+  { value: 'inactive', label: '禁用' },
+]
+const poolScoreProbeStatusOptions = [
+  { value: 'all', label: '全部探测' },
+  { value: 'never', label: '未探测' },
+  { value: 'ok', label: '正常' },
+  { value: 'failed', label: '失败' },
+  { value: 'stale', label: '过期' },
+  { value: 'in_progress', label: '探测中' },
 ]
 
 async function loadOverview(options: { cacheTtlMs?: number } = {}) {
@@ -1662,23 +1812,25 @@ const showAccountQuotaColumn = computed(() => {
 const desktopColumnWidths = computed(() => {
   if (showAccountQuotaColumn.value) {
     return {
-      name: '22%',
-      quota: '21%',
-      stats: '15%',
+      name: '21%',
+      quota: '18%',
+      stats: '13%',
       imported: '10%',
-      lastUsed: '9%',
+      lastUsed: '8%',
+      score: '9%',
       status: '7%',
-      actions: '16%',
+      actions: '14%',
     }
   }
   return {
-    name: '34%',
+    name: '31%',
     quota: '0%',
-    stats: '16%',
-    imported: '12%',
-    lastUsed: '12%',
-    status: '9%',
-    actions: '17%',
+    stats: '15%',
+    imported: '11%',
+    lastUsed: '11%',
+    score: '9%',
+    status: '8%',
+    actions: '15%',
   }
 })
 
@@ -1703,6 +1855,8 @@ async function selectProvider(
   closeProviderProxyPopovers()
   proxyDesktopPopoverOpenKeyId.value = null
   proxyMobilePopoverOpenKeyId.value = null
+  scoreDesktopPopoverOpenKeyId.value = null
+  scoreMobilePopoverOpenKeyId.value = null
   suppressFiltersWatch = true
   if (!options.preservePagination) {
     currentPage.value = 1
@@ -1766,6 +1920,8 @@ const resettingCycleKeyId = ref<string | null>(null)
 const savingProxyKeyId = ref<string | null>(null)
 const proxyDesktopPopoverOpenKeyId = ref<string | null>(null)
 const proxyMobilePopoverOpenKeyId = ref<string | null>(null)
+const scoreDesktopPopoverOpenKeyId = ref<string | null>(null)
+const scoreMobilePopoverOpenKeyId = ref<string | null>(null)
 const deletingKeyId = ref<string | null>(null)
 const togglingKeyId = ref<string | null>(null)
 const editingPriorityKeyId = ref<string | null>(null)
@@ -2447,6 +2603,20 @@ function getKeyProxyNodeName(key: PoolKeyDetail): string | null {
   if (!key.proxy?.node_id) return null
   const node = proxyNodesStore.nodes.find(n => n.id === key.proxy?.node_id)
   return node ? node.name : `${key.proxy.node_id.slice(0, 8)}...`
+}
+
+function handleScoreDesktopPopoverToggle(keyId: string, open: boolean) {
+  scoreDesktopPopoverOpenKeyId.value = open ? keyId : null
+  if (open) {
+    scoreMobilePopoverOpenKeyId.value = null
+  }
+}
+
+function handleScoreMobilePopoverToggle(keyId: string, open: boolean) {
+  scoreMobilePopoverOpenKeyId.value = open ? keyId : null
+  if (open) {
+    scoreDesktopPopoverOpenKeyId.value = null
+  }
 }
 
 function handleProxyDesktopPopoverToggle(keyId: string, open: boolean) {
@@ -3582,6 +3752,37 @@ function formatStatUsd(value: number | string | null | undefined): string {
   if (n < 1) return `$${n.toFixed(3)}`
   if (n < 1000) return `$${n.toFixed(2)}`
   return `$${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+}
+
+function formatPoolScore(value: number | null | undefined): string {
+  const n = Number(value)
+  if (!Number.isFinite(n)) return '-'
+  return n.toFixed(3)
+}
+
+function formatPoolScoreReason(value: PoolKeyScore['score_reason'] | null | undefined): string {
+  if (!value) return '暂无计算结果'
+  try {
+    return JSON.stringify(value, null, 2)
+  } catch {
+    return String(value)
+  }
+}
+
+function getPoolScoreHardStateLabel(value: PoolKeyScore['hard_state'] | null | undefined): string {
+  if (!value) return '-'
+  return poolScoreHardStateOptions.find(item => item.value === value)?.label || value
+}
+
+function getPoolScoreProbeStatusLabel(value: PoolKeyScore['probe_status'] | null | undefined): string {
+  if (!value) return '-'
+  return poolScoreProbeStatusOptions.find(item => item.value === value)?.label || value
+}
+
+function formatUnixSeconds(seconds: number | null | undefined): string {
+  const raw = Number(seconds ?? 0)
+  if (!Number.isFinite(raw) || raw <= 0) return '-'
+  return formatRelativeTime(new Date(raw * 1000).toISOString())
 }
 
 function formatRelativeTime(isoStr: string): string {

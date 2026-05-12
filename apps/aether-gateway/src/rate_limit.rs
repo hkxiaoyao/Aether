@@ -120,6 +120,10 @@ impl FrontdoorUserRpmLimiter {
         self.resolve_system_default_limit(state).await
     }
 
+    pub(crate) fn clear_system_default_cache(&self) {
+        self.system_default_cache.clear();
+    }
+
     pub(crate) fn current_bucket(&self, now_ts: u64) -> u64 {
         self.config.current_bucket(now_ts)
     }

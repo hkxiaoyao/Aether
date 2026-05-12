@@ -14,10 +14,6 @@ pub(super) fn pool_cooldown_key(provider_id: &str, key_id: &str) -> String {
     format!("ap:{provider_id}:cooldown:{key_id}")
 }
 
-pub(super) fn pool_lease_key(provider_id: &str, key_id: &str) -> String {
-    format!("ap:{provider_id}:lease:{key_id}")
-}
-
 pub(super) fn pool_cooldown_index_key(provider_id: &str) -> String {
     format!("ap:{provider_id}:cooldown_idx")
 }

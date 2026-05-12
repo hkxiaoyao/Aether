@@ -662,19 +662,6 @@ const formatNumber = (num: number): string => {
   return num.toLocaleString('zh-CN')
 }
 
-// 计算最终状态：优先检查进行中状态，再使用外部状态码
-const computedFinalStatus = computed(() => {
-  const hasPending = trace.value?.candidates?.some(
-    c => c.status === 'pending' || c.status === 'streaming'
-  )
-  return resolveTimelineFinalStatus({
-    hasPendingCandidates: hasPending,
-    statusCode: props.overrideStatusCode,
-    requestStatus: props.requestStatus ?? usageData.value?.status,
-    traceFinalStatus: trace.value?.final_status,
-  })
-})
-
 // 获取最终状态标签
 const getFinalStatusLabel = (status: string) => {
   const labels: Record<string, string> = {
@@ -806,10 +793,24 @@ const STATUS_PRIORITY: Record<string, number> = {
 }
 
 const isParticipatedCandidate = (candidate: CandidateRecord): boolean => {
-  if (candidate.status === 'available' || candidate.status === 'unused') return false
-  if (candidate.status === 'pending' && !candidate.started_at) return false
-  return true
+  return TIMELINE_STATUS.includes(candidate.status)
 }
+
+const isLiveCandidate = (candidate: CandidateRecord): boolean => {
+  if (candidate.status === 'streaming') return true
+  return candidate.status === 'pending' && Boolean(candidate.started_at)
+}
+
+// 计算最终状态：优先检查真正已启动的进行中状态，再使用外部状态码
+const computedFinalStatus = computed(() => {
+  const hasPending = trace.value?.candidates?.some(isLiveCandidate)
+  return resolveTimelineFinalStatus({
+    hasPendingCandidates: hasPending,
+    statusCode: props.overrideStatusCode,
+    requestStatus: props.requestStatus ?? usageData.value?.status,
+    traceFinalStatus: trace.value?.final_status,
+  })
+})
 
 const compareBySchedulingOrder = (a: CandidateRecord, b: CandidateRecord): number => {
   if (a.candidate_index !== b.candidate_index) {
@@ -1695,10 +1696,7 @@ const propsRequestIsActive = computed(() => {
 })
 
 const traceHasActiveCandidate = computed(() => {
-  return rawTimeline.value.some((candidate) => {
-    const status = getDisplayStatus(candidate)
-    return status === 'pending' || status === 'streaming'
-  })
+  return rawTimeline.value.some(isLiveCandidate)
 })
 
 const traceFinalIsTerminal = computed(() => {
@@ -1751,15 +1749,12 @@ watch(groupedTimeline, (newGroups) => {
   }
 
   // 查找正在进行的组
-  const activeIdx = newGroups.findIndex(g => g.primaryStatus === 'pending' || g.primaryStatus === 'streaming')
+  const activeIdx = newGroups.findIndex(g => g.allAttempts.some(isLiveCandidate))
   if (activeIdx >= 0) {
     selectedGroupIndex.value = activeIdx
     // 选中正在进行的尝试，而非最后一个
     const group = newGroups[activeIdx]
-    const attemptIdx = group.allAttempts.findIndex(a => {
-      const status = getDisplayStatus(a)
-      return status === 'pending' || status === 'streaming'
-    })
+    const attemptIdx = group.allAttempts.findIndex(isLiveCandidate)
     selectedAttemptIndex.value = attemptIdx >= 0 ? attemptIdx : group.allAttempts.length - 1
     return
   }
@@ -1853,8 +1848,8 @@ const formatDuration = (startStr: string, endStr: string): string => {
 // 获取状态标签
 const getStatusLabel = (status: string) => {
   const labels: Record<string, string> = {
-    available: '未执行',
-    unused: '未执行',
+    available: '可用未尝试',
+    unused: '未使用',
     pending: '进行中',
     streaming: '传输中',
     stream_interrupted: '流中断',

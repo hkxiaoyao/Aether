@@ -248,10 +248,15 @@ impl AppState {
         &self,
         record: aether_data::repository::users::UpsertUserGroupRecord,
     ) -> Result<Option<aether_data::repository::users::StoredUserGroup>, GatewayError> {
-        self.data
+        let group = self
+            .data
             .create_user_group(record)
             .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        if group.is_some() {
+            self.invalidate_auth_context_cache();
+        }
+        Ok(group)
     }
 
     pub(crate) async fn update_user_group(
@@ -259,17 +264,27 @@ impl AppState {
         group_id: &str,
         record: aether_data::repository::users::UpsertUserGroupRecord,
     ) -> Result<Option<aether_data::repository::users::StoredUserGroup>, GatewayError> {
-        self.data
+        let group = self
+            .data
             .update_user_group(group_id, record)
             .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        if group.is_some() {
+            self.invalidate_auth_context_cache();
+        }
+        Ok(group)
     }
 
     pub(crate) async fn delete_user_group(&self, group_id: &str) -> Result<bool, GatewayError> {
-        self.data
+        let deleted = self
+            .data
             .delete_user_group(group_id)
             .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        if deleted {
+            self.invalidate_auth_context_cache();
+        }
+        Ok(deleted)
     }
 
     pub(crate) async fn list_user_group_members(
@@ -287,10 +302,13 @@ impl AppState {
         group_id: &str,
         user_ids: &[String],
     ) -> Result<Vec<aether_data::repository::users::StoredUserGroupMember>, GatewayError> {
-        self.data
+        let members = self
+            .data
             .replace_user_group_members(group_id, user_ids)
             .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        self.invalidate_auth_context_cache();
+        Ok(members)
     }
 
     pub(crate) async fn list_user_groups_for_user(
@@ -318,10 +336,13 @@ impl AppState {
         user_id: &str,
         group_ids: &[String],
     ) -> Result<Vec<aether_data::repository::users::StoredUserGroup>, GatewayError> {
-        self.data
+        let groups = self
+            .data
             .replace_user_groups_for_user(user_id, group_ids)
             .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        self.invalidate_auth_context_cache();
+        Ok(groups)
     }
 
     pub(crate) async fn add_user_to_group(
@@ -329,10 +350,15 @@ impl AppState {
         group_id: &str,
         user_id: &str,
     ) -> Result<bool, GatewayError> {
-        self.data
+        let added = self
+            .data
             .add_user_to_group(group_id, user_id)
             .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        if added {
+            self.invalidate_auth_context_cache();
+        }
+        Ok(added)
     }
 
     pub(crate) async fn is_other_user_auth_email_taken(
@@ -417,13 +443,19 @@ impl AppState {
                 .lock()
                 .expect("auth user store should lock")
                 .insert(user.id.clone(), user.clone());
+            self.invalidate_auth_context_cache();
             return Ok(Some(user));
         }
 
-        self.data
+        let user = self
+            .data
             .update_local_auth_user_profile(user_id, email, username)
             .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        if user.is_some() {
+            self.invalidate_auth_context_cache();
+        }
+        Ok(user)
     }
 
     pub(crate) async fn update_local_auth_user_password_hash(
@@ -606,10 +638,14 @@ impl AppState {
                 user.is_active = is_active;
             }
             let _ = (rate_limit_present, rate_limit);
-            return Ok(Some(user.clone()));
+            let user = user.clone();
+            drop(guard);
+            self.invalidate_auth_context_cache();
+            return Ok(Some(user));
         }
 
-        self.data
+        let user = self
+            .data
             .update_local_auth_user_admin_fields(
                 user_id,
                 role,
@@ -624,7 +660,11 @@ impl AppState {
                 is_active,
             )
             .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        if user.is_some() {
+            self.invalidate_auth_context_cache();
+        }
+        Ok(user)
     }
 
     pub(crate) async fn update_local_auth_user_policy_modes(
@@ -651,10 +691,14 @@ impl AppState {
                 user.allowed_models_mode = mode;
             }
             let _ = rate_limit_mode;
-            return Ok(Some(user.clone()));
+            let user = user.clone();
+            drop(guard);
+            self.invalidate_auth_context_cache();
+            return Ok(Some(user));
         }
 
-        self.data
+        let user = self
+            .data
             .update_local_auth_user_policy_modes(
                 user_id,
                 allowed_providers_mode,
@@ -663,7 +707,11 @@ impl AppState {
                 rate_limit_mode,
             )
             .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        if user.is_some() {
+            self.invalidate_auth_context_cache();
+        }
+        Ok(user)
     }
 
     pub(crate) async fn touch_auth_user_last_login(
@@ -820,4 +868,91 @@ fn normalized_user_group_ids(group_ids: &[String]) -> BTreeSet<String> {
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use aether_data::repository::users::{InMemoryUserReadRepository, UpsertUserGroupRecord};
+
+    use crate::control::GatewayControlAuthContext;
+    use crate::data::GatewayDataState;
+    use crate::AppState;
+
+    fn user_group_record(
+        allowed_models: Option<Vec<&str>>,
+        allowed_models_mode: &str,
+    ) -> UpsertUserGroupRecord {
+        UpsertUserGroupRecord {
+            name: "Team".to_string(),
+            description: None,
+            priority: 0,
+            allowed_providers: None,
+            allowed_providers_mode: "unrestricted".to_string(),
+            allowed_api_formats: None,
+            allowed_api_formats_mode: "unrestricted".to_string(),
+            allowed_models: allowed_models.map(|values| {
+                values
+                    .into_iter()
+                    .map(ToOwned::to_owned)
+                    .collect::<Vec<_>>()
+            }),
+            allowed_models_mode: allowed_models_mode.to_string(),
+            rate_limit: None,
+            rate_limit_mode: "inherit".to_string(),
+        }
+    }
+
+    fn cached_auth_context() -> GatewayControlAuthContext {
+        GatewayControlAuthContext {
+            user_id: "user-1".to_string(),
+            api_key_id: "key-1".to_string(),
+            username: Some("alice".to_string()),
+            api_key_name: Some("default".to_string()),
+            balance_remaining: None,
+            access_allowed: true,
+            user_rate_limit: None,
+            api_key_rate_limit: None,
+            api_key_is_standalone: false,
+            admin_bypass_limits: false,
+            local_rejection: None,
+            allowed_models: Some(vec!["gpt-4.1".to_string()]),
+        }
+    }
+
+    #[tokio::test]
+    async fn updating_user_group_invalidates_cached_auth_context() {
+        let repository = Arc::new(InMemoryUserReadRepository::default());
+        let state = AppState::new()
+            .expect("state should build")
+            .with_data_state_for_tests(GatewayDataState::with_user_reader_for_tests(repository));
+        let group = state
+            .create_user_group(user_group_record(Some(vec!["gpt-4.1"]), "specific"))
+            .await
+            .expect("group should create")
+            .expect("group should exist");
+
+        let cache_key = "auth-context-cache-key".to_string();
+        let ttl = Duration::from_secs(60);
+        state
+            .auth_context_cache
+            .insert(cache_key.clone(), cached_auth_context(), ttl, 10);
+        assert!(state
+            .auth_context_cache
+            .get_fresh(&cache_key, ttl)
+            .is_some());
+
+        state
+            .update_user_group(&group.id, user_group_record(None, "unrestricted"))
+            .await
+            .expect("group should update")
+            .expect("group should exist after update");
+
+        assert!(state
+            .auth_context_cache
+            .get_fresh(&cache_key, ttl)
+            .is_none());
+    }
 }

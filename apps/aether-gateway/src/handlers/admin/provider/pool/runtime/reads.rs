@@ -7,7 +7,7 @@ use crate::handlers::admin::provider::pool::config::admin_provider_pool_cache_af
 use crate::handlers::admin::provider::shared::support::{
     AdminProviderPoolConfig, AdminProviderPoolRuntimeState,
 };
-use aether_runtime_state::RuntimeState;
+use aether_runtime_state::{DataLayerError, RuntimeState};
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::warn;
@@ -201,4 +201,14 @@ pub(crate) async fn read_admin_provider_pool_cooldown_key_ids(
         .set_members(&pool_cooldown_index_key(provider_id))
         .await
         .unwrap_or_default()
+}
+
+pub(crate) async fn read_admin_provider_pool_key_cooldown_reason(
+    runtime: &RuntimeState,
+    provider_id: &str,
+    key_id: &str,
+) -> Result<Option<String>, DataLayerError> {
+    runtime
+        .kv_get(&pool_cooldown_key(provider_id, key_id))
+        .await
 }
