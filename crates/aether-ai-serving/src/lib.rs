@@ -101,8 +101,11 @@ pub use pool_scheduler::{
     AI_POOL_COST_LIMIT_REACHED_SKIP_REASON,
 };
 pub use pool_scores::{
-    probe_freshness_score, score_pool_member, PoolMemberScoreInput, PoolMemberScoreOutput,
-    POOL_SCORE_VERSION, PROBE_FRESHNESS_TTL_SECONDS,
+    probe_freshness_score, probe_freshness_score_with_ttl, score_pool_member,
+    score_pool_member_with_rules, PoolMemberScoreInput, PoolMemberScoreOutput,
+    PoolMemberScoreRules, PoolMemberScoreWeights, POOL_SCORE_VERSION,
+    PROBE_FAILURE_COOLDOWN_THRESHOLD, PROBE_FAILURE_PENALTY, PROBE_FRESHNESS_TTL_SECONDS,
+    REQUEST_FAILURE_PENALTY, UNSCHEDULABLE_SCORE_CAP,
 };
 pub use ranking_metadata::append_ai_ranking_metadata_to_object;
 pub use report_context::{

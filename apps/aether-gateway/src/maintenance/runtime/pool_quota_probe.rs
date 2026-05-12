@@ -21,6 +21,8 @@ use crate::admin_api::{
 };
 use crate::{AppState, GatewayError};
 
+use super::pool_score_rebuild::ensure_provider_key_pool_scores_for_keys;
+
 const POOL_QUOTA_PROBE_REDIS_PREFIX: &str = "ap:quota_probe:last";
 const POOL_QUOTA_PROBE_DEFAULT_SCAN_INTERVAL_SECONDS: u64 = 60;
 const POOL_QUOTA_PROBE_MIN_SCAN_INTERVAL_SECONDS: u64 = 15;
@@ -495,7 +497,9 @@ async fn record_score_probe_results_from_payload(
                 key_id,
                 attempted_at,
                 probe_result_succeeded(item),
-                probe_result_hard_state(item),
+                probe_result_hard_state(item).or_else(|| {
+                    (!probe_result_succeeded(item)).then_some(PoolMemberHardState::Cooldown)
+                }),
                 serde_json::json!({
                     "last_probe": {
                         "source": "pool_quota_probe",
@@ -520,7 +524,7 @@ async fn record_score_probe_results_from_payload(
             key_id,
             attempted_at,
             false,
-            None,
+            Some(PoolMemberHardState::Cooldown),
             serde_json::json!({
                 "last_probe": {
                     "source": "pool_quota_probe",
@@ -650,12 +654,7 @@ pub(crate) async fn perform_pool_quota_probe_once_with_config(
         .filter_map(|(provider, provider_type)| {
             let pool_config = admin_provider_pool_config(&provider)?;
             if pool_config.probing_enabled {
-                Some((
-                    provider,
-                    provider_type,
-                    pool_config.probing_interval_minutes,
-                    pool_config.probe_concurrency.clamp(1, 64) as usize,
-                ))
+                Some((provider, provider_type, pool_config))
             } else {
                 None
             }
@@ -668,7 +667,7 @@ pub(crate) async fn perform_pool_quota_probe_once_with_config(
 
     let provider_ids = providers
         .iter()
-        .map(|(provider, _, _, _)| provider.id.clone())
+        .map(|(provider, _, _)| provider.id.clone())
         .collect::<Vec<_>>();
     let mut endpoints_by_provider = BTreeMap::<String, Vec<StoredProviderCatalogEndpoint>>::new();
     for endpoint in state
@@ -688,7 +687,7 @@ pub(crate) async fn perform_pool_quota_probe_once_with_config(
         ..PoolQuotaProbeRunSummary::empty()
     };
 
-    for (provider, provider_type, interval_minutes, probe_concurrency) in providers {
+    for (provider, provider_type, pool_config) in providers {
         let endpoints = endpoints_by_provider
             .remove(&provider.id)
             .unwrap_or_default();
@@ -702,6 +701,7 @@ pub(crate) async fn perform_pool_quota_probe_once_with_config(
             continue;
         };
 
+        let interval_minutes = pool_config.probing_interval_minutes;
         let interval_seconds = interval_minutes.clamp(1, 1440).saturating_mul(60);
         let keys = select_keys_for_provider(
             state,
@@ -722,11 +722,44 @@ pub(crate) async fn perform_pool_quota_probe_once_with_config(
         summary.selected_keys += selected_count;
 
         let selected_key_ids = keys.iter().map(|key| key.id.clone()).collect::<Vec<_>>();
+        let score_ensure_budget = (pool_config.score_fallback_scan_limit as usize)
+            .min(50_000)
+            .max(selected_count.min(50_000));
+        match ensure_provider_key_pool_scores_for_keys(
+            state,
+            &provider,
+            &pool_config,
+            &endpoints,
+            &keys,
+            now_ts,
+            score_ensure_budget,
+        )
+        .await
+        {
+            Ok(upserted) if upserted > 0 => {
+                debug!(
+                    provider_id = %provider.id,
+                    key_count = selected_count,
+                    scores_upserted = upserted,
+                    "gateway pool quota probe: ensured score rows for selected probe keys"
+                );
+            }
+            Ok(_) => {}
+            Err(err) => {
+                warn!(
+                    provider_id = %provider.id,
+                    key_count = selected_count,
+                    error = ?err,
+                    "gateway pool quota probe: failed to ensure score rows for selected probe keys"
+                );
+            }
+        }
         for key_id in &selected_key_ids {
             record_score_probe_in_progress_for_key(state, &provider.id, key_id, now_ts).await;
         }
 
         let provider_short_id = provider.id.chars().take(8).collect::<String>();
+        let probe_concurrency = pool_config.probe_concurrency.clamp(1, 64) as usize;
         let probe_concurrency = probe_concurrency.min(config.global_concurrency).max(1);
         let probe_results = stream::iter(keys.into_iter().map(|key| {
             let key_id = key.id.clone();

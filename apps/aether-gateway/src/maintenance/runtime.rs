@@ -70,8 +70,9 @@ pub(crate) use pool_quota_probe::{
     PoolQuotaProbeWorkerConfig,
 };
 pub(crate) use pool_score_rebuild::{
-    perform_pool_score_rebuild_once, perform_pool_score_rebuild_once_with_config,
-    spawn_pool_score_rebuild_worker, PoolScoreRebuildRunSummary, PoolScoreRebuildWorkerConfig,
+    ensure_provider_key_pool_scores_for_keys, perform_pool_score_rebuild_once,
+    perform_pool_score_rebuild_once_with_config, spawn_pool_score_rebuild_worker,
+    PoolScoreRebuildRunSummary, PoolScoreRebuildWorkerConfig,
 };
 pub(crate) use provider_checkin::{perform_provider_checkin_once, ProviderCheckinRunSummary};
 use proxy_node_metrics_cleanup::*;

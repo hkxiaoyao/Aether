@@ -70,6 +70,7 @@ impl InMemoryPoolMemberScoreRepository {
         scores.sort_by(|left, right| {
             probe_priority(left)
                 .cmp(&probe_priority(right))
+                .then_with(|| right.probe_failure_count.cmp(&left.probe_failure_count))
                 .then_with(|| {
                     left.last_probe_success_at
                         .unwrap_or(0)

@@ -1,4 +1,6 @@
-use aether_ai_serving::{score_pool_member, PoolMemberScoreInput, POOL_SCORE_VERSION};
+use aether_ai_serving::{
+    score_pool_member_with_rules, PoolMemberScoreInput, PoolMemberScoreRules, POOL_SCORE_VERSION,
+};
 use aether_data_contracts::repository::pool_scores::{
     PoolMemberIdentity, PoolMemberProbeStatus, PoolScoreScope, UpsertPoolMemberScore,
     POOL_SCORE_SCOPE_KIND_MODEL,
@@ -15,6 +17,7 @@ pub(crate) fn build_provider_key_pool_score_upsert(
     model_id: Option<&str>,
     existing: Option<&aether_data_contracts::repository::pool_scores::StoredPoolMemberScore>,
     now_unix_secs: u64,
+    score_rules: PoolMemberScoreRules,
 ) -> UpsertPoolMemberScore {
     let identity = PoolMemberIdentity::provider_api_key(key.provider_id.clone(), key.id.clone());
     let scope = provider_key_pool_score_scope(api_format, model_id);
@@ -26,7 +29,7 @@ pub(crate) fn build_provider_key_pool_score_upsert(
         existing,
         now_unix_secs,
     );
-    let output = score_pool_member(&input);
+    let output = score_pool_member_with_rules(&input, score_rules);
     UpsertPoolMemberScore {
         id: provider_key_pool_score_id(&identity, &scope),
         identity,
@@ -139,6 +142,7 @@ fn provider_key_score_input(
         total_cost_usd: key.total_cost_usd,
         last_used_at: key.last_used_at_unix_secs,
         last_probe_success_at: existing.and_then(|score| score.last_probe_success_at),
+        probe_failure_count: existing.map(|score| score.probe_failure_count).unwrap_or(0),
         probe_status: existing
             .map(|score| score.probe_status)
             .unwrap_or(PoolMemberProbeStatus::Never),

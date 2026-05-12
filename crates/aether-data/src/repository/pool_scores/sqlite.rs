@@ -223,6 +223,7 @@ impl PoolScoreReadRepository for SqlitePoolMemberScoreRepository {
      WHEN probe_status = 'stale' THEN 3
      ELSE 4
    END ASC,
+   probe_failure_count DESC,
    COALESCE(last_probe_success_at, 0) ASC,
    COALESCE(last_scheduled_at, 0) DESC,
    member_id ASC

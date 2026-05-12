@@ -3,10 +3,14 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use aether_data_contracts::repository::global_models::AdminProviderModelListQuery;
 use aether_data_contracts::repository::pool_scores::GetPoolMemberScoresByIdsQuery;
+use aether_data_contracts::repository::provider_catalog::{
+    StoredProviderCatalogEndpoint, StoredProviderCatalogKey, StoredProviderCatalogProvider,
+};
 use tracing::{debug, info, warn};
 
 use crate::admin_api::admin_provider_pool_config;
 use crate::ai_serving::build_provider_key_pool_score_upsert;
+use crate::handlers::shared::provider_pool::AdminProviderPoolConfig;
 use crate::{AppState, GatewayError};
 
 const POOL_SCORE_REBUILD_DEFAULT_INTERVAL_SECONDS: u64 = 300;
@@ -130,6 +134,136 @@ struct ProviderScoreBuildItem {
     score_id: String,
 }
 
+pub(crate) async fn ensure_provider_key_pool_scores_for_keys(
+    state: &AppState,
+    provider: &StoredProviderCatalogProvider,
+    pool_config: &AdminProviderPoolConfig,
+    endpoints: &[StoredProviderCatalogEndpoint],
+    keys: &[StoredProviderCatalogKey],
+    now_unix_secs: u64,
+    max_upserts: usize,
+) -> Result<usize, GatewayError> {
+    if max_upserts == 0
+        || keys.is_empty()
+        || !state.data.has_pool_score_reader()
+        || !state.data.has_pool_score_writer()
+    {
+        return Ok(0);
+    }
+
+    let endpoints = endpoints
+        .iter()
+        .filter(|endpoint| endpoint.is_active && !endpoint.api_format.trim().is_empty())
+        .collect::<Vec<_>>();
+    let keys = keys
+        .iter()
+        .filter(|key| key.is_active && key.provider_id == provider.id)
+        .collect::<Vec<_>>();
+    if endpoints.is_empty() || keys.is_empty() {
+        return Ok(0);
+    }
+
+    let models = state
+        .list_admin_provider_models(&AdminProviderModelListQuery {
+            provider_id: provider.id.clone(),
+            is_active: Some(true),
+            offset: 0,
+            limit: 10_000,
+        })
+        .await?
+        .into_iter()
+        .filter(|model| model.is_available)
+        .collect::<Vec<_>>();
+    if models.is_empty() {
+        return Ok(0);
+    }
+
+    let max_items = endpoints
+        .len()
+        .saturating_mul(models.len())
+        .saturating_mul(keys.len())
+        .min(max_upserts);
+    let mut build_items = Vec::with_capacity(max_items);
+    'outer: for (endpoint_index, endpoint) in endpoints.iter().enumerate() {
+        for (model_index, model) in models.iter().enumerate() {
+            for (key_index, key) in keys.iter().enumerate() {
+                let draft = build_provider_key_pool_score_upsert(
+                    key,
+                    provider.provider_type.as_str(),
+                    endpoint.api_format.trim(),
+                    Some(model.id.as_str()),
+                    None,
+                    now_unix_secs,
+                    pool_config.score_rules,
+                );
+                build_items.push(ProviderScoreBuildItem {
+                    endpoint_index,
+                    model_index,
+                    key_index,
+                    score_id: draft.id,
+                });
+                if build_items.len() >= max_upserts {
+                    break 'outer;
+                }
+            }
+        }
+    }
+    if build_items.is_empty() {
+        return Ok(0);
+    }
+
+    let existing_score_ids = state
+        .data
+        .get_pool_member_scores_by_ids(&GetPoolMemberScoresByIdsQuery {
+            ids: build_items
+                .iter()
+                .map(|item| item.score_id.clone())
+                .collect(),
+        })
+        .await
+        .unwrap_or_else(|err| {
+            debug!(
+                provider_id = %provider.id,
+                error = ?err,
+                "gateway pool score ensure: failed to read existing scores by id"
+            );
+            Vec::new()
+        })
+        .into_iter()
+        .map(|score| score.id)
+        .collect::<std::collections::BTreeSet<_>>();
+
+    let mut upserted = 0usize;
+    for item in &build_items {
+        if existing_score_ids.contains(&item.score_id) {
+            continue;
+        }
+        let endpoint = endpoints[item.endpoint_index];
+        let model = &models[item.model_index];
+        let key = keys[item.key_index];
+        let upsert = build_provider_key_pool_score_upsert(
+            key,
+            provider.provider_type.as_str(),
+            endpoint.api_format.trim(),
+            Some(model.id.as_str()),
+            None,
+            now_unix_secs,
+            pool_config.score_rules,
+        );
+        if state
+            .data
+            .upsert_pool_member_score(upsert)
+            .await
+            .map_err(|err| GatewayError::Internal(format!("{err:?}")))?
+            .is_some()
+        {
+            upserted = upserted.saturating_add(1);
+        }
+    }
+
+    Ok(upserted)
+}
+
 pub(crate) async fn perform_pool_score_rebuild_once_with_config(
     state: &AppState,
     config: PoolScoreRebuildWorkerConfig,
@@ -145,16 +279,18 @@ pub(crate) async fn perform_pool_score_rebuild_once_with_config(
         .list_provider_catalog_providers(true)
         .await?
         .into_iter()
-        .filter(|provider| admin_provider_pool_config(provider).is_some())
+        .filter_map(|provider| {
+            admin_provider_pool_config(&provider).map(|config| (provider, config))
+        })
         .collect::<Vec<_>>();
-    providers.sort_by(|left, right| left.id.cmp(&right.id));
+    providers.sort_by(|left, right| left.0.id.cmp(&right.0.id));
     if providers.is_empty() {
         return Ok(PoolScoreRebuildRunSummary::empty());
     }
 
     let provider_ids = providers
         .iter()
-        .map(|provider| provider.id.clone())
+        .map(|(provider, _)| provider.id.clone())
         .collect::<Vec<_>>();
     let mut endpoints_by_provider = BTreeMap::new();
     for endpoint in state
@@ -196,7 +332,7 @@ pub(crate) async fn perform_pool_score_rebuild_once_with_config(
             break;
         }
         last_provider_index = Some(provider_index);
-        let provider = providers[provider_index].clone();
+        let (provider, pool_config) = providers[provider_index].clone();
         let endpoints = endpoints_by_provider
             .remove(&provider.id)
             .unwrap_or_default();
@@ -252,6 +388,7 @@ pub(crate) async fn perform_pool_score_rebuild_once_with_config(
                 Some(model.id.as_str()),
                 None,
                 now,
+                pool_config.score_rules,
             );
             build_items.push(ProviderScoreBuildItem {
                 endpoint_index,
@@ -306,6 +443,7 @@ pub(crate) async fn perform_pool_score_rebuild_once_with_config(
                 Some(model.id.as_str()),
                 existing,
                 now,
+                pool_config.score_rules,
             );
             if state
                 .data
