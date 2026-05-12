@@ -200,6 +200,7 @@ dependencies = [
  "hmac",
  "http",
  "ldap3",
+ "md-5",
  "parking_lot",
  "regex",
  "reqwest",

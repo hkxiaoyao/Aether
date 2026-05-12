@@ -26,6 +26,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 mod support_announcements;
 #[path = "support/auth.rs"]
 mod support_auth;
+#[path = "support/billing.rs"]
+mod support_billing;
 #[path = "support/dashboard.rs"]
 mod support_dashboard;
 #[path = "support/install.rs"]
@@ -62,6 +64,7 @@ use self::support_auth::{
     build_auth_error_response, build_auth_json_response, build_auth_registration_settings_payload,
     build_auth_settings_payload, extract_client_device_id, maybe_build_local_auth_response,
 };
+use self::support_billing::maybe_build_local_billing_response;
 use self::support_dashboard::maybe_build_local_dashboard_response;
 use self::support_install::{
     handle_users_me_api_key_install_session_create, maybe_build_local_install_response,
@@ -141,6 +144,15 @@ pub(crate) async fn maybe_build_local_public_support_response(
     if decision.route_family.as_deref() == Some("wallet") {
         if let Some(response) =
             maybe_build_local_wallet_response(state, request_context, headers, request_body).await
+        {
+            return Some(response);
+        }
+        return Some(build_unhandled_public_support_response(request_context));
+    }
+
+    if decision.route_family.as_deref() == Some("billing") {
+        if let Some(response) =
+            maybe_build_local_billing_response(state, request_context, headers, request_body).await
         {
             return Some(response);
         }
