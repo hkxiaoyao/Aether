@@ -756,7 +756,11 @@ impl Config {
         hw_info: &HardwareInfo,
     ) -> anyhow::Result<TunnelPoolSizing> {
         let per_tunnel_capacity = u64::from(self.tunnel_max_streams.unwrap_or(128).max(1));
-        let estimated = hw_info.estimated_max_concurrency.max(per_tunnel_capacity);
+        let estimated = self
+            .max_in_flight_streams
+            .and_then(|limit| u64::try_from(limit).ok())
+            .unwrap_or(hw_info.estimated_max_concurrency)
+            .max(per_tunnel_capacity);
         let cpu_soft_cap = u64::from(hw_info.cpu_cores.max(1))
             .saturating_mul(AUTO_TUNNEL_CONNECTIONS_PER_CPU_CAP)
             .clamp(
@@ -1597,6 +1601,36 @@ node_name = "proxy-test"
             "proxy-test",
             "--tunnel-max-streams",
             "200",
+        ]);
+        let hw = HardwareInfo {
+            cpu_cores: 1,
+            total_memory_mb: 183,
+            os_info: "test".to_string(),
+            fd_limit: 65_535,
+            estimated_max_concurrency: 2_000,
+        };
+
+        let sizing = config
+            .resolve_tunnel_pool_sizing(&hw)
+            .expect("sizing should resolve");
+        assert_eq!(sizing.initial_connections, 2);
+        assert_eq!(sizing.max_connections, 4);
+    }
+
+    #[test]
+    fn auto_tunnel_pool_sizing_respects_stream_admission_limit() {
+        let config = Config::parse_from([
+            "aether-proxy",
+            "--aether-url",
+            "https://example.com",
+            "--management-token",
+            "ae_test",
+            "--node-name",
+            "proxy-test",
+            "--tunnel-max-streams",
+            "45",
+            "--max-in-flight-streams",
+            "45",
         ]);
         let hw = HardwareInfo {
             cpu_cores: 1,
