@@ -15,7 +15,7 @@ use serde_json::Value;
 use tracing::{debug, info, warn};
 
 use crate::admin_api::{
-    admin_provider_pool_config, provider_oauth_runtime_endpoint_for_provider,
+    admin_provider_pool_config, provider_oauth_maintenance_endpoint_for_provider,
     provider_type_supports_quota_refresh, reconcile_admin_fixed_provider_template_endpoints,
     refresh_antigravity_provider_quota_locally, refresh_chatgpt_web_provider_quota_locally,
     refresh_codex_provider_quota_locally, refresh_kiro_provider_quota_locally, AdminAppState,
@@ -421,7 +421,7 @@ fn endpoint_for_probe(
     provider_type: &str,
     endpoints: &[StoredProviderCatalogEndpoint],
 ) -> Option<StoredProviderCatalogEndpoint> {
-    provider_oauth_runtime_endpoint_for_provider(provider_type, endpoints)
+    provider_oauth_maintenance_endpoint_for_provider(provider_type, endpoints)
 }
 
 async fn endpoint_for_probe_with_reconcile(

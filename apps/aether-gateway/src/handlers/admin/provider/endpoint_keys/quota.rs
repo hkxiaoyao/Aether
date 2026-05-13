@@ -21,7 +21,7 @@ use super::super::oauth::quota::shared::normalize_string_id_list;
 use super::super::oauth::quota::shared::{
     provider_type_supports_quota_refresh, unsupported_provider_quota_refresh_message,
 };
-use super::super::oauth::runtime::provider_oauth_runtime_endpoint_for_provider;
+use super::super::oauth::runtime::provider_oauth_maintenance_endpoint_for_provider;
 use super::super::write::provider::reconcile_admin_fixed_provider_template_endpoints;
 
 fn unsupported_provider_quota_refresh_response(provider_type: &str) -> Response<Body> {
@@ -115,7 +115,7 @@ pub(super) async fn maybe_handle(
         .list_provider_catalog_endpoints_by_provider_ids(std::slice::from_ref(&provider_id))
         .await?;
     let mut endpoint =
-        provider_oauth_runtime_endpoint_for_provider(&normalized_provider_type, &endpoints);
+        provider_oauth_maintenance_endpoint_for_provider(&normalized_provider_type, &endpoints);
 
     if endpoint.is_none() && is_fixed_provider {
         if !state.has_provider_catalog_data_writer() {
@@ -137,7 +137,7 @@ pub(super) async fn maybe_handle(
             .list_provider_catalog_endpoints_by_provider_ids(std::slice::from_ref(&provider_id))
             .await?;
         endpoint =
-            provider_oauth_runtime_endpoint_for_provider(&normalized_provider_type, &endpoints);
+            provider_oauth_maintenance_endpoint_for_provider(&normalized_provider_type, &endpoints);
     }
 
     if !provider_type_supports_quota_refresh(&normalized_provider_type) {

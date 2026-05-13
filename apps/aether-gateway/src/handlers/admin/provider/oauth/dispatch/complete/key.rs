@@ -128,7 +128,6 @@ pub(super) async fn handle_admin_provider_oauth_complete_key(
     };
     let endpoint_resolution =
         resolve_provider_oauth_runtime_endpoints(state, &provider, &provider_type).await?;
-    let endpoints = endpoint_resolution.endpoints;
     let runtime_endpoint = endpoint_resolution.runtime_endpoint;
     let request_proxy = state
         .resolve_admin_provider_oauth_operation_proxy_snapshot(
@@ -223,10 +222,7 @@ pub(super) async fn handle_admin_provider_oauth_complete_key(
     let mut account_state_recheck_attempted = false;
     let mut account_state_recheck_error = None::<String>;
     if provider_type == "codex" {
-        if let Some(endpoint) = endpoints.into_iter().find(|endpoint| {
-            endpoint.is_active
-                && crate::ai_serving::is_openai_responses_format(&endpoint.api_format)
-        }) {
+        if let Some(endpoint) = runtime_endpoint {
             let refreshed_key = state
                 .read_provider_catalog_keys_by_ids(std::slice::from_ref(&key_id))
                 .await?

@@ -15,7 +15,7 @@ use aether_data::repository::oauth_providers::{
 use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
 use aether_data::repository::proxy_nodes::InMemoryProxyNodeRepository;
 use aether_data_contracts::repository::provider_catalog::{
-    ProviderCatalogReadRepository, ProviderCatalogWriteRepository,
+    ProviderCatalogReadRepository, ProviderCatalogWriteRepository, StoredProviderCatalogEndpoint,
 };
 use axum::body::{to_bytes, Body, Bytes};
 use axum::response::{IntoResponse, Response};
@@ -5267,6 +5267,39 @@ fn gateway_manual_kiro_oauth_refresh_reconciles_missing_fixed_endpoint() {
 }
 
 async fn gateway_manual_kiro_oauth_refresh_reconciles_missing_fixed_endpoint_impl() {
+    run_gateway_manual_kiro_oauth_refresh_maintenance_endpoint_test(None, None, true).await;
+}
+
+#[test]
+fn gateway_manual_kiro_oauth_refresh_uses_disabled_fixed_endpoint_for_maintenance() {
+    run_manual_kiro_oauth_refresh_test(
+        "gateway_manual_kiro_oauth_refresh_uses_disabled_fixed_endpoint_for_maintenance",
+        gateway_manual_kiro_oauth_refresh_uses_disabled_fixed_endpoint_for_maintenance_impl,
+    );
+}
+
+async fn gateway_manual_kiro_oauth_refresh_uses_disabled_fixed_endpoint_for_maintenance_impl() {
+    let mut endpoint = sample_endpoint(
+        "endpoint-kiro-disabled-maintenance",
+        "provider-kiro-oauth-refresh",
+        "claude:messages",
+        "https://q.{region}.amazonaws.com",
+    );
+    endpoint.is_active = false;
+
+    run_gateway_manual_kiro_oauth_refresh_maintenance_endpoint_test(
+        Some(endpoint),
+        Some("endpoint-kiro-disabled-maintenance"),
+        false,
+    )
+    .await;
+}
+
+async fn run_gateway_manual_kiro_oauth_refresh_maintenance_endpoint_test(
+    initial_endpoint: Option<StoredProviderCatalogEndpoint>,
+    expected_endpoint_id: Option<&str>,
+    expected_endpoint_active: bool,
+) {
     let refreshed_access_token = sample_kiro_device_access_token("kiro-refresh@example.com");
     let expected_access_token = refreshed_access_token.clone();
     let refreshed_refresh_token = "s".repeat(120);
@@ -5362,7 +5395,7 @@ async fn gateway_manual_kiro_oauth_refresh_reconciles_missing_fixed_endpoint_imp
 
     let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
         vec![provider],
-        Vec::new(),
+        initial_endpoint.into_iter().collect(),
         vec![key],
     ));
 
@@ -5421,6 +5454,10 @@ async fn gateway_manual_kiro_oauth_refresh_reconciles_missing_fixed_endpoint_imp
     assert_eq!(endpoints.len(), 1);
     assert_eq!(endpoints[0].api_format, "claude:messages");
     assert_eq!(endpoints[0].base_url, "https://q.{region}.amazonaws.com");
+    assert_eq!(endpoints[0].is_active, expected_endpoint_active);
+    if let Some(expected_endpoint_id) = expected_endpoint_id {
+        assert_eq!(endpoints[0].id, expected_endpoint_id);
+    }
     assert_eq!(
         *seen_endpoint_id.lock().expect("mutex should lock"),
         Some(endpoints[0].id.clone())

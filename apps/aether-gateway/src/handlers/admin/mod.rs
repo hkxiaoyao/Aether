@@ -31,7 +31,8 @@ pub(crate) use self::provider::oauth::quota::codex::refresh_codex_provider_quota
 pub(crate) use self::provider::oauth::quota::kiro::refresh_kiro_provider_quota_locally;
 pub(crate) use self::provider::oauth::quota::shared::provider_type_supports_quota_refresh;
 pub(crate) use self::provider::oauth::runtime::{
-    provider_oauth_runtime_endpoint_for_provider, refresh_provider_oauth_account_state_after_update,
+    provider_oauth_maintenance_endpoint_for_provider, provider_oauth_runtime_endpoint_for_provider,
+    refresh_provider_oauth_account_state_after_update,
 };
 pub(crate) use self::provider::ops::providers::actions::admin_provider_ops_local_action_response;
 pub(crate) use self::provider::pool::config::admin_provider_pool_config;

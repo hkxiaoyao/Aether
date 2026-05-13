@@ -16,97 +16,94 @@ pub(crate) fn provider_oauth_runtime_endpoint_for_provider(
     provider_type: &str,
     endpoints: &[StoredProviderCatalogEndpoint],
 ) -> Option<StoredProviderCatalogEndpoint> {
+    select_provider_oauth_runtime_endpoint(provider_type, endpoints, false)
+}
+
+pub(crate) fn provider_oauth_maintenance_endpoint_for_provider(
+    provider_type: &str,
+    endpoints: &[StoredProviderCatalogEndpoint],
+) -> Option<StoredProviderCatalogEndpoint> {
+    select_provider_oauth_runtime_endpoint(provider_type, endpoints, true)
+}
+
+fn matching_endpoint<F>(
+    endpoints: &[StoredProviderCatalogEndpoint],
+    include_inactive: bool,
+    predicate: F,
+) -> Option<StoredProviderCatalogEndpoint>
+where
+    F: Fn(&StoredProviderCatalogEndpoint) -> bool,
+{
+    endpoints
+        .iter()
+        .find(|endpoint| endpoint.is_active && predicate(endpoint))
+        .cloned()
+        .or_else(|| {
+            include_inactive.then(|| {
+                endpoints
+                    .iter()
+                    .find(|endpoint| !endpoint.is_active && predicate(endpoint))
+                    .cloned()
+            })?
+        })
+}
+
+fn select_provider_oauth_runtime_endpoint(
+    provider_type: &str,
+    endpoints: &[StoredProviderCatalogEndpoint],
+    include_inactive: bool,
+) -> Option<StoredProviderCatalogEndpoint> {
     let provider_type = provider_type.trim().to_ascii_lowercase();
     match provider_type.as_str() {
-        "codex" => endpoints
-            .iter()
-            .find(|endpoint| {
-                endpoint.is_active
-                    && crate::ai_serving::is_openai_responses_format(&endpoint.api_format)
+        "codex" => matching_endpoint(endpoints, include_inactive, |endpoint| {
+            crate::ai_serving::is_openai_responses_format(&endpoint.api_format)
+        }),
+        "chatgpt_web" => matching_endpoint(endpoints, include_inactive, |endpoint| {
+            endpoint
+                .api_format
+                .trim()
+                .eq_ignore_ascii_case("openai:image")
+        }),
+        "antigravity" => matching_endpoint(endpoints, include_inactive, |endpoint| {
+            endpoint
+                .api_format
+                .trim()
+                .eq_ignore_ascii_case("gemini:generate_content")
+        }),
+        "kiro" => matching_endpoint(endpoints, include_inactive, |endpoint| {
+            endpoint
+                .api_format
+                .trim()
+                .eq_ignore_ascii_case("claude:messages")
+        })
+        .or_else(|| matching_endpoint(endpoints, include_inactive, |_| true)),
+        "claude_code" => matching_endpoint(endpoints, include_inactive, |endpoint| {
+            endpoint
+                .api_format
+                .trim()
+                .eq_ignore_ascii_case("claude:messages")
+        }),
+        "gemini_cli" => matching_endpoint(endpoints, include_inactive, |endpoint| {
+            endpoint
+                .api_format
+                .trim()
+                .eq_ignore_ascii_case("gemini:generate_content")
+        }),
+        "vertex_ai" => matching_endpoint(endpoints, include_inactive, |endpoint| {
+            endpoint
+                .api_format
+                .trim()
+                .eq_ignore_ascii_case("gemini:generate_content")
+        })
+        .or_else(|| {
+            matching_endpoint(endpoints, include_inactive, |endpoint| {
+                endpoint
+                    .api_format
+                    .trim()
+                    .eq_ignore_ascii_case("claude:messages")
             })
-            .cloned(),
-        "chatgpt_web" => endpoints
-            .iter()
-            .find(|endpoint| {
-                endpoint.is_active
-                    && endpoint
-                        .api_format
-                        .trim()
-                        .eq_ignore_ascii_case("openai:image")
-            })
-            .cloned(),
-        "antigravity" => endpoints
-            .iter()
-            .find(|endpoint| {
-                endpoint.is_active
-                    && endpoint
-                        .api_format
-                        .trim()
-                        .eq_ignore_ascii_case("gemini:generate_content")
-            })
-            .cloned(),
-        "kiro" => endpoints
-            .iter()
-            .find(|endpoint| {
-                endpoint.is_active
-                    && endpoint
-                        .api_format
-                        .trim()
-                        .eq_ignore_ascii_case("claude:messages")
-            })
-            .cloned()
-            .or_else(|| {
-                endpoints
-                    .iter()
-                    .find(|endpoint| endpoint.is_active)
-                    .cloned()
-            }),
-        "claude_code" => endpoints
-            .iter()
-            .find(|endpoint| {
-                endpoint.is_active
-                    && endpoint
-                        .api_format
-                        .trim()
-                        .eq_ignore_ascii_case("claude:messages")
-            })
-            .cloned(),
-        "gemini_cli" => endpoints
-            .iter()
-            .find(|endpoint| {
-                endpoint.is_active
-                    && endpoint
-                        .api_format
-                        .trim()
-                        .eq_ignore_ascii_case("gemini:generate_content")
-            })
-            .cloned(),
-        "vertex_ai" => endpoints
-            .iter()
-            .find(|endpoint| {
-                endpoint.is_active
-                    && endpoint
-                        .api_format
-                        .trim()
-                        .eq_ignore_ascii_case("gemini:generate_content")
-            })
-            .cloned()
-            .or_else(|| {
-                endpoints
-                    .iter()
-                    .find(|endpoint| {
-                        endpoint.is_active
-                            && endpoint
-                                .api_format
-                                .trim()
-                                .eq_ignore_ascii_case("claude:messages")
-                    })
-                    .cloned()
-            }),
-        _ => endpoints
-            .iter()
-            .find(|endpoint| endpoint.is_active)
-            .cloned(),
+        }),
+        _ => matching_endpoint(endpoints, include_inactive, |_| true),
     }
 }
 
@@ -125,7 +122,7 @@ pub(crate) async fn resolve_provider_oauth_runtime_endpoints(
         .list_provider_catalog_endpoints_by_provider_ids(std::slice::from_ref(&provider.id))
         .await?;
     let mut runtime_endpoint =
-        provider_oauth_runtime_endpoint_for_provider(provider_type, &endpoints);
+        provider_oauth_maintenance_endpoint_for_provider(provider_type, &endpoints);
     if runtime_endpoint.is_none()
         && state
             .fixed_provider_template(&provider.provider_type)
@@ -136,7 +133,8 @@ pub(crate) async fn resolve_provider_oauth_runtime_endpoints(
         endpoints = state
             .list_provider_catalog_endpoints_by_provider_ids(std::slice::from_ref(&provider.id))
             .await?;
-        runtime_endpoint = provider_oauth_runtime_endpoint_for_provider(provider_type, &endpoints);
+        runtime_endpoint =
+            provider_oauth_maintenance_endpoint_for_provider(provider_type, &endpoints);
     }
 
     Ok(ProviderOAuthRuntimeEndpoints {
