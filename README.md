@@ -219,6 +219,7 @@ client -> rust frontdoor (aether-gateway) -> execution_runtime/provider transpor
 Aether Proxy 是配套的正向代理节点，部署在海外 VPS 上，为墙内的 Aether 实例中转 API 流量。或者部署在其他服务器为指定的提供商、账号、Key使用不同的节点访问。支持 TUI 向导一键配置、systemd 服务管理、TLS 加密、DNS 缓存及连接池调优。
 
 - Docker Compose 部署或下载预编译二进制直接运行
+- 提供 macOS/Linux 与 Windows 一键脚本，自动下载最新 `proxy-v*` 制品并向现有 `aether-proxy.toml` 追加 `[[servers]]`
 - 通过 `aether-proxy setup` 完成交互式配置，自动注册为系统服务
 - 详细文档见 [apps/aether-proxy/README.md](apps/aether-proxy/README.md)
 
