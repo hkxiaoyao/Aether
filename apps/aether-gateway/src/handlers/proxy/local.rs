@@ -2,8 +2,8 @@ use super::super::internal;
 use crate::admin_api;
 use crate::audit::attach_admin_audit_event;
 use crate::control::{
-    read_only_management_token_permissions, validate_management_token_admin_route_permission,
-    GatewayPublicRequestContext,
+    audit_admin_read_only_management_token_permissions,
+    validate_management_token_admin_route_permission, GatewayPublicRequestContext,
 };
 use crate::{AppState, GatewayError};
 use axum::body::{Body, Bytes};
@@ -66,7 +66,7 @@ fn maybe_build_management_token_permission_denied_response(
     let token_permissions = if crate::roles::can_write_admin_console(&admin_principal.user_role) {
         admin_principal.management_token_permissions.as_deref()
     } else {
-        audit_admin_read_only_permissions = read_only_management_token_permissions();
+        audit_admin_read_only_permissions = audit_admin_read_only_management_token_permissions();
         Some(audit_admin_read_only_permissions.as_slice())
     };
     let denied = validate_management_token_admin_route_permission(
