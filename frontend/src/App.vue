@@ -5,7 +5,7 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, onErrorCaptured, onUnmounted } from 'vue'
+import { onMounted, onErrorCaptured, onUnmounted, watch } from 'vue'
 import { useAuthStore } from '@/stores/auth'
 import ToastContainer from '@/components/ToastContainer.vue'
 import ConfirmContainer from '@/components/ConfirmContainer.vue'
@@ -14,6 +14,7 @@ import { NETWORK_CONFIG, AUTH_CONFIG } from '@/config/constants'
 import router from '@/router'
 import { hasAuthIdentityChanged } from '@/utils/authToken'
 import { log } from '@/utils/logger'
+import { applyPreferredLocale, t } from '@/i18n'
 
 const authStore = useAuthStore()
 
@@ -22,6 +23,14 @@ const storedToken = apiClient.getToken()
 if (storedToken) {
   authStore.token = storedToken
 }
+
+watch(
+  () => authStore.user?.preferences?.language,
+  (language) => {
+    applyPreferredLocale(language)
+  },
+  { immediate: true },
+)
 
 // 全局错误处理器 - 只处理特定错误,避免完全吞掉所有错误
 onErrorCaptured((error: Error) => {
@@ -48,7 +57,7 @@ if (typeof window !== 'undefined') {
         window.location.reload()
       } else {
         // 超过最大重试次数,显示友好提示
-        alert('页面加载失败,请手动刷新浏览器。如问题持续,请清除浏览器缓存后重试。')
+        alert(t('errors.moduleLoadFailed', '页面加载失败,请手动刷新浏览器。如问题持续,请清除浏览器缓存后重试。'))
       }
       return
     }

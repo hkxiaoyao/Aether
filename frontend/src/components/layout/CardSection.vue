@@ -1,23 +1,23 @@
 <template>
   <Card :class="cardClasses">
     <div
-      v-if="title || description || $slots.header"
+      v-if="resolvedTitle || resolvedDescription || $slots.header"
       :class="headerClasses"
     >
       <slot name="header">
         <div class="flex items-center justify-between">
           <div>
             <h3
-              v-if="title"
+              v-if="resolvedTitle"
               class="text-lg font-medium leading-6 text-foreground"
             >
-              {{ title }}
+              {{ resolvedTitle }}
             </h3>
             <p
-              v-if="description"
+              v-if="resolvedDescription"
               class="mt-1 text-sm text-muted-foreground"
             >
-              {{ description }}
+              {{ resolvedDescription }}
             </p>
           </div>
           <div v-if="$slots.actions">
@@ -43,10 +43,11 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import Card from '@/components/ui/card.vue'
+import { resolveText, type TextValue } from '@/i18n'
 
 interface Props {
-  title?: string
-  description?: string
+  title?: TextValue
+  description?: TextValue
   variant?: 'default' | 'elevated' | 'glass'
   padding?: 'none' | 'sm' | 'md' | 'lg'
 }
@@ -57,6 +58,9 @@ const props = withDefaults(defineProps<Props>(), {
   variant: 'default',
   padding: 'md',
 })
+
+const resolvedTitle = computed(() => resolveText(props.title))
+const resolvedDescription = computed(() => resolveText(props.description))
 
 const cardClasses = computed(() => {
   const classes = []

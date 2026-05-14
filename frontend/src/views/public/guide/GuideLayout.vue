@@ -54,7 +54,7 @@
                     :class="isNavActive(item.path) ? 'text-primary' : 'text-muted-foreground/70 group-hover:text-foreground'"
                     :stroke-width="isNavActive(item.path) ? 2 : 1.75"
                   />
-                  <span class="text-[13px] tracking-tight">{{ item.name }}</span>
+                  <span class="text-[13px] tracking-tight">{{ resolveText(item.name) }}</span>
                 </div>
                 <div
                   v-if="isNavActive(item.path)"
@@ -81,7 +81,7 @@
                     class="w-1 h-1 rounded-full flex-shrink-0"
                     :class="activeHash === sub.hash ? 'bg-primary' : 'bg-muted-foreground/30'"
                   />
-                  {{ sub.name }}
+                  {{ resolveText(sub.name) }}
                 </a>
               </div>
             </template>
@@ -127,7 +127,7 @@
             <div class="flex items-center gap-3">
               <button
                 class="flex h-9 w-9 items-center justify-center rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted/50 transition"
-                :title="themeMode === 'system' ? '跟随系统' : themeMode === 'dark' ? '深色模式' : '浅色模式'"
+                :title="themeMode === 'system' ? resolveText(themeLabels.system) : themeMode === 'dark' ? resolveText(themeLabels.dark) : resolveText(themeLabels.light)"
                 @click="toggleDarkMode"
               >
                 <SunMoon
@@ -230,12 +230,12 @@
               to="/guide"
               class="hover:text-foreground transition-colors"
             >
-              教程文档
+              {{ resolveText(guideText.docs) }}
             </RouterLink>
             <template v-if="currentNavItem && currentNavItem.id !== 'overview'">
               <ChevronRight class="w-3 h-3 opacity-50" />
               <span class="text-foreground font-medium">
-                {{ currentNavItem.name }}
+                {{ resolveText(currentNavItem.name) }}
               </span>
             </template>
           </div>
@@ -244,7 +244,7 @@
         <div class="flex items-center gap-2">
           <button
             class="flex h-9 w-9 items-center justify-center rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted/50 transition"
-            :title="themeMode === 'system' ? '跟随系统' : themeMode === 'dark' ? '深色模式' : '浅色模式'"
+            :title="themeMode === 'system' ? resolveText(themeLabels.system) : themeMode === 'dark' ? resolveText(themeLabels.dark) : resolveText(themeLabels.light)"
             @click="toggleDarkMode"
           >
             <SunMoon
@@ -336,11 +336,22 @@ import HeaderLogo from '@/components/HeaderLogo.vue'
 import AppShell from '@/components/layout/AppShell.vue'
 import { useDarkMode } from '@/composables/useDarkMode'
 import { useSiteInfo } from '@/composables/useSiteInfo'
+import { i18nText, resolveText } from '@/i18n'
 import { guideNavItems } from './guide-config'
 
 const route = useRoute()
 const { themeMode, toggleDarkMode } = useDarkMode()
 const { siteName, siteSubtitle } = useSiteInfo()
+
+const guideText = {
+  docs: i18nText('guide.docs', '教程文档'),
+}
+
+const themeLabels = {
+  dark: i18nText('layout.theme.dark', '深色模式'),
+  light: i18nText('layout.theme.light', '浅色模式'),
+  system: i18nText('layout.theme.system', '跟随系统'),
+}
 
 const mobileMenuOpen = ref(false)
 const baseUrl = ref(typeof window !== 'undefined' ? window.location.origin : 'https://your-aether.com')
@@ -452,7 +463,7 @@ const navigation = computed(() => [
   {
     title: '',
     items: guideNavItems.map(item => ({
-      name: item.name,
+      name: resolveText(item.name),
       href: item.path,
       icon: item.icon
     }))

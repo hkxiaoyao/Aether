@@ -665,6 +665,7 @@ import SelectContent from '@/components/ui/select-content.vue'
 import SelectItem from '@/components/ui/select-item.vue'
 import Switch from '@/components/ui/switch.vue'
 import { useToast } from '@/composables/useToast'
+import { applyPreferredLocale, setAppLocale } from '@/i18n'
 import { formatCurrency } from '@/utils/format'
 import { getApiUrl } from '@/utils/url'
 import { log } from '@/utils/logger'
@@ -787,6 +788,7 @@ function handleThemeChange(value: string) {
 function handleLanguageChange(value: string) {
   preferencesForm.value.language = value
   languageSelectOpen.value = false
+  setAppLocale(value)
   updatePreferences()
 }
 
@@ -997,6 +999,8 @@ async function loadPreferences() {
         // 静默失败，不影响用户体验
       })
     }
+
+    applyPreferredLocale(preferencesForm.value.language)
   } catch (error) {
     log.error('加载偏好设置失败:', error)
   }
@@ -1148,6 +1152,7 @@ async function updatePreferences() {
       }
     })
     success('设置已保存')
+    setAppLocale(preferencesForm.value.language)
   } catch (error) {
     log.error('更新偏好设置失败:', error)
     showError('保存设置失败')

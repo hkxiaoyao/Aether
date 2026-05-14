@@ -8,108 +8,109 @@ import {
   Blocks,
   HelpCircle
 } from 'lucide-vue-next'
+import { i18nText, type TextValue } from '@/i18n'
 
 // 导航配置
 export interface GuideNavItem {
   id: string
-  name: string
+  name: TextValue
   path: string
   icon: Component
-  description?: string
-  subItems?: { name: string; hash: string }[]
+  description?: TextValue
+  subItems?: { name: TextValue; hash: string }[]
 }
 
 export const guideNavItems: GuideNavItem[] = [
   {
     id: 'overview',
-    name: '快速开始',
+    name: i18nText('guide.nav.overview', '快速开始'),
     path: '/guide',
     icon: Rocket,
-    description: '部署后的配置指南',
+    description: i18nText('guide.nav.overviewDescription', '部署后的配置指南'),
     subItems: [
-      { name: '部署', hash: '#production' },
-      { name: '配置流程', hash: '#config-steps' },
-      { name: '反向代理', hash: '#reverse-proxy' },
-      { name: '异步任务', hash: '#async-tasks' },
-      { name: '代理配置', hash: '#proxy-config' }
+      { name: i18nText('guide.nav.production', '部署'), hash: '#production' },
+      { name: i18nText('guide.nav.configSteps', '配置流程'), hash: '#config-steps' },
+      { name: i18nText('guide.nav.reverseProxy', '反向代理'), hash: '#reverse-proxy' },
+      { name: i18nText('guide.nav.asyncTasks', '异步任务'), hash: '#async-tasks' },
+      { name: i18nText('guide.nav.proxyConfig', '代理配置'), hash: '#proxy-config' }
     ]
   },
   {
     id: 'architecture',
-    name: '架构说明',
+    name: i18nText('guide.nav.architecture', '架构说明'),
     path: '/guide/architecture',
     icon: Network,
-    description: '系统架构'
+    description: i18nText('guide.nav.architectureDescription', '系统架构')
   },
   {
     id: 'concepts',
-    name: '相关概念',
+    name: i18nText('guide.nav.concepts', '相关概念'),
     path: '/guide/concepts',
     icon: BookOpen,
-    description: '核心概念',
+    description: i18nText('guide.nav.conceptsDescription', '核心概念'),
     subItems: [
-      { name: '创建统一模型', hash: '#create-model' },
-      { name: '添加提供商', hash: '#add-provider' },
-      { name: '添加端点', hash: '#add-endpoint' },
-      { name: '添加密钥', hash: '#add-key' },
-      { name: '模型权限', hash: '#model-permission' },
-      { name: '关联模型', hash: '#link-model' },
-      { name: '模型映射', hash: '#model-mapping' },
-      { name: '反向代理', hash: '#reverse-proxy' },
-      { name: '优先级管理', hash: '#priority-management' }
+      { name: i18nText('guide.nav.createModel', '创建统一模型'), hash: '#create-model' },
+      { name: i18nText('guide.nav.addProvider', '添加提供商'), hash: '#add-provider' },
+      { name: i18nText('guide.nav.addEndpoint', '添加端点'), hash: '#add-endpoint' },
+      { name: i18nText('guide.nav.addKey', '添加密钥'), hash: '#add-key' },
+      { name: i18nText('guide.nav.modelPermission', '模型权限'), hash: '#model-permission' },
+      { name: i18nText('guide.nav.linkModel', '关联模型'), hash: '#link-model' },
+      { name: i18nText('guide.nav.modelMapping', '模型映射'), hash: '#model-mapping' },
+      { name: i18nText('guide.nav.reverseProxy', '反向代理'), hash: '#reverse-proxy' },
+      { name: i18nText('guide.nav.priorityManagement', '优先级管理'), hash: '#priority-management' }
     ]
   },
   {
     id: 'strategy',
-    name: '关键策略',
+    name: i18nText('guide.nav.strategy', '关键策略'),
     path: '/guide/strategy',
     icon: Target,
-    description: '关键策略',
+    description: i18nText('guide.nav.strategyDescription', '关键策略'),
     subItems: [
-      { name: '请求体记录', hash: '#request-logging' },
-      { name: '调度模式', hash: '#scheduling' },
-      { name: '访问限制', hash: '#rate-limit' },
-      { name: '请求体清理', hash: '#payload-cleanup' },
-      { name: '定时任务', hash: '#cron-tasks' }
+      { name: i18nText('guide.nav.requestLogging', '请求体记录'), hash: '#request-logging' },
+      { name: i18nText('guide.nav.scheduling', '调度模式'), hash: '#scheduling' },
+      { name: i18nText('guide.nav.rateLimit', '访问限制'), hash: '#rate-limit' },
+      { name: i18nText('guide.nav.payloadCleanup', '请求体清理'), hash: '#payload-cleanup' },
+      { name: i18nText('guide.nav.cronTasks', '定时任务'), hash: '#cron-tasks' }
     ]
   },
   {
     id: 'advanced',
-    name: '高级功能',
+    name: i18nText('guide.nav.advanced', '高级功能'),
     path: '/guide/advanced',
     icon: Settings,
-    description: '高级功能',
+    description: i18nText('guide.nav.advancedDescription', '高级功能'),
     subItems: [
-      { name: '格式转换', hash: '#format-conversion' },
-      { name: '流式/非流式', hash: '#stream-policy' },
-      { name: '请求头/体编辑', hash: '#header-body-edit' },
-      { name: '模型映射', hash: '#model-mapping' },
-      { name: '正则映射', hash: '#regex-mapping' },
-      { name: '能力标签', hash: '#capabilities' },
-      { name: '余额监控', hash: '#balance-monitor' },
-      { name: '配置导入/出', hash: '#config-export' },
-      { name: '锁定用户密钥', hash: '#lock-key' }
+      { name: i18nText('guide.nav.formatConversion', '格式转换'), hash: '#format-conversion' },
+      { name: i18nText('guide.nav.streamPolicy', '流式/非流式'), hash: '#stream-policy' },
+      { name: i18nText('guide.nav.headerBodyEdit', '请求头/体编辑'), hash: '#header-body-edit' },
+      { name: i18nText('guide.nav.modelMapping', '模型映射'), hash: '#model-mapping' },
+      { name: i18nText('guide.nav.regexMapping', '正则映射'), hash: '#regex-mapping' },
+      { name: i18nText('guide.nav.capabilities', '能力标签'), hash: '#capabilities' },
+      { name: i18nText('guide.nav.balanceMonitor', '余额监控'), hash: '#balance-monitor' },
+      { name: i18nText('guide.nav.configExport', '配置导入/出'), hash: '#config-export' },
+      { name: i18nText('guide.nav.lockKey', '锁定用户密钥'), hash: '#lock-key' }
     ]
   },
   {
     id: 'modules',
-    name: '模块管理',
+    name: i18nText('guide.nav.modules', '模块管理'),
     path: '/guide/modules',
     icon: Blocks,
-    description: '模块管理',
+    description: i18nText('guide.nav.modulesDescription', '模块管理'),
     subItems: [
-      { name: '访问令牌', hash: '#management-tokens' },
-      { name: '邮件配置', hash: '#email-config' },
-      { name: 'OAuth登录', hash: '#oauth-login' },
-      { name: 'LDAP认证', hash: '#ldap-auth' }
+      { name: i18nText('guide.nav.managementTokens', '访问令牌'), hash: '#management-tokens' },
+      { name: i18nText('guide.nav.emailConfig', '邮件配置'), hash: '#email-config' },
+      { name: i18nText('guide.nav.oauthLogin', 'OAuth登录'), hash: '#oauth-login' },
+      { name: i18nText('guide.nav.ldapAuth', 'LDAP认证'), hash: '#ldap-auth' }
     ]
   },
   {
     id: 'faq',
-    name: '常见问题',
+    name: i18nText('guide.nav.faq', '常见问题'),
     path: '/guide/faq',
     icon: HelpCircle,
-    description: '常见问题'
+    description: i18nText('guide.nav.faqDescription', '常见问题')
   }
 ]
 

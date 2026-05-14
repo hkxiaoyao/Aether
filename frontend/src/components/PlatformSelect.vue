@@ -16,10 +16,10 @@
       />
       <div class="platform-select__text">
         <p class="platform-select__label">
-          {{ currentOption.label }}
+          {{ resolveText(currentOption.label) }}
         </p>
         <p class="platform-select__hint">
-          {{ currentOption.hint }}
+          {{ resolveText(currentOption.hint) }}
         </p>
       </div>
     </div>
@@ -43,10 +43,10 @@
           />
           <div class="platform-select__option-copy">
             <p class="platform-select__option-label">
-              {{ option.label }}
+              {{ resolveText(option.label) }}
             </p>
             <p class="platform-select__option-hint">
-              {{ option.hint }}
+              {{ resolveText(option.hint) }}
             </p>
           </div>
           <Check
@@ -62,11 +62,12 @@
 <script lang="ts">
 import { Apple, Box, Monitor, Terminal } from 'lucide-vue-next'
 import type { Component } from 'vue'
+import { resolveText, type TextValue } from '@/i18n'
 
 export interface PlatformOption {
   value: string
-  label: string
-  hint: string
+  label: TextValue
+  hint: TextValue
   icon: Component
   command: string
 }

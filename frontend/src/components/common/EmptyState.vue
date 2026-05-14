@@ -16,18 +16,18 @@
 
     <!-- 标题 -->
     <h3
-      v-if="title"
+      v-if="resolvedTitle"
       :class="titleClasses"
     >
-      {{ title }}
+      {{ resolvedTitle }}
     </h3>
 
     <!-- 描述 -->
     <p
-      v-if="description"
+      v-if="resolvedDescription"
       :class="descriptionClasses"
     >
-      {{ description }}
+      {{ resolvedDescription }}
     </p>
 
     <!-- 自定义内容插槽 -->
@@ -40,12 +40,12 @@
 
     <!-- 操作按钮 -->
     <div
-      v-if="$slots.actions || actionText"
+      v-if="$slots.actions || resolvedActionText"
       class="mt-6 flex flex-wrap items-center justify-center gap-3"
     >
       <slot name="actions">
         <Button
-          v-if="actionText"
+          v-if="resolvedActionText"
           :variant="actionVariant"
           :size="actionSize"
           @click="handleAction"
@@ -55,7 +55,7 @@
             v-if="actionIcon"
             class="mr-2 h-4 w-4"
           />
-          {{ actionText }}
+          {{ resolvedActionText }}
         </Button>
       </slot>
     </div>
@@ -82,6 +82,7 @@ import {
   Filter
 } from 'lucide-vue-next'
 import type { Component } from 'vue'
+import { i18nText, resolveText, type TextValue } from '@/i18n'
 
 type EmptyStateType = 'default' | 'search' | 'filter' | 'error' | 'empty' | 'notFound'
 type ButtonVariant = 'default' | 'outline' | 'secondary' | 'ghost' | 'link' | 'destructive'
@@ -93,11 +94,11 @@ interface Props {
   /** 自定义图标组件 */
   icon?: Component
   /** 标题 */
-  title?: string
+  title?: TextValue
   /** 描述文本 */
-  description?: string
+  description?: TextValue
   /** 操作按钮文本 */
-  actionText?: string
+  actionText?: TextValue
   /** 操作按钮图标 */
   actionIcon?: Component
   /** 操作按钮变体 */
@@ -134,38 +135,42 @@ const typeConfig = computed(() => {
   const configs = {
     default: {
       icon: Inbox,
-      title: '暂无数据',
-      description: '当前没有可显示的内容'
+      title: i18nText('common.empty.default.title', '暂无数据'),
+      description: i18nText('common.empty.default.description', '当前没有可显示的内容')
     },
     search: {
       icon: Search,
-      title: '未找到结果',
-      description: '尝试使用不同的关键词搜索'
+      title: i18nText('common.empty.search.title', '未找到结果'),
+      description: i18nText('common.empty.search.description', '尝试使用不同的关键词搜索')
     },
     filter: {
       icon: Filter,
-      title: '无匹配结果',
-      description: '没有符合当前筛选条件的数据'
+      title: i18nText('common.empty.filter.title', '无匹配结果'),
+      description: i18nText('common.empty.filter.description', '没有符合当前筛选条件的数据')
     },
     error: {
       icon: AlertCircle,
-      title: '加载失败',
-      description: '数据加载过程中出现错误'
+      title: i18nText('common.empty.error.title', '加载失败'),
+      description: i18nText('common.empty.error.description', '数据加载过程中出现错误')
     },
     empty: {
       icon: PackageOpen,
-      title: '这里空空如也',
-      description: '还没有任何内容'
+      title: i18nText('common.empty.empty.title', '这里空空如也'),
+      description: i18nText('common.empty.empty.description', '还没有任何内容')
     },
     notFound: {
       icon: FileQuestion,
-      title: '未找到',
-      description: '请求的资源不存在'
+      title: i18nText('common.empty.notFound.title', '未找到'),
+      description: i18nText('common.empty.notFound.description', '请求的资源不存在')
     }
   }
 
   return configs[props.type]
 })
+
+const resolvedTitle = computed(() => resolveText(props.title ?? typeConfig.value.title))
+const resolvedDescription = computed(() => resolveText(props.description ?? typeConfig.value.description))
+const resolvedActionText = computed(() => resolveText(props.actionText))
 
 // 默认图标
 const defaultIcon = computed(() => typeConfig.value.icon)

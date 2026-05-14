@@ -7,12 +7,12 @@
     >
       <!-- Section Header -->
       <div
-        v-if="group.title"
+        v-if="resolveText(group.title)"
         class="px-2.5 pb-1 flex items-center gap-2"
         :class="index > 0 ? 'pt-1' : ''"
       >
         <span class="text-[10px] font-medium text-muted-foreground/50 font-mono tabular-nums">{{ String(index + 1).padStart(2, '0') }}</span>
-        <span class="text-[10px] font-semibold text-muted-foreground/70 uppercase tracking-[0.1em]">{{ group.title }}</span>
+        <span class="text-[10px] font-semibold text-muted-foreground/70 uppercase tracking-[0.1em]">{{ resolveText(group.title) }}</span>
       </div>
 
       <!-- Links -->
@@ -41,7 +41,7 @@
                 :class="isItemActive(item.href) ? 'text-primary' : 'text-muted-foreground/70 group-hover:text-foreground'"
                 :stroke-width="isItemActive(item.href) ? 2 : 1.75"
               />
-              <span class="text-[13px] tracking-tight">{{ item.name }}</span>
+              <span class="text-[13px] tracking-tight">{{ resolveText(item.name) }}</span>
             </div>
 
             <!-- Active Indicator -->
@@ -58,16 +58,17 @@
 
 <script setup lang="ts">
 import type { Component } from 'vue'
+import { resolveText, type TextValue } from '@/i18n'
 
 export interface NavigationItem {
-  name: string
+  name: TextValue
   href: string
   icon: Component
-  description?: string
+  description?: TextValue
 }
 
 export interface NavigationGroup {
-  title?: string
+  title?: TextValue
   items: NavigationItem[]
 }
 

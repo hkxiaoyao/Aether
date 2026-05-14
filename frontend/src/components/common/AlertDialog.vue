@@ -14,7 +14,7 @@
           />
           <div class="flex-1 min-w-0">
             <h3 class="text-lg font-semibold text-foreground leading-tight">
-              {{ title }}
+              {{ resolvedTitle }}
             </h3>
           </div>
         </div>
@@ -44,7 +44,7 @@
         class="h-10 px-5"
         @click="handleCancel"
       >
-        {{ cancelText }}
+        {{ resolvedCancelText }}
       </Button>
 
       <!-- 确认按钮 -->
@@ -58,7 +58,7 @@
           v-if="loading"
           class="animate-spin h-4 w-4 mr-2"
         />
-        {{ confirmText }}
+        {{ resolvedConfirmText }}
       </Button>
     </template>
   </Dialog>
@@ -69,16 +69,17 @@ import { computed } from 'vue'
 import { Dialog } from '@/components/ui'
 import Button from '@/components/ui/button.vue'
 import { AlertTriangle, AlertCircle, Info, Trash2, HelpCircle, Loader2 } from 'lucide-vue-next'
+import { i18nText, resolveText, type TextValue } from '@/i18n'
 
 export type AlertType = 'danger' | 'destructive' | 'warning' | 'info' | 'question'
 
 interface Props {
   modelValue: boolean
-  title: string
-  description: string
+  title: TextValue
+  description: TextValue
   type?: AlertType
-  confirmText?: string
-  cancelText?: string
+  confirmText?: TextValue
+  cancelText?: TextValue
   loading?: boolean
 }
 
@@ -90,16 +91,24 @@ interface Emits {
 
 const props = withDefaults(defineProps<Props>(), {
   type: 'warning',
-  confirmText: '确认',
-  cancelText: '取消',
   loading: false
 })
 
 const emit = defineEmits<Emits>()
 
+const alertText = {
+  cancel: i18nText('common.actions.cancel', '取消'),
+  confirm: i18nText('common.actions.confirm', '确认'),
+}
+
 // 解析描述文本为多行
+const resolvedTitle = computed(() => resolveText(props.title))
+const resolvedDescription = computed(() => resolveText(props.description))
+const resolvedConfirmText = computed(() => resolveText(props.confirmText ?? alertText.confirm))
+const resolvedCancelText = computed(() => resolveText(props.cancelText ?? alertText.cancel))
+
 const descriptionLines = computed(() => {
-  return props.description.split('\n').filter(line => line.trim())
+  return resolvedDescription.value.split('\n').filter(line => line.trim())
 })
 
 function escapeHtml(raw: string): string {

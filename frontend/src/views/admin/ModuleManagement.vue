@@ -43,7 +43,7 @@
         <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5">
           <div
             v-for="tool in filteredBuiltinTools"
-            :key="tool.name"
+            :key="tool.href"
             class="group relative border rounded-2xl p-6 transition-all duration-200 hover:shadow-lg border-border bg-card hover:border-primary/20 cursor-pointer"
             @click="router.push(tool.href)"
           >
@@ -56,12 +56,12 @@
               </div>
               <div class="flex-1 min-w-0 pt-1">
                 <h4 class="font-semibold text-base truncate">
-                  {{ tool.name }}
+                  {{ resolveText(tool.name) }}
                 </h4>
               </div>
             </div>
             <p class="text-sm text-muted-foreground leading-relaxed line-clamp-2 min-h-[2.5rem]">
-              {{ tool.description }}
+              {{ resolveText(tool.description) }}
             </p>
             <div class="mt-5 pt-4 border-t border-border/50 flex items-center justify-end">
               <Button
@@ -220,6 +220,7 @@ import Switch from '@/components/ui/switch.vue'
 import Input from '@/components/ui/input.vue'
 import { PageHeader, PageContainer } from '@/components/layout'
 import { useToast } from '@/composables/useToast'
+import { resolveText } from '@/i18n'
 import { useModuleStore } from '@/stores/modules'
 import { BUILTIN_TOOLS } from '@/config/builtin-tools'
 import { log } from '@/utils/logger'
@@ -238,7 +239,7 @@ const filteredBuiltinTools = computed(() => {
   if (!searchQuery.value.trim()) return BUILTIN_TOOLS
   const query = searchQuery.value.toLowerCase()
   return BUILTIN_TOOLS.filter(
-    t => t.name.toLowerCase().includes(query) || t.description.toLowerCase().includes(query)
+    t => resolveText(t.name).toLowerCase().includes(query) || resolveText(t.description).toLowerCase().includes(query)
   )
 })
 

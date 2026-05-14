@@ -26,10 +26,10 @@
       </div>
 
       <div
-        v-if="message"
+        v-if="resolvedMessage"
         class="text-sm text-muted-foreground"
       >
-        {{ message }}
+        {{ resolvedMessage }}
       </div>
     </div>
   </div>
@@ -38,10 +38,11 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import Skeleton from '@/components/ui/skeleton.vue'
+import { resolveText, type TextValue } from '@/i18n'
 
 interface Props {
   variant?: 'skeleton' | 'spinner' | 'pulse'
-  message?: string
+  message?: TextValue
   size?: 'sm' | 'md' | 'lg'
   fullHeight?: boolean
 }
@@ -52,6 +53,8 @@ const props = withDefaults(defineProps<Props>(), {
   size: 'md',
   fullHeight: false,
 })
+
+const resolvedMessage = computed(() => resolveText(props.message))
 
 const containerClasses = computed(() => {
   const classes = ['flex items-center justify-center']

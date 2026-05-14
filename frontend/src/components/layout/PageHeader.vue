@@ -16,13 +16,13 @@
 
         <div>
           <h1 class="text-2xl font-semibold text-foreground sm:text-3xl">
-            {{ title }}
+            {{ resolvedTitle }}
           </h1>
           <p
-            v-if="description"
+            v-if="resolvedDescription"
             class="mt-1 text-sm text-muted-foreground"
           >
-            {{ description }}
+            {{ resolvedDescription }}
           </p>
         </div>
       </div>
@@ -38,13 +38,17 @@
 </template>
 
 <script setup lang="ts">
-import type { Component } from 'vue'
+import { computed, type Component } from 'vue'
+import { resolveText, type TextValue } from '@/i18n'
 
 interface Props {
-  title: string
-  description?: string
+  title: TextValue
+  description?: TextValue
   icon?: Component
 }
 
-defineProps<Props>()
+const props = defineProps<Props>()
+
+const resolvedTitle = computed(() => resolveText(props.title))
+const resolvedDescription = computed(() => resolveText(props.description))
 </script>

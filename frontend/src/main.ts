@@ -4,6 +4,9 @@ import router from './router'
 import './style.css'
 import App from './App.vue'
 import { preloadCriticalModules } from './utils/importRetry'
+import { initAppLocale } from './i18n'
+
+initAppLocale()
 
 const app = createApp(App)
 const pinia = createPinia()

@@ -15,7 +15,7 @@
       <div class="flex w-full max-w-3xl items-center justify-between rounded-3xl bg-orange-500 px-6 py-3 text-white shadow-2xl ring-1 ring-white/30">
         <div class="flex items-center gap-3">
           <AlertTriangle class="h-5 w-5" />
-          <span>认证已过期，请重新登录</span>
+          <span>{{ resolveText(layoutText.notice.authExpired) }}</span>
         </div>
         <Button
           variant="outline"
@@ -23,7 +23,7 @@
           class="border-white/60 text-white hover:bg-white/10"
           @click="handleRelogin"
         >
-          重新登录
+          {{ resolveText(layoutText.actions.relogin) }}
         </Button>
       </div>
     </template>
@@ -66,7 +66,7 @@
             </div>
             <div class="flex flex-col min-w-0">
               <span class="text-xs font-semibold leading-none truncate opacity-90 text-foreground">{{ authStore.user?.username }}</span>
-              <span class="text-[10px] opacity-50 leading-none mt-1.5 text-muted-foreground">{{ currentRoleLabel }}</span>
+              <span class="text-[10px] opacity-50 leading-none mt-1.5 text-muted-foreground">{{ profileRoleLabel }}</span>
             </div>
           </div>
 
@@ -74,13 +74,13 @@
             <RouterLink
               to="/dashboard/settings"
               class="p-1.5 hover:bg-muted/50 rounded-md text-muted-foreground hover:text-foreground transition-colors"
-              title="个人设置"
+              :title="resolveText(layoutText.actions.settings)"
             >
               <Settings class="w-4 h-4" />
             </RouterLink>
             <button
               class="p-1.5 rounded-md text-muted-foreground hover:text-red-500 transition-colors"
-              title="退出登录"
+              :title="resolveText(layoutText.actions.logout)"
               @click="handleLogout"
             >
               <LogOut class="w-4 h-4" />
@@ -123,7 +123,7 @@
               />
               <button
                 class="flex h-9 w-9 items-center justify-center rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted/50 transition"
-                :title="themeMode === 'system' ? '跟随系统' : themeMode === 'dark' ? '深色模式' : '浅色模式'"
+                :title="themeButtonTitle"
                 @click="toggleDarkMode"
               >
                 <SunMoon
@@ -227,7 +227,7 @@
                     </div>
                     <div class="flex flex-col min-w-0">
                       <span class="text-sm font-semibold leading-none truncate text-[#191919] dark:text-white">{{ authStore.user?.username }}</span>
-                      <span class="text-[10px] text-[#91918d] dark:text-muted-foreground leading-none mt-1">{{ currentRoleLabel }}</span>
+                      <span class="text-[10px] text-[#91918d] dark:text-muted-foreground leading-none mt-1">{{ profileRoleLabel }}</span>
                     </div>
                   </div>
                   <div class="flex items-center gap-1">
@@ -307,7 +307,7 @@
           <!-- Theme Toggle -->
           <button
             class="flex h-9 w-9 items-center justify-center rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted/50 transition"
-            :title="themeMode === 'system' ? '跟随系统' : themeMode === 'dark' ? '深色模式' : '浅色模式'"
+            :title="themeButtonTitle"
             @click="toggleDarkMode"
           >
             <SunMoon
@@ -329,7 +329,7 @@
             target="_blank"
             rel="noopener noreferrer"
             class="flex h-9 w-9 items-center justify-center rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted/50 transition"
-            title="GitHub 仓库"
+            :title="resolveText(layoutText.titles.github)"
           >
             <GithubIcon class="h-4 w-4" />
           </a>
@@ -369,41 +369,27 @@ import UpdateDialog from '@/components/common/UpdateDialog.vue'
 import VersionButton from '@/components/common/VersionButton.vue'
 import { buildUpdateErrorStatus } from '@/utils/updateStatus'
 import {
-  Home,
-  Users,
-  Key,
-  KeyRound,
-  BarChart3,
-  Cog,
   Settings,
-  Activity,
-  Shield,
   AlertTriangle,
   SunMedium,
   Moon,
-  Gauge,
-  Layers,
-  FolderTree,
-  Database,
-  Box,
   LogOut,
   SunMoon,
   ChevronRight,
-  Megaphone,
-  Wallet,
   Menu,
   X,
-  Puzzle,
-  Zap,
-  FileUp,
-  Server,
-  SlidersHorizontal,
-  type LucideIcon,
 } from 'lucide-vue-next'
 
 import GithubIcon from '@/components/icons/GithubIcon.vue'
 import { BUILTIN_TOOL_BREADCRUMBS } from '@/config/builtin-tools'
 import { prefetchAdminNavigationTarget } from '@/utils/adminNavigationPrefetch'
+import {
+  createAdminNavigationGroups,
+  createModuleNavigationItem,
+  userNavigationGroups,
+  type NavigationGroupDescriptor,
+} from '@/config/navigation'
+import { i18nText, resolveText } from '@/i18n'
 
 const router = useRouter()
 const route = useRoute()
@@ -413,6 +399,53 @@ const { themeMode, toggleDarkMode } = useDarkMode()
 const { siteName, siteSubtitle } = useSiteInfo()
 const isDemo = computed(() => isDemoMode())
 const isAdmin = computed(() => authStore.user?.role === 'admin')
+
+const layoutText = {
+  actions: {
+    logout: i18nText('layout.actions.logout', '退出登录'),
+    relogin: i18nText('layout.actions.relogin', '重新登录'),
+    settings: i18nText('layout.actions.settings', '个人设置'),
+  },
+  breadcrumbs: {
+    account: i18nText('layout.breadcrumbs.account', '账户'),
+    dashboard: i18nText('layout.breadcrumbs.dashboard', '仪表盘'),
+    moduleManagement: i18nText('layout.breadcrumbs.moduleManagement', '模块管理'),
+    personalSettings: i18nText('layout.breadcrumbs.personalSettings', '个人设置'),
+    system: i18nText('layout.breadcrumbs.system', '系统'),
+  },
+  notice: {
+    authExpired: i18nText('layout.notice.authExpired', '认证已过期，请重新登录'),
+  },
+  roles: {
+    admin: i18nText('layout.roles.admin', '管理员'),
+    auditAdmin: i18nText('layout.roles.auditAdmin', '审计管理员'),
+    user: i18nText('layout.roles.user', '用户'),
+  },
+  theme: {
+    dark: i18nText('layout.theme.dark', '深色模式'),
+    light: i18nText('layout.theme.light', '浅色模式'),
+    system: i18nText('layout.theme.system', '跟随系统'),
+  },
+  titles: {
+    github: i18nText('layout.titles.github', 'GitHub 仓库'),
+  },
+}
+
+const themeButtonTitle = computed(() => {
+  if (themeMode.value === 'system') {
+    return resolveText(layoutText.theme.system)
+  }
+  if (themeMode.value === 'dark') {
+    return resolveText(layoutText.theme.dark)
+  }
+  return resolveText(layoutText.theme.light)
+})
+
+const profileRoleLabel = computed(() => {
+  if (authStore.isAdmin) return resolveText(layoutText.roles.admin)
+  if (authStore.isAuditAdmin) return resolveText(layoutText.roles.auditAdmin)
+  return resolveText(layoutText.roles.user)
+})
 
 const showAuthError = ref(false)
 const mobileMenuOpen = ref(false)
@@ -618,102 +651,28 @@ function prefetchNavigationItem(href: string) {
 
 // Navigation Data
 const navigation = computed(() => {
-  const baseNavigation = [
-    {
-      title: '概览',
-      items: [
-        { name: '仪表盘', href: '/dashboard', icon: Home },
-        { name: '健康监控', href: '/dashboard/endpoint-status', icon: Activity },
-      ]
-    },
-    {
-      title: '资源',
-      items: [
-        { name: '模型目录', href: '/dashboard/models', icon: Box },
-        { name: 'API 密钥', href: '/dashboard/api-keys', icon: Key },
-      ]
-    },
-    {
-      title: '账户',
-      items: [
-         { name: '钱包中心', href: '/dashboard/wallet', icon: Wallet },
-         { name: '使用统计', href: '/dashboard/usage', icon: BarChart3 },
-         { name: '异步任务', href: '/dashboard/async-tasks', icon: Zap },
-      ]
-    }
-  ]
-
-  // 系统菜单项（静态部分）
-  const systemItems: { name: string; href: string; icon: LucideIcon }[] = [
-    { name: '公告管理', href: '/admin/announcements', icon: Megaphone },
-    { name: '缓存监控', href: '/admin/cache-monitoring', icon: Gauge },
-  ]
-
-  // 动态添加已激活模块的菜单项
-  // 图标映射
-  const iconMap: Record<string, LucideIcon> = {
-    Key,
-    KeyRound,
-    FileUp,
-    Shield,
-    Puzzle,
-    Server,
-    SlidersHorizontal,
-  }
-
-  // 添加模块菜单项（按 admin_menu_order 排序，只显示已激活的）
   const moduleMenuItems = Object.values(moduleStore.modules)
     .filter(m => m.active && m.admin_route && m.admin_menu_group === 'system')
     .sort((a, b) => a.admin_menu_order - b.admin_menu_order)
-    .map(m => ({
-      name: m.display_name,
+    .map(m => createModuleNavigationItem({
+      displayName: m.display_name,
       href: m.admin_route ?? '',
-      icon: iconMap[m.admin_menu_icon || ''] || Puzzle
+      iconName: m.admin_menu_icon,
     }))
 
-  systemItems.push(...moduleMenuItems)
+  const groups: NavigationGroupDescriptor[] = authStore.canAccessAdmin
+    ? createAdminNavigationGroups(moduleMenuItems)
+    : userNavigationGroups
 
-  // 模块管理和系统设置放在最后
-  systemItems.push({ name: '模块管理', href: '/admin/modules', icon: Puzzle })
-  systemItems.push({ name: '系统设置', href: '/admin/system', icon: Cog })
-
-  const adminNavigation = [
-     {
-      title: '概览',
-      items: [
-        { name: '仪表盘', href: '/admin/dashboard', icon: Home },
-        { name: '健康监控', href: '/admin/health-monitor', icon: Activity },
-        { name: '用户统计', href: '/admin/user-stats', icon: BarChart3 },
-        { name: '成本分析', href: '/admin/cost-analysis', icon: Gauge },
-        { name: '性能分析', href: '/admin/performance-analysis', icon: Activity },
-      ]
-    },
-    {
-      title: '管理',
-      items: [
-        { name: '用户管理', href: '/admin/users', icon: Users },
-        { name: '提供商', href: '/admin/providers', icon: FolderTree },
-        { name: '模型管理', href: '/admin/models', icon: Layers },
-        { name: '号池管理', href: '/admin/pool', icon: Database },
-        { name: '独立密钥', href: '/admin/keys', icon: Key },
-        { name: '钱包管理', href: '/admin/wallets', icon: Wallet },
-        { name: '异步任务', href: '/admin/async-tasks', icon: Zap },
-        { name: '使用记录', href: '/admin/usage', icon: BarChart3 },
-      ]
-    },
-    {
-      title: '系统',
-      items: systemItems
-    }
-  ]
-
-  return authStore.canAccessAdmin ? adminNavigation : baseNavigation
-})
-
-const currentRoleLabel = computed(() => {
-  if (authStore.isAdmin) return '管理员'
-  if (authStore.isAuditAdmin) return '审计管理员'
-  return '用户'
+  return groups.map(group => ({
+    title: resolveText(group.title),
+    items: group.items.map(item => ({
+      name: resolveText(item.name),
+      href: item.href,
+      icon: item.icon,
+      description: item.description ? resolveText(item.description) : undefined,
+    })),
+  }))
 })
 
 // Breadcrumbs
@@ -726,8 +685,8 @@ const breadcrumbs = computed((): BreadcrumbItem[] => {
   // Special case: personal settings page accessed by admin
   if (route.path === '/dashboard/settings') {
     return [
-      { label: '账户' },
-      { label: '个人设置' }
+      { label: resolveText(layoutText.breadcrumbs.account) },
+      { label: resolveText(layoutText.breadcrumbs.personalSettings) }
     ]
   }
 
@@ -737,8 +696,8 @@ const breadcrumbs = computed((): BreadcrumbItem[] => {
     const moduleStatus = moduleStore.modules[moduleName]
     const displayName = moduleStatus?.display_name || moduleName
     return [
-      { label: '系统' },
-      { label: '模块管理', href: '/admin/modules' },
+      { label: resolveText(layoutText.breadcrumbs.system) },
+      { label: resolveText(layoutText.breadcrumbs.moduleManagement), href: '/admin/modules' },
       { label: displayName }
     ]
   }
@@ -746,9 +705,9 @@ const breadcrumbs = computed((): BreadcrumbItem[] => {
   // Special case: built-in tools under module management
   if (BUILTIN_TOOL_BREADCRUMBS[route.path]) {
     return [
-      { label: '系统' },
-      { label: '模块管理', href: '/admin/modules' },
-      { label: BUILTIN_TOOL_BREADCRUMBS[route.path] }
+      { label: resolveText(layoutText.breadcrumbs.system) },
+      { label: resolveText(layoutText.breadcrumbs.moduleManagement), href: '/admin/modules' },
+      { label: resolveText(BUILTIN_TOOL_BREADCRUMBS[route.path]) }
     ]
   }
 
@@ -770,12 +729,12 @@ const breadcrumbs = computed((): BreadcrumbItem[] => {
   )
   if (currentModule) {
     return [
-      { label: '模块管理', href: '/admin/modules' },
+      { label: resolveText(layoutText.breadcrumbs.moduleManagement), href: '/admin/modules' },
       { label: currentModule.display_name }
     ]
   }
 
-  return [{ label: '仪表盘' }]
+  return [{ label: resolveText(layoutText.breadcrumbs.dashboard) }]
 })
 
 // Styling Classes (Editorial)

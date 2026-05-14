@@ -13,13 +13,13 @@
 
       <!-- Title -->
       <h2 class="text-xl font-semibold text-foreground mt-4 mb-2">
-        发现新版本
+        {{ resolveText(updateText.foundNewVersion) }}
       </h2>
 
       <!-- Version Info -->
       <div class="mx-auto mb-2 w-full max-w-sm rounded-lg bg-muted/20 px-4 py-3 text-center">
         <p class="text-xs text-muted-foreground">
-          最新版本
+          {{ resolveText(updateText.latestVersion) }}
         </p>
         <p class="mt-1 break-all font-mono text-base font-semibold text-primary">
           {{ formatDisplayVersion(latestVersion) }}
@@ -35,10 +35,10 @@
           v-if="publishedAt"
           class="text-left text-xs text-muted-foreground mb-2"
         >
-          发布于 {{ formattedPublishedAt }}
+          {{ publishedAtLabel }}
         </div>
         <div class="text-left text-xs font-medium text-muted-foreground mb-2">
-          更新内容
+          {{ resolveText(updateText.releaseNotes) }}
         </div>
         <!-- eslint-disable vue/no-v-html -->
         <div
@@ -53,7 +53,7 @@
         v-else
         class="text-sm text-muted-foreground max-w-xs mt-2 mb-4"
       >
-        新版本已发布，建议更新以获得最新功能和安全修复
+        {{ resolveText(updateText.defaultDescription) }}
       </p>
     </div>
 
@@ -64,13 +64,13 @@
           class="flex-1"
           @click="handleLater"
         >
-          稍后提醒
+          {{ resolveText(updateText.later) }}
         </Button>
         <Button
           class="flex-1"
           @click="handleViewRelease"
         >
-          查看更新
+          {{ resolveText(updateText.viewRelease) }}
         </Button>
       </div>
     </template>
@@ -85,6 +85,17 @@ import HeaderLogo from '@/components/HeaderLogo.vue'
 import { formatDisplayVersion } from '@/utils/version'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
+import { getCurrentLocale, i18nText, resolveText } from '@/i18n'
+
+const updateText = {
+  defaultDescription: i18nText('common.update.defaultDescription', '新版本已发布，建议更新以获得最新功能和安全修复'),
+  foundNewVersion: i18nText('common.update.foundNewVersion', '发现新版本'),
+  later: i18nText('common.actions.later', '稍后提醒'),
+  latestVersion: i18nText('common.update.latestVersion', '最新版本'),
+  publishedAt: i18nText('common.update.publishedAt', '发布于 {date}'),
+  releaseNotes: i18nText('common.update.releaseNotes', '更新内容'),
+  viewRelease: i18nText('common.actions.viewRelease', '查看更新'),
+}
 
 const props = defineProps<{
   modelValue: boolean
@@ -114,15 +125,19 @@ const formattedPublishedAt = computed(() => {
   if (!props.publishedAt) return ''
   try {
     const date = new Date(props.publishedAt)
-    return date.toLocaleDateString('zh-CN', {
+    return new Intl.DateTimeFormat(getCurrentLocale(), {
       year: 'numeric',
       month: 'long',
       day: 'numeric'
-    })
+    }).format(date)
   } catch {
     return props.publishedAt
   }
 })
+
+const publishedAtLabel = computed(() => resolveText(updateText.publishedAt, {
+  date: formattedPublishedAt.value,
+}))
 
 // 渲染 Markdown 格式的 Release Notes（使用 DOMPurify 防止 XSS）
 const renderedReleaseNotes = computed(() => {
