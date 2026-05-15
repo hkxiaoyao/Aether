@@ -61,6 +61,17 @@ docker compose -f docker-compose.sqlite.yml pull && docker compose -f docker-com
 curl -fsSL https://raw.githubusercontent.com/fawney19/Aether/main/install.sh | sudo bash
 ```
 
+## 本地开发
+
+依赖 Docker、Rust toolchain、Node.js 和 make。
+
+```bash
+make dev
+```
+
+`make dev` 会同时启动后端 `aether-gateway` 和前端 `frontend` 的 Vite dev server。需要单独启动时可使用 `make dev-backend` 或 `make dev-frontend`。
+Postgres / Redis 本地依赖未就绪时，`make dev` 会自动执行 `docker compose up -d postgres redis`。
+
 ## Aether Proxy (可选)
 
 Aether Proxy 是配套的正向代理节点，部署在海外 VPS 上，为墙内的 Aether 实例中转 API 流量。
