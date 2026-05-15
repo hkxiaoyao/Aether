@@ -304,6 +304,10 @@ pub(crate) fn admin_proxy_local_requires_buffered_body(
                 | (Some("billing_manage"), http::Method::PUT, Some("update_rule"))
                 | (Some("billing_manage"), http::Method::POST, Some("create_collector"))
                 | (Some("billing_manage"), http::Method::PUT, Some("update_collector"))
+                | (Some("billing_manage"), http::Method::POST, Some("create_plan"))
+                | (Some("billing_manage"), http::Method::PUT, Some("update_plan"))
+                | (Some("billing_manage"), http::Method::PATCH, Some("set_plan_status"))
+                | (Some("payments_manage"), http::Method::PUT, Some("update_epay_gateway"))
                 | (Some("payments_manage"), http::Method::POST, Some("credit_order"))
                 | (Some("payments_manage"), http::Method::POST, Some("create_redeem_code_batch"))
                 | (Some("payments_manage"), http::Method::POST, Some("delete_redeem_code_batch"))
@@ -333,6 +337,7 @@ pub(crate) fn admin_proxy_local_requires_buffered_body(
                 | (Some("users_manage"), http::Method::POST, Some("create_user"))
                 | (Some("users_manage"), http::Method::POST, Some("resolve_user_selection"))
                 | (Some("users_manage"), http::Method::POST, Some("batch_action_users"))
+                | (Some("users_manage"), http::Method::POST, Some("grant_user_billing_plan"))
                 | (Some("users_manage"), http::Method::PUT, Some("update_user"))
                 | (Some("users_manage"), http::Method::POST, Some("create_user_group"))
                 | (Some("users_manage"), http::Method::PUT, Some("update_user_group"))
@@ -468,11 +473,12 @@ pub(crate) fn public_support_local_requires_buffered_body(
                     Some("wallet"),
                     http::Method::POST,
                     Some("create_refund" | "create_recharge_order" | "redeem"),
-                ) | (
-                    Some("payment_callback"),
-                    http::Method::POST,
-                    Some("callback"),
-                )
+                ) | (Some("billing"), http::Method::POST, Some("plan_checkout"),)
+                    | (
+                        Some("payment_callback"),
+                        http::Method::POST,
+                        Some("callback" | "epay_notify" | "epay_return"),
+                    )
             )
         })
 }

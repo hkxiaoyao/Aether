@@ -724,6 +724,30 @@ pub(super) fn classify_admin_operations_family_route(
             false,
         ))
     } else if method == http::Method::GET
+        && normalized_path_no_trailing.starts_with("/api/admin/users/")
+        && normalized_path_no_trailing.ends_with("/billing/entitlements")
+        && normalized_path_no_trailing.matches('/').count() == 6
+    {
+        Some(classified(
+            "admin_proxy",
+            "users_manage",
+            "list_user_billing_entitlements",
+            "admin:users",
+            false,
+        ))
+    } else if method == http::Method::POST
+        && normalized_path_no_trailing.starts_with("/api/admin/users/")
+        && normalized_path_no_trailing.ends_with("/billing/grant-plan")
+        && normalized_path_no_trailing.matches('/').count() == 6
+    {
+        Some(classified(
+            "admin_proxy",
+            "users_manage",
+            "grant_user_billing_plan",
+            "admin:users",
+            false,
+        ))
+    } else if method == http::Method::GET
         && normalized_path.starts_with("/api/admin/users/")
         && normalized_path.ends_with("/sessions")
         && normalized_path.matches('/').count() == 5
