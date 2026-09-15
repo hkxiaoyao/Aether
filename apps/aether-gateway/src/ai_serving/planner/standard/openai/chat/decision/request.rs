@@ -101,6 +101,62 @@ fn is_grok_text_provider_api_format(provider_api_format: &str) -> bool {
     )
 }
 
+fn sanitize_orphaned_tool_calls(messages: &mut Vec<Value>) {
+    // Collect tool_call_ids from all assistant messages that have tool_calls.
+    let mut assistant_tool_call_ids = std::collections::HashSet::new();
+    for message in messages.iter() {
+        if message.get("role").and_then(Value::as_str) == Some("assistant") {
+            if let Some(tool_calls) = message.get("tool_calls").and_then(Value::as_array) {
+                for call in tool_calls {
+                    if let Some(id) = call.get("id").and_then(Value::as_str) {
+                        assistant_tool_call_ids.insert(id.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    // Remove tool role messages whose tool_call_id has no matching
+    // assistant tool_calls (orphaned tool responses).
+    messages.retain(|message| {
+        if message.get("role").and_then(Value::as_str) != Some("tool") {
+            return true;
+        }
+        message
+            .get("tool_call_id")
+            .and_then(Value::as_str)
+            .map(|id| assistant_tool_call_ids.contains(id))
+            .unwrap_or(true)
+    });
+
+    // Remove tool_calls from assistant messages where any tool_call_id
+    // lacks a corresponding tool role response.
+    let answered_ids: std::collections::HashSet<String> = messages
+        .iter()
+        .filter(|m| m.get("role").and_then(Value::as_str) == Some("tool"))
+        .filter_map(|m| m.get("tool_call_id").and_then(Value::as_str).map(String::from))
+        .collect();
+
+    for message in messages.iter_mut() {
+        if message.get("role").and_then(Value::as_str) != Some("assistant") {
+            continue;
+        }
+        if let Some(tool_calls) = message.get_mut("tool_calls").and_then(Value::as_array_mut) {
+            tool_calls.retain(|call| {
+                call.get("id")
+                    .and_then(Value::as_str)
+                    .map(|id| answered_ids.contains(id))
+                    .unwrap_or(false)
+            });
+            if tool_calls.is_empty() {
+                if let Some(obj) = message.as_object_mut() {
+                    obj.remove("tool_calls");
+                }
+            }
+        }
+    }
+}
+
 fn finalize_openai_chat_provider_request_body(
     provider_request_body: &mut Value,
     custom_directive_mapping: Option<&Value>,
@@ -111,6 +167,12 @@ fn finalize_openai_chat_provider_request_body(
     transport: &GatewayProviderTransportSnapshot,
     mapped_model: &str,
 ) -> Option<Value> {
+    if let Some(messages) = provider_request_body
+        .get_mut("messages")
+        .and_then(Value::as_array_mut)
+    {
+        sanitize_orphaned_tool_calls(messages);
+    }
     if let Some(mapping) = custom_directive_mapping {
         crate::ai_serving::apply_model_directive_mapping_patch(provider_request_body, mapping);
     }
@@ -2843,5 +2905,26 @@ mod tests {
         )
         .expect("chat image body should convert for a sync upstream");
         assert!(sync_provider_body.get("stream").is_none());
+    }
+}
+
+#[cfg(test)]
+mod sanitize_tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_orphaned_tool_calls_removes_unanswered_tool_calls() {
+        let mut messages = vec![
+            serde_json::json!({"role": "system", "content": "sys"}),
+            serde_json::json!({"role": "user", "content": "run cmd"}),
+            serde_json::json!({"role": "assistant", "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "bash", "arguments": "{}"}}]}),
+            serde_json::json!({"role": "tool", "tool_call_id": "call_1", "content": "output"}),
+            serde_json::json!({"role": "assistant", "tool_calls": [{"id": "call_2", "type": "function", "function": {"name": "edit", "arguments": "{}"}}]}),
+        ];
+
+        sanitize_orphaned_tool_calls(&mut messages);
+
+        let with_calls = messages.iter().filter(|m| m.get("tool_calls").is_some()).count();
+        assert_eq!(with_calls, 1);
     }
 }
